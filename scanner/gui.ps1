@@ -7,11 +7,11 @@ $script:worker = $null
 $script:stopping = $false
 $script:progressFile = $null
 $script:operation = ''
-$AppVersion = '1.2.1'
+$AppVersion = '1.3.0'
 
 $form = New-Object Windows.Forms.Form
-$form.Text = "Анализ фото и видео на дисках — версия $AppVersion"
-$form.Size = New-Object Drawing.Size(1090, 880)
+$form.Text = "Анализ фото и видео на дисках и флешках — версия $AppVersion"
+$form.Size = New-Object Drawing.Size(1090, 916)
 $form.MinimumSize = New-Object Drawing.Size(900, 600)
 $form.AutoScroll = $true
 $form.StartPosition = 'CenterScreen'
@@ -91,10 +91,24 @@ function Get-Jobs($folder) {
             if (Test-Path -LiteralPath $resultFile) { $state = Status-Text (Read-Json $resultFile).status }
             if ($job.policy.version -ne 2) { $state += ' · старые правила, нужен добор' }
             [void]$found.Add([pscustomobject]@{Path=$dir.FullName; DiskId=[string]$job.disk_id; Serial=[string]$job.record.hardware_serial
-                Bytes=[int64]$job.record.physical_bytes; VolumeSerial=[string]$job.record.volume_serial; State=$state})
+                Bytes=[int64]$job.record.physical_bytes; VolumeSerial=[string]$job.record.volume_serial; VolumeBytes=[int64]$job.record.volume_bytes
+                Flash=([string]$job.record.identify_by -eq 'volume'); State=$state})
         } catch { }
     }
     return ,$found
+}
+# A disk is recognised by device serial and size plus volume serial; a flash drive
+# or memory card only by volume serial and size (a card reader has one serial for all cards).
+function Prior-Jobs($jobs, $serial, $bytes, $volumeSerial, $volumeBytes) {
+    return @($jobs | Where-Object {
+        if ($_.Flash) { $_.VolumeSerial -eq $volumeSerial -and $_.VolumeBytes -eq $volumeBytes }
+        else { $serial -and $_.Serial -eq $serial -and $_.Bytes -eq $bytes -and $_.VolumeSerial -eq $volumeSerial }
+    })
+}
+function Next-FlashId($jobs) {
+    $max = 0
+    foreach ($j in $jobs) { if ($j.DiskId -match '^Flash([0-9]{2,})$' -and [int]$matches[1] -gt $max) { $max = [int]$matches[1] } }
+    return ('Flash{0:00}' -f ($max + 1))
 }
 
 # 1. Disk selection
@@ -111,41 +125,65 @@ function Refresh-Disks {
         $list.Items.Clear()
         $jobs = Get-Jobs $output.Text
         $physical = @(Get-PhysicalDisk -ErrorAction SilentlyContinue)
-        $serials = @{}
-        foreach ($l in @(Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue)) { if ($l.DeviceID) { $serials[$l.DeviceID.Substring(0,1)] = [string]$l.VolumeSerialNumber } }
-        foreach ($p in @(Get-Partition | Where-Object DriveLetter)) {
+        # Volumes from Win32_LogicalDisk: this also lists memory cards without a partition table.
+        $volumes = @{}
+        foreach ($l in @(Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue)) {
+            if ($l.DeviceID -and $l.Size -and [int]$l.DriveType -in @(2,3)) { $volumes[$l.DeviceID.Substring(0,1)] = $l }
+        }
+        $partitions = @{}
+        foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue | Where-Object DriveLetter)) { $partitions[[string]$p.DriveLetter] = $p }
+        foreach ($letter in @($volumes.Keys | Sort-Object)) {
             try {
-                $d = Get-Disk -Number $p.DiskNumber
-                $v = Get-Volume -DriveLetter $p.DriveLetter
-                $letter = [string]$p.DriveLetter
-                $serial = ([string]$d.SerialNumber).Trim()
-                $type = 'Не определён'
-                $match = @($physical | Where-Object { ([string]$_.SerialNumber).Trim() -eq $serial -and $_.Size -eq $d.Size })
-                if ($match.Count -eq 1 -and [string]$match[0].MediaType -in @('HDD','SSD')) { $type = [string]$match[0].MediaType }
-                $prior = @($jobs | Where-Object { $_.Serial -eq $serial -and $_.Bytes -eq [int64]$d.Size -and $_.VolumeSerial -eq $serials[$letter] })
+                $l = $volumes[$letter]
+                $volumeSerial = [string]$l.VolumeSerialNumber
+                $model = '—'; $serial = ''; $bytes = [int64]0; $bus = ''; $system = $false
+                $type = $(if ([int]$l.DriveType -eq 2) { 'Съёмный' } else { 'Не определён' })
+                if ($partitions.ContainsKey($letter)) {
+                    $d = Get-Disk -Number $partitions[$letter].DiskNumber
+                    $model = [string]$d.FriendlyName; $serial = ([string]$d.SerialNumber).Trim(); $bytes = [int64]$d.Size
+                    $bus = [string]$d.BusType; $system = ($d.IsBoot -or $d.IsSystem)
+                    $match = @($physical | Where-Object { ([string]$_.SerialNumber).Trim() -eq $serial -and $_.Size -eq $d.Size })
+                    if ($match.Count -eq 1 -and [string]$match[0].MediaType -in @('HDD','SSD')) { $type = [string]$match[0].MediaType }
+                }
+                $prior = Prior-Jobs $jobs $serial $bytes $volumeSerial ([int64]$l.Size)
                 $seen = '—'
                 if ($prior.Count -gt 0) { $seen = ($prior | ForEach-Object { "$($_.DiskId): $($_.State)" }) -join '; ' }
-                $item = New-Object Windows.Forms.ListViewItem("${letter}:  $($v.FileSystemLabel)")
-                foreach ($value in @([string]$d.FriendlyName, ('{0:N0} ГБ' -f ($v.Size/1e9)), ('{0:N0} ГБ' -f ($v.SizeRemaining/1e9)), $type, [string]$d.BusType, $seen)) { [void]$item.SubItems.Add($value) }
-                $item.Tag = [pscustomobject]@{Letter=$letter; Serial=$serial; System=($d.IsBoot -or $d.IsSystem); Prior=$prior}
+                $item = New-Object Windows.Forms.ListViewItem("${letter}:  $($l.VolumeName)")
+                foreach ($value in @($model, ('{0:N0} ГБ' -f ($l.Size/1e9)), ('{0:N0} ГБ' -f ($l.FreeSpace/1e9)), $type, $bus, $seen)) { [void]$item.SubItems.Add($value) }
+                $item.Tag = [pscustomobject]@{Letter=$letter; Serial=$serial; VolumeSerial=$volumeSerial; Removable=([int]$l.DriveType -eq 2); System=$system; Prior=$prior}
                 if ($item.Tag.System) { $item.Text += ' [системный]'; $item.ForeColor = [Drawing.Color]::Gray }
                 elseif ($prior.Count -gt 0) { $item.ForeColor = [Drawing.Color]::DarkGreen }
                 [void]$list.Items.Add($item)
             } catch { }
         }
+        if ($flash.Checked -and $id.Text -notmatch '^Flash[0-9]{2,}$') { $id.Text = Next-FlashId $jobs }
     } catch { Failure $_.Exception.Message }
     finally { $form.UseWaitCursor = $false }
 }
 $refresh = Add-Button $g1 'Обновить список дисков' 12 204 230 { Refresh-Disks }
-$null = Add-Label $g1 'Диск узнаётся по серийному номеру, а не по букве. Зелёным — диски, уже сканированные в выбранной папке.' 255 212 775
+$null = Add-Label $g1 'Носитель узнаётся по серийным номерам, а не по букве. Зелёным — уже сканированные в выбранной папке.' 255 212 775
 
 # 2. Parameters
-$g2 = Add-Group '2. Параметры' 12 262 1045 100
-$null = Add-Label $g2 'Номер диска в общем реестре:' 12 30 240
-$id = New-Object Windows.Forms.TextBox; $id.SetBounds(255,27,110,28); $id.Text='HDD03'; $id.Font=$form.Font; $g2.Controls.Add($id)
-$null = Add-Label $g2 'HDD01 и HDD02 заняты. Один номер — только одному физическому диску.' 380 30 650
-$null = Add-Label $g2 'Папка результатов:' 12 64 240
-$output = New-Object Windows.Forms.TextBox; $output.SetBounds(255,61,620,28); $output.Font=$form.Font
+$g2 = Add-Group '2. Параметры' 12 262 1045 136
+$null = Add-Label $g2 'Вид носителя:' 12 30 240
+$diskKind = New-Object Windows.Forms.RadioButton; $diskKind.Text = 'Диск HDD или SSD (номера HDD…)'; $diskKind.SetBounds(255,28,330,26); $diskKind.Font = $form.Font; $diskKind.Checked = $true; $g2.Controls.Add($diskKind)
+$flash = New-Object Windows.Forms.RadioButton; $flash.Text = 'Флешка или карта памяти (номера Flash…)'; $flash.SetBounds(595,28,430,26); $flash.Font = $form.Font; $g2.Controls.Add($flash)
+$null = Add-Label $g2 'Номер в общем реестре:' 12 64 240
+$id = New-Object Windows.Forms.TextBox; $id.SetBounds(255,61,110,28); $id.Text='HDD03'; $id.Font=$form.Font; $g2.Controls.Add($id)
+$idHint = Add-Label $g2 'HDD01 и HDD02 заняты. Один номер — только одному физическому диску.' 380 64 650
+$script:lastDiskId = 'HDD03'
+$flash.Add_CheckedChanged({
+    if ($flash.Checked) {
+        if ($id.Text -match '^HDD') { $script:lastDiskId = $id.Text }
+        $id.Text = Next-FlashId (Get-Jobs $output.Text)
+        $idHint.Text = 'Предложен следующий свободный номер. Подпишите флешку или карту этим номером.'
+    } else {
+        $id.Text = $script:lastDiskId
+        $idHint.Text = 'HDD01 и HDD02 заняты. Один номер — только одному физическому диску.'
+    }
+})
+$null = Add-Label $g2 'Папка результатов:' 12 98 240
+$output = New-Object Windows.Forms.TextBox; $output.SetBounds(255,95,620,28); $output.Font=$form.Font
 # The chosen results folder is remembered on this computer.
 $settingsFile = Join-Path $env:LOCALAPPDATA 'HDDScanner\settings.json'
 $output.Text = Join-Path $env:LOCALAPPDATA 'HDDScanner\results'
@@ -155,10 +193,10 @@ function Save-Settings {
     if ($IntegrationTest -or $SmokeTest) { return }
     try { [void][IO.Directory]::CreateDirectory((Split-Path $settingsFile)); [IO.File]::WriteAllText($settingsFile, ([pscustomobject]@{output=$output.Text} | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) } catch { }
 }
-$browse = Add-Button $g2 'Выбрать папку…' 885 57 147 { $p=Folder 'Папка результатов на внутреннем диске'; if ($p) { $output.Text=$p; Save-Settings; Refresh-Disks } }
+$browse = Add-Button $g2 'Выбрать папку…' 885 91 147 { $p=Folder 'Папка результатов на внутреннем диске'; if ($p) { $output.Text=$p; Save-Settings; Refresh-Disks } }
 
 # 3. Actions
-$g3 = Add-Group '3. Действия' 12 368 1045 104
+$g3 = Add-Group '3. Действия' 12 404 1045 104
 function Busy { return ($script:worker -and -not $script:worker.HasExited) }
 function Read-LiveLog($path) {
     if (-not $path -or -not (Test-Path -LiteralPath $path)) { return '' }
@@ -217,11 +255,18 @@ $start = Add-Button $g3 'Начать сканирование' 12 24 250 {
             if ($answer -ne 'No') { return }
             if ($id.Text -ne $p.DiskId) { $id.Text = $p.DiskId; throw "Этому диску уже назначен номер $($p.DiskId). Номер подставлен в поле; нажмите «Начать сканирование» ещё раз." }
         }
-        if ($id.Text -notmatch '^HDD[0-9]{2,}$' -or [int]$id.Text.Substring(3) -lt 3) { throw 'Укажите назначенный номер, например HDD03. HDD01 и HDD02 уже заняты.' }
+        if ($flash.Checked) {
+            if ($id.Text -notmatch '^Flash[0-9]{2,}$' -or [int]$id.Text.Substring(5) -lt 1) { throw 'Укажите номер флешки или карты, например Flash01.' }
+            if (-not $disk.VolumeSerial -or $disk.VolumeSerial -eq '00000000') { throw 'У тома нет серийного номера — такой носитель нельзя надёжно узнать при следующем подключении.' }
+        } else {
+            if ($id.Text -notmatch '^HDD[0-9]{2,}$' -or [int]$id.Text.Substring(3) -lt 3) { throw 'Укажите назначенный номер, например HDD03. HDD01 и HDD02 уже заняты. Для флешки или карты выберите «Флешка или карта памяти».' }
+            if (-not $disk.Serial) { throw 'Windows не сообщает серийный номер этого устройства. Если это флешка или карта памяти, выберите вид носителя «Флешка или карта памяти».' }
+        }
         $known = Get-Jobs $output.Text
-        $taken = @($known | Where-Object { $_.DiskId -eq $id.Text -and $_.Serial -ne $disk.Serial })
-        if ($taken.Count -gt 0) { throw "Номер $($id.Text) уже назначен другому диску (папка $($taken[0].Path)). Выберите другой номер." }
-        $message = "Диск: $($selected.Text)`nМодель: $($selected.SubItems[1].Text)`nСерийный номер: $($disk.Serial)`nНомер архива: $($id.Text)`nРезультаты: $($output.Text)`n`nБудут прочитаны метаданные и рассчитаны SHA-256: фото JPEG/HEIC от 50 КБ, прочие изображения и RAW от 150 КБ, видео любого размера. Файлы на диске не изменяются. Начать?"
+        $taken = @($known | Where-Object { $_.DiskId -eq $id.Text -and @(Prior-Jobs @($_) $disk.Serial $_.Bytes $disk.VolumeSerial $_.VolumeBytes).Count -eq 0 })
+        if ($taken.Count -gt 0) { throw "Номер $($id.Text) уже назначен другому носителю (папка $($taken[0].Path)). Выберите другой номер." }
+        $kindText = $(if ($flash.Checked) { "Флешка или карта памяти`nСерийный номер тома: $($disk.VolumeSerial)" } else { "Диск HDD/SSD`nСерийный номер: $($disk.Serial)" })
+        $message = "Носитель: $($selected.Text)`nМодель: $($selected.SubItems[1].Text)`nВид: $kindText`nНомер архива: $($id.Text)`nРезультаты: $($output.Text)`n`nБудут прочитаны метаданные и рассчитаны SHA-256: фото JPEG/HEIC от 50 КБ, прочие изображения и RAW от 150 КБ, видео любого размера. Файлы на носителе не изменяются. Начать?"
         if ([Windows.Forms.MessageBox]::Show($message,'Проверьте выбранный диск','YesNo','Question') -eq 'Yes') {
             Save-Settings
             Launch @('start','--disk',$id.Text,'--letter',$disk.Letter,'--output',$output.Text,'--yes') ('start_'+$id.Text)
@@ -265,7 +310,7 @@ $register = Add-Button $g3 'Открыть реестр дисков' 792 62 240
 }
 
 # 4. Progress
-$g4 = Add-Group 'Ход работы' 12 478 1045 182
+$g4 = Add-Group 'Ход работы' 12 514 1045 182
 $phase = Add-Label $g4 'Ожидание запуска' 12 26 1020 30 $big
 $bar = New-Object Windows.Forms.ProgressBar; $bar.SetBounds(12,62,880,30); $bar.Minimum=0; $bar.Maximum=1000; $g4.Controls.Add($bar)
 $percent = Add-Label $g4 '' 902 62 130 30 $big
@@ -308,8 +353,8 @@ function Show-Progress {
     $identity.Text = $parts -join ' · '
 }
 
-$status = New-Object Windows.Forms.Label; $status.SetBounds(12,666,1045,40); $status.Text='Готово к работе. Выберите диск и папку результатов.'; $form.Controls.Add($status)
-$log = New-Object Windows.Forms.TextBox; $log.SetBounds(12,708,1045,120); $log.Multiline=$true; $log.ScrollBars='Vertical'; $log.ReadOnly=$true; $log.Font=New-Object Drawing.Font('Consolas',9); $log.Anchor='Top,Bottom,Left,Right'; $form.Controls.Add($log)
+$status = New-Object Windows.Forms.Label; $status.SetBounds(12,702,1045,40); $status.Text='Готово к работе. Выберите диск и папку результатов.'; $form.Controls.Add($status)
+$log = New-Object Windows.Forms.TextBox; $log.SetBounds(12,744,1045,120); $log.Multiline=$true; $log.ScrollBars='Vertical'; $log.ReadOnly=$true; $log.Font=New-Object Drawing.Font('Consolas',9); $log.Anchor='Top,Bottom,Left,Right'; $form.Controls.Add($log)
 $timer = New-Object Windows.Forms.Timer; $timer.Interval=1000
 function Update-Worker {
     try {

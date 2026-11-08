@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import string
 import uuid
 
 from inventory import inventory, volume, discover_disk, MEDIA, MIN_BYTES, EXCLUDED_DIRS
@@ -23,7 +24,7 @@ from hash_files import hash_one, signature
 # VERSION is the job format/algorithm. It is unchanged, so jobs started by
 # 1.0.x continue with this program. APP_VERSION is the program release.
 VERSION = '1.0.0'
-APP_VERSION = '1.2.1'
+APP_VERSION = '1.3.0'
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
@@ -54,6 +55,28 @@ def policy_version(policy):
     if policy == POLICY_V1:
         return 1
     return None
+# Two kinds of media, each with its own numbering: disks HDD03…, and USB flash
+# drives and memory cards Flash01…. A flash medium is identified by its volume
+# (serial and size): a card reader reports its own serial for every card.
+ID_PATTERN = r'(?:HDD|Flash)[0-9]{2,}'
+KIND_TITLES = {'disk': 'Диски HDD и SSD', 'flash': 'Флешки и карты памяти'}
+
+def media_kind(disk_id):
+    return 'flash' if str(disk_id).startswith('Flash') else 'disk'
+
+def id_number(disk_id):
+    digits = re.sub('^(HDD|Flash)', '', str(disk_id))
+    return int(digits) if digits.isdigit() else 0
+
+def check_disk_id(disk_id):
+    if not re.fullmatch(ID_PATTERN, disk_id):
+        raise ValueError('Номер носителя — HDD03, HDD04… для дисков или Flash01, Flash02… для флешек и карт')
+    if media_kind(disk_id) == 'disk' and id_number(disk_id) < 3:
+        raise ValueError('HDD01 и HDD02 уже заняты; назначьте HDD03 или больше')
+    if media_kind(disk_id) == 'flash' and id_number(disk_id) < 1:
+        raise ValueError('Номера флешек начинаются с Flash01')
+    return disk_id
+
 REQUIRED_EXPORTS = ['job.json', 'result.json', 'inventory_summary.json', 'inventory.sqlite', 'hashes.sqlite']
 OPTIONAL_EXPORTS = ['runs.jsonl', 'log.txt']  # absent in exports made by 1.0.x
 
@@ -146,22 +169,59 @@ def check_letter(letter):
         raise ValueError('Expected one drive letter')
     return letter
 
-def inspect(letter):
+def inspect(letter, kind='disk'):
     letter = check_letter(letter)
     command = ("$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; "
                f"$p=Get-Partition -DriveLetter '{letter}'; $d=Get-Disk -Number $p.DiskNumber; "
                "[pscustomobject]@{hardware_serial=([string]$d.SerialNumber).Trim(); "
                "physical_bytes=$d.Size; model=[string]$d.FriendlyName} | ConvertTo-Json -Compress")
-    result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
-                            check=True, capture_output=True, encoding='utf-8-sig')
-    record = json.loads(result.stdout)
+    try:
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
+                                check=True, capture_output=True, encoding='utf-8-sig')
+        record = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        if kind != 'flash':
+            raise
+        # A memory card without a partition table: its volume is enough.
+        record = {'hardware_serial': '', 'physical_bytes': None, 'model': ''}
     root = letter + ':\\'
     serial, label, filesystem = volume(root)
     record.update(volume_serial=serial, volume_bytes=shutil.disk_usage(root).total,
                   label_at_registration=label, filesystem=filesystem)
-    if not record['hardware_serial']:
+    if kind == 'flash':
+        if serial == '00000000':
+            raise RuntimeError('The volume has no serial number: manual identification required')
+        record['identify_by'] = 'volume'
+    elif not record['hardware_serial']:
         raise RuntimeError('No hardware serial: manual identification required')
     return record
+
+def discover_volume(record):
+    """Finds a flash volume under any letter by its volume serial and size."""
+    kernel = ctypes.windll.kernel32
+    mask = kernel.GetLogicalDrives()
+    previous = kernel.SetErrorMode(1)  # no "insert a disk" dialogs for empty card readers
+    matches = []
+    try:
+        for index, letter in enumerate(string.ascii_uppercase):
+            if not mask & (1 << index):
+                continue
+            root = letter + ':\\'
+            try:
+                if volume(root)[0] == record['volume_serial'] and shutil.disk_usage(root).total == record['volume_bytes']:
+                    matches.append(root)
+            except OSError:
+                continue
+    finally:
+        kernel.SetErrorMode(previous)
+    if len(matches) != 1:
+        raise RuntimeError('Registered flash volume absent, or several volumes have the same serial and size. No scan started.')
+    return matches[0], {'letter': matches[0][0], 'volume_serial': record['volume_serial'], 'bytes': record.get('physical_bytes')}
+
+def locate(record):
+    if record.get('identify_by') == 'volume':
+        return discover_volume(record)
+    return discover_disk(record)
 
 # Read-only description of the device. GPT partition/disk GUIDs and the MBR
 # signature are written on the disk itself, so they survive a new drive letter,
@@ -204,6 +264,8 @@ def identity_text(disk_id, info):
     def gb(value):
         return f'{value / 1e9:,.1f} ГБ'.replace(',', ' ') if isinstance(value, (int, float)) else '?'
     kind = info.get('media_type') if info.get('media_type') in ('HDD', 'SSD', 'SCM') else 'тип HDD/SSD не сообщён'
+    if media_kind(disk_id) == 'flash':
+        kind = 'флешка или карта памяти'
     signature_mbr = info.get('mbr_signature')
     signature_mbr = f'{signature_mbr:08X}' if isinstance(signature_mbr, int) and signature_mbr else '—'
     lines = [
@@ -220,9 +282,9 @@ def identity_text(disk_id, info):
     return lines
 
 # Uniform results layout, the same on every computer:
-#   <results root>/<HDDxx - model - capacity - label>/<job_id>/
+#   <results root>/<HDDxx|Flashxx - model - capacity - label>/<job_id>/
 #   <results root>/Реестр дисков.md and .csv, rebuilt after each scan/import.
-JOB_ID = re.compile(r'HDD[0-9]{2,}_[0-9a-f]{32}')
+JOB_ID = re.compile(ID_PATTERN + r'_[0-9a-f]{32}')
 INDEX_NAME = 'Реестр дисков'
 
 def capacity(size):
@@ -233,7 +295,7 @@ def capacity(size):
     return f'{round(size / 1e9)} ГБ'
 
 def disk_folder_name(disk_id, record):
-    parts = [disk_id, (record.get('model') or 'модель неизвестна').strip(), capacity(record.get('physical_bytes'))]
+    parts = [disk_id, (record.get('model') or 'модель неизвестна').strip(), capacity(record.get('physical_bytes') or record.get('volume_bytes'))]
     if (record.get('label_at_registration') or '').strip():
         parts.append(record['label_at_registration'].strip())
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', ' - '.join(parts)).strip(' .')
@@ -293,7 +355,8 @@ def job_row(job, root):
     if not marker and isinstance(identity.get('mbr_signature'), int) and identity['mbr_signature']:
         marker = f'MBR {identity["mbr_signature"]:08X}'
     return {
-        'Номер': manifest.get('disk_id', '?'), 'Модель': record.get('model', ''), 'Ёмкость': capacity(record.get('physical_bytes')),
+        'Номер': manifest.get('disk_id', '?'),
+        'Вид носителя': KIND_TITLES[media_kind(manifest.get('disk_id', ''))], 'Модель': record.get('model', ''), 'Ёмкость': capacity(record.get('physical_bytes') or record.get('volume_bytes')),
         'Метка тома': record.get('label_at_registration', ''), 'Серийный номер устройства': record.get('hardware_serial', ''),
         'Серийный номер тома': record.get('volume_serial', ''), 'Метка на диске (GUID/MBR)': marker or '',
         'Тип': identity.get('media_type') if identity.get('media_type') in ('HDD', 'SSD') else '',
@@ -312,14 +375,15 @@ def job_row(job, root):
 def write_index(root):
     import csv
     rows = [job_row(job, root) for job in find_jobs(root)]
-    rows.sort(key=lambda r: (int(r['Номер'][3:]) if r['Номер'][3:].isdigit() else 0, r['Дата']))
+    rows.sort(key=lambda r: (media_kind(r['Номер']) == 'flash', id_number(r['Номер']), r['Дата']))
     warnings = []
     by_id, by_serial = {}, {}
     for r in rows:
         by_id.setdefault(r['Номер'], set()).add((r['Серийный номер устройства'], r['Серийный номер тома']))
         by_serial.setdefault((r['Серийный номер устройства'], r['Серийный номер тома']), set()).add(r['Номер'])
-    warnings += [f'Номер {k} назначен разным дискам — нужно разобраться вручную.' for k, v in by_id.items() if len(v) > 1]
-    warnings += [f'Один диск (серийный номер {k[0]}) записан под номерами {", ".join(sorted(v))}.' for k, v in by_serial.items() if len(v) > 1]
+    warnings += [f'Номер {k} назначен разным носителям — нужно разобраться вручную.' for k, v in by_id.items() if len(v) > 1]
+    warnings += [f'Один носитель (серийный номер {k[0] or "—"}, том {k[1]}) записан под номерами {", ".join(sorted(v))}.'
+                 for k, v in by_serial.items() if len(v) > 1]
     unread_disks = [f'{r["Номер"]} ({r["Не прочитано"]})' for r in rows if r['Не прочитано']]
     if unread_disks:
         warnings.append('Есть непрочитанные файлы (в скобках — сколько): ' + ', '.join(unread_disks) +
@@ -342,15 +406,21 @@ def write_index(root):
     lines = [f'# {INDEX_NAME}', '', f'Создан автоматически {datetime.now():%d.%m.%Y %H:%M}. Не редактировать вручную: '
              'файл пересоздаётся после каждого сканирования и импорта. Полные сведения, включая серийные номера, — в '
              f'«{INDEX_NAME}.csv» (открывается в Excel).', '',
-             f'Заданий: {len(rows)} · дисков: {len(by_id)} · фото/видео с хешем: '
+             f'Заданий: {len(rows)} · дисков: {len({r["Номер"] for r in rows if media_kind(r["Номер"]) == "disk"})} · '
+             f'флешек и карт: {len({r["Номер"] for r in rows if media_kind(r["Номер"]) == "flash"})} · фото/видео с хешем: '
              + f'{sum(r["Фото/видео с хешем"] or 0 for r in rows):,}'.replace(',', ' ') + ' файлов, '
              + f'{sum(r["Их объём, ГБ"] or 0 for r in rows):,.1f}'.replace(',', ' ') + ' ГБ', '']
     if warnings:
         lines += ['## Требует внимания', '', *[f'- {w}' for w in warnings], '']
-    lines += ['| ' + ' | '.join(short) + ' |', '|' + '---|' * len(short)]
-    for r in rows:
-        values = {**r, 'Состояние': status_text.get(r['Состояние'], r['Состояние']), 'Папка': r['Папка'].replace('\\', '/')}
-        lines.append('| ' + ' | '.join(str(values[c]).replace('|', '/') for c in short) + ' |')
+    for kind, title in KIND_TITLES.items():
+        group = [r for r in rows if media_kind(r['Номер']) == kind]
+        if not group:
+            continue
+        lines += [f'## {title}', '', '| ' + ' | '.join(short) + ' |', '|' + '---|' * len(short)]
+        for r in group:
+            values = {**r, 'Состояние': status_text.get(r['Состояние'], r['Состояние']), 'Папка': r['Папка'].replace('\\', '/')}
+            lines.append('| ' + ' | '.join(str(values[c]).replace('|', '/') for c in short) + ' |')
+        lines.append('')
     temporary = root / (INDEX_NAME + '.md.tmp')
     temporary.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     temporary.replace(root / (INDEX_NAME + '.md'))
@@ -383,7 +453,7 @@ def process(job):
     base_state = {'job': str(job), 'disk_id': disk_id, 'model': record.get('model', ''),
                   'hardware_serial': record.get('hardware_serial', ''), 'volume_serial': record.get('volume_serial', '')}
     publish({**base_state, 'phase': 'identify', 'phase_title': 'Проверка диска'})
-    root, physical = discover_disk(record)
+    root, physical = locate(record)
     require_separate_output(job, root)
     def check():
         if STOP_FILE and STOP_FILE.exists():
@@ -651,7 +721,7 @@ def import_result(folder, destination, refresh=True):
         if checksum(folder / name) != digest:
             raise ValueError('Transfer checksum mismatch: ' + name)
     manifest = json.loads((folder / 'job.json').read_text(encoding='utf-8'))
-    if not re.fullmatch('HDD[0-9]{2,}', manifest['disk_id']):
+    if not re.fullmatch(ID_PATTERN, manifest['disk_id']):
         raise ValueError('Invalid disk ID')
     job_id = str(manifest.get('job_id', ''))
     if not JOB_ID.fullmatch(job_id) or not job_id.startswith(manifest['disk_id'] + '_'):
@@ -705,7 +775,7 @@ def main():
         def ask(prompt):
             return input(prompt).strip().strip('"')
         if choice == '1':
-            values = ['start', '--disk', ask('Central disk ID (HDD03 etc): '), '--letter', ask('Source drive letter: ')]
+            values = ['start', '--disk', ask('Central disk ID (HDD03… or Flash01…): '), '--letter', ask('Source drive letter: ')]
         elif choice == '2':
             values = ['resume', ask('Local JOB folder path: ')]
         elif choice == '3':
@@ -719,9 +789,11 @@ def main():
         args = parser.parse_args()
     STOP_FILE, PROGRESS_FILE = args.stop_file, args.progress_file
     if args.command == 'start':
-        if not re.fullmatch('HDD[0-9]{2,}', args.disk) or int(args.disk[3:]) < 3:
-            parser.error('Assign a new central disk ID, HDD03 or higher; HDD01/02 already exist')
-        record = inspect(args.letter)
+        try:
+            check_disk_id(args.disk)
+        except ValueError as exc:
+            parser.error(str(exc))
+        record = inspect(args.letter, media_kind(args.disk))
         output = args.output.resolve()
         if output.drive.upper() == args.letter.rstrip(':\\').upper() + ':':
             parser.error('Output must not be on source volume')

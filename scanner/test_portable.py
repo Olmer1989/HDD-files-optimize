@@ -269,6 +269,51 @@ class PortableTests(unittest.TestCase):
             self.assertEqual(portable.results_root(root / 'HDD07 - старое имя' / ('HDD07_' + 'c' * 32)), root)
             self.assertEqual(portable.results_root(root / ('HDD07_' + 'c' * 32)), root)
 
+    def test_flash_ids(self):
+        for good in ['HDD03', 'HDD14', 'Flash01', 'Flash123']:
+            self.assertEqual(portable.check_disk_id(good), good)
+        for bad in ['HDD01', 'HDD02', 'Flash00', 'flash01', 'FLASH01', 'SD01', 'Flash1', 'HDD3']:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                portable.check_disk_id(bad)
+        self.assertEqual([portable.media_kind(x) for x in ('HDD05', 'Flash02')], ['disk', 'flash'])
+        self.assertTrue(portable.JOB_ID.fullmatch('Flash01_' + 'a' * 32))
+        # A card in a reader may report no device size: the folder uses the volume size.
+        self.assertEqual(portable.disk_folder_name('Flash01', {'model': '', 'physical_bytes': None, 'volume_bytes': 32 * 10**9,
+                         'label_at_registration': 'CANON'}), 'Flash01 - модель неизвестна - 32 ГБ - CANON')
+
+    def test_flash_found_by_volume_not_device_serial(self):
+        record = {'identify_by': 'volume', 'volume_serial': 'C0FFEE01', 'volume_bytes': 1000, 'hardware_serial': ''}
+        def fake_volume(root):
+            return {'E:\\': 'C0FFEE01', 'F:\\': '12345678'}.get(root, '00000000'), '', 'FAT32'
+        with patch.object(portable, 'volume', side_effect=fake_volume), \
+             patch.object(portable.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(1000, 0, 1000)), \
+             patch.object(portable.ctypes.windll.kernel32, 'GetLogicalDrives', return_value=(1 << 4) | (1 << 5)), \
+             patch.object(portable, 'discover_disk', side_effect=AssertionError('device serial must not be used')):
+            self.assertEqual(portable.locate(record)[0], 'E:\\')
+            with self.assertRaisesRegex(RuntimeError, 'absent'):
+                portable.locate({**record, 'volume_serial': 'DEADBEEF'})
+        with patch.object(portable, 'discover_disk', return_value=('H:\\', {})):
+            self.assertEqual(portable.locate({'hardware_serial': 'S'})[0], 'H:\\')
+
+    def test_register_has_separate_flash_section_and_import_accepts_flash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); root = base / 'card'; root.mkdir()
+            (root / 'a.jpg').write_bytes(b'a' * 60_000)
+            results = base / 'results'
+            for disk_id in ('Flash02', 'HDD05', 'Flash01'):
+                job = self.make_job(results, disk_id, root, ['a.jpg'], portable.POLICY_V2, hashed=['a.jpg'])
+                portable.write_json(job / 'result.json', {'status': 'complete', 'selected_files': 1, 'selected_bytes': 60_000})
+            rows = portable.write_index(results)
+            self.assertEqual([r['Номер'] for r in rows], ['HDD05', 'Flash01', 'Flash02'])
+            text = (results / 'Реестр дисков.md').read_text(encoding='utf-8')
+            self.assertLess(text.index('## Диски HDD и SSD'), text.index('## Флешки и карты памяти'))
+            self.assertIn('флешек и карт: 2', text)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(portable.export_all(results, base / 'usb'), 0)
+                self.assertEqual(portable.import_any(base / 'usb', base / 'main'), 0)
+            self.assertEqual(sorted(p.name.split(' - ')[0] for p in (base / 'main').iterdir() if not p.name.startswith(('_', 'Реестр'))),
+                             ['Flash01', 'Flash02', 'HDD05'])
+
     def test_unfinished_export_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
