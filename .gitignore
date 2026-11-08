@@ -1,0 +1,21 @@
+# Private inventories, manifests, reports and local hardware identities
+/Каталог дисков/
+/Анализ/
+/scanner/disks.json
+/scanner/finalize_initial.py
+*.sqlite
+*.sqlite-*
+*.db
+*.xlsx
+/index_*.txt
+/py
+__pycache__/
+*.py[cod]
+.env
+.env.*
+*.env
+/Источники информации/qa/
+/dist/
+/git-acl-*.txt
+/git-acl-*.txt.owner.txt
+
