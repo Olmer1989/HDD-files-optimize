@@ -24,7 +24,7 @@ from hash_files import hash_one, signature
 # VERSION is the job format/algorithm. It is unchanged, so jobs started by
 # 1.0.x continue with this program. APP_VERSION is the program release.
 VERSION = '1.0.0'
-APP_VERSION = '1.3.0'
+APP_VERSION = '1.3.1'
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None

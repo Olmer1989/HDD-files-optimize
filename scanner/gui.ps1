@@ -7,7 +7,7 @@ $script:worker = $null
 $script:stopping = $false
 $script:progressFile = $null
 $script:operation = ''
-$AppVersion = '1.3.0'
+$AppVersion = '1.3.1'
 
 $form = New-Object Windows.Forms.Form
 $form.Text = "Анализ фото и видео на дисках и флешках — версия $AppVersion"
@@ -145,7 +145,8 @@ function Refresh-Disks {
                     $match = @($physical | Where-Object { ([string]$_.SerialNumber).Trim() -eq $serial -and $_.Size -eq $d.Size })
                     if ($match.Count -eq 1 -and [string]$match[0].MediaType -in @('HDD','SSD')) { $type = [string]$match[0].MediaType }
                 }
-                $prior = Prior-Jobs $jobs $serial $bytes $volumeSerial ([int64]$l.Size)
+                # @() is required: a single match comes back as one object, which has no Count in PowerShell 5.1.
+                $prior = @(Prior-Jobs $jobs $serial $bytes $volumeSerial ([int64]$l.Size))
                 $seen = '—'
                 if ($prior.Count -gt 0) { $seen = ($prior | ForEach-Object { "$($_.DiskId): $($_.State)" }) -join '; ' }
                 $item = New-Object Windows.Forms.ListViewItem("${letter}:  $($l.VolumeName)")
