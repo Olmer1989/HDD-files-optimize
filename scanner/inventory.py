@@ -68,7 +68,8 @@ def discover_disk(record):
         raise RuntimeError('Registered disk absent, ambiguous, or changed. No scan started. Check registry manually.')
     return matches[0]
 
-def inventory(root, db, check):
+def inventory(root, db, check, progress=None):
+    # progress(summary) is called after each directory; callers throttle it.
     summary = {'started_utc': utc(), 'source': root, 'status': 'running',
                'files': 0, 'bytes': 0, 'directories': 0,
                'excluded_directories': 0, 'excluded_secret_files': 0, 'reparse_skipped': 0,
@@ -132,6 +133,8 @@ def inventory(root, db, check):
                 error(directory, 'scandir', exc)
                 if directory == root:
                     raise
+            if progress:
+                progress(summary)
             if time.monotonic() - last > 10:
                 print(f"{root}: {summary['files']:,} files, {summary['bytes']/1e9:.1f} GB, {summary['errors']} errors", flush=True)
                 last = time.monotonic()

@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import urllib.request
 import zipfile
@@ -21,7 +22,10 @@ def main():
     actual = hashlib.sha256(archive.read_bytes()).hexdigest()
     if actual != SHA256:
         raise RuntimeError('Official Python archive checksum mismatch')
+    app_version = re.search(r"^APP_VERSION = '([0-9.]+)'", (BASE / 'scanner' / 'portable.py').read_text(encoding='utf-8'), re.M).group(1)
     folder = dist / 'HDDScanner-Windows-x64'
+    if folder.exists():
+        shutil.rmtree(folder)  # build output only; avoids stale files from older versions
     runtime = folder / 'runtime'
     runtime.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as package:
@@ -34,11 +38,15 @@ def main():
                  'test_portable.py', 'test_inventory.py', 'test_selection.py', 'test_hash_files.py']:
         shutil.copy2(BASE / 'scanner' / name, app / name)
     shutil.copy2(BASE / 'scanner' / 'PORTABLE.md', folder / 'READ_ME.md')
-    (folder / 'START.cmd').write_text('@echo off\r\n"%~dp0runtime\\python.exe" -X utf8 -B "%~dp0app\\portable.py" %*\r\necho.\r\npause\r\n', encoding='ascii')
+    (app / 'gui.ps1').write_text((BASE / 'scanner' / 'gui.ps1').read_text(encoding='utf-8-sig'), encoding='utf-8-sig')
+    (folder / 'START.cmd').write_text('@echo off\r\npowershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "%~dp0app\\gui.ps1"\r\nif errorlevel 1 pause\r\n', encoding='ascii')
+    (folder / 'CLI.cmd').write_text('@echo off\r\n"%~dp0runtime\\python.exe" -X utf8 -B "%~dp0app\\portable.py" %*\r\necho.\r\npause\r\n', encoding='ascii')
     (folder / 'SELF_TEST.cmd').write_text('@echo off\r\ncd /d "%~dp0app"\r\n"%~dp0runtime\\python.exe" -X utf8 -B -m unittest discover -v\r\npause\r\n', encoding='ascii')
+    (folder / 'GUI_TEST.cmd').write_text('@echo off\r\npowershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "%~dp0app\\gui.ps1" -IntegrationTest\r\npause\r\n', encoding='ascii')
     (folder / 'runtime_source.json').write_text(json.dumps({'url': URL, 'sha256': SHA256,
                     'source': f'https://www.python.org/downloads/release/python-{VERSION.replace(".", "")}/'}, indent=2), encoding='utf-8')
-    result = shutil.make_archive(str(dist / 'HDDScanner-Windows-x64'), 'zip', folder.parent, folder.name)
+    # One archive per release, named by version, to avoid two "different" copies.
+    result = shutil.make_archive(str(dist / f'HDDScanner-Windows-x64-{app_version}'), 'zip', folder.parent, folder.name)
     print(result)
 
 if __name__ == '__main__':

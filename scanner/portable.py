@@ -1,5 +1,6 @@
 """Offline Windows worker. Only reads archive disks; writes local results."""
 import argparse
+from collections import deque
 from contextlib import contextmanager, closing
 import ctypes
 from datetime import datetime, timezone
@@ -19,14 +20,71 @@ from inventory import inventory, volume, discover_disk, MEDIA, MIN_BYTES, EXCLUD
 from build_selection import select
 from hash_files import hash_one, signature
 
+# VERSION is the job format/algorithm. It is unchanged, so jobs started by
+# 1.0.x continue with this program. APP_VERSION is the program release.
 VERSION = '1.0.0'
+APP_VERSION = '1.1.0'
+STOP_FILE = None
+PROGRESS_FILE = None
+JOB_LOG = None
 POLICY = {'algorithm': 'sha256', 'min_bytes': MIN_BYTES,
           'media_extensions': sorted(MEDIA), 'excluded_dirs': sorted(EXCLUDED_DIRS)}
+REQUIRED_EXPORTS = ['job.json', 'result.json', 'inventory_summary.json', 'inventory.sqlite', 'hashes.sqlite']
+OPTIONAL_EXPORTS = ['runs.jsonl', 'log.txt']  # absent in exports made by 1.0.x
+
+def utc():
+    return datetime.now(timezone.utc).isoformat()
 
 def write_json(path, value):
     temporary = path.with_suffix(path.suffix + '.tmp')
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
     temporary.replace(path)
+
+def say(message, to_file=True):
+    """Print for the window/console and keep a permanent copy inside the job folder."""
+    print(message, flush=True)
+    if to_file and JOB_LOG:
+        try:
+            with JOB_LOG.open('a', encoding='utf-8') as handle:
+                handle.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S ') + message + '\n')
+        except OSError:
+            pass  # the log is a convenience; results are kept in the databases
+
+def duration(seconds):
+    if seconds is None:
+        return 'оценивается…'
+    seconds = int(seconds)
+    if seconds < 60:
+        return 'меньше минуты'
+    hours, minutes = divmod(seconds // 60, 60)
+    return f'{hours} ч {minutes:02d} мин' if hours else f'{minutes} мин'
+
+class Rate:
+    """Read speed over a sliding window. Files go from small to large, so an
+    early forecast is pessimistic and becomes shorter as large files start."""
+    def __init__(self, window=600, minimum=30):
+        self.window, self.minimum, self.samples = window, minimum, deque()
+
+    def add(self, now, read_bytes):
+        self.samples.append((now, read_bytes))
+        while len(self.samples) > 2 and now - self.samples[0][0] > self.window:
+            self.samples.popleft()
+
+    def value(self):
+        if len(self.samples) < 2:
+            return None
+        (t0, b0), (t1, b1) = self.samples[0], self.samples[-1]
+        if t1 - t0 < self.minimum or b1 <= b0:
+            return None
+        return (b1 - b0) / (t1 - t0)
+
+def publish(state):
+    if not PROGRESS_FILE:
+        return
+    try:
+        write_json(PROGRESS_FILE, {**state, 'app_version': APP_VERSION, 'updated_utc': utc()})
+    except OSError:
+        pass  # a reader may hold the file briefly; the next update replaces it
 
 @contextmanager
 def awake():
@@ -57,10 +115,14 @@ def lock(path):
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
-def inspect(letter):
+def check_letter(letter):
     letter = letter.rstrip(':\\').upper()
     if not re.fullmatch('[A-Z]', letter):
         raise ValueError('Expected one drive letter')
+    return letter
+
+def inspect(letter):
+    letter = check_letter(letter)
     command = ("$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; "
                f"$p=Get-Partition -DriveLetter '{letter}'; $d=Get-Disk -Number $p.DiskNumber; "
                "[pscustomobject]@{hardware_serial=([string]$d.SerialNumber).Trim(); "
@@ -76,36 +138,128 @@ def inspect(letter):
         raise RuntimeError('No hardware serial: manual identification required')
     return record
 
+# Read-only description of the device. GPT partition/disk GUIDs and the MBR
+# signature are written on the disk itself, so they survive a new drive letter,
+# another computer and usually another USB adapter.
+DESCRIBE = r"""$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8
+$p=Get-Partition -DriveLetter '@L@'; $d=Get-Disk -Number $p.DiskNumber; $v=Get-Volume -DriveLetter '@L@'
+$m=@(Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { ([string]$_.SerialNumber).Trim() -eq ([string]$d.SerialNumber).Trim() -and $_.Size -eq $d.Size })
+$x=$null; if ($m.Count -eq 1) { $x=$m[0] }
+[pscustomobject]@{
+ model=[string]$d.FriendlyName; manufacturer=([string]$d.Manufacturer).Trim(); hardware_serial=([string]$d.SerialNumber).Trim()
+ firmware=([string]$d.FirmwareVersion).Trim(); physical_bytes=$d.Size; bus_type=[string]$d.BusType
+ media_type=$(if ($x) { [string]$x.MediaType } else { '' }); spindle_rpm=$(if ($x) { $x.SpindleSpeed } else { $null })
+ health=$(if ($x) { [string]$x.HealthStatus } else { [string]$d.HealthStatus })
+ partition_style=[string]$d.PartitionStyle; disk_guid=[string]$d.Guid; mbr_signature=$d.Signature
+ disk_number=$d.Number; disk_unique_id=[string]$d.UniqueId; location=[string]$d.Location; device_path=[string]$d.Path
+ partition_number=$p.PartitionNumber; partition_offset=$p.Offset; partition_bytes=$p.Size
+ partition_guid=[string]$p.Guid; partition_type=[string]$p.Type
+ volume_label=[string]$v.FileSystemLabel; filesystem=[string]$v.FileSystem; volume_bytes=$v.Size
+ volume_free_bytes=$v.SizeRemaining; volume_path=[string]$v.Path; allocation_unit=$v.AllocationUnitSize
+} | ConvertTo-Json -Compress"""
+
+def describe(letter):
+    """Never fails the scan: identity checks are done separately by discover_disk."""
+    letter = check_letter(letter)
+    info = {'letter': letter, 'computer': os.environ.get('COMPUTERNAME', ''), 'observed_utc': utc()}
+    try:
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                                 DESCRIBE.replace('@L@', letter)],
+                                check=True, capture_output=True, encoding='utf-8-sig', timeout=120)
+        info.update(json.loads(result.stdout))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        info['describe_error'] = str(exc)
+    try:
+        info['volume_serial'] = volume(letter + ':\\')[0]
+    except OSError as exc:
+        info['volume_serial_error'] = str(exc)
+    return info
+
+def identity_text(disk_id, info):
+    def gb(value):
+        return f'{value / 1e9:,.1f} ГБ'.replace(',', ' ') if isinstance(value, (int, float)) else '?'
+    kind = info.get('media_type') if info.get('media_type') in ('HDD', 'SSD', 'SCM') else 'тип HDD/SSD не сообщён'
+    signature_mbr = info.get('mbr_signature')
+    signature_mbr = f'{signature_mbr:08X}' if isinstance(signature_mbr, int) and signature_mbr else '—'
+    lines = [
+        f'Носитель {disk_id}: {info.get("model", "?")} · серийный номер {info.get("hardware_serial", "?")} · '
+        f'{gb(info.get("physical_bytes"))} · {kind} · подключение {info.get("bus_type", "?")}',
+        f'Том: метка «{info.get("volume_label", "")}» · серийный номер тома {info.get("volume_serial", "?")} · '
+        f'{info.get("filesystem", "?")} · {gb(info.get("volume_bytes"))} · буква {info.get("letter")}: (буква временная)',
+        f'Метки на самом диске: разметка {info.get("partition_style", "?")} · GUID раздела {info.get("partition_guid") or "—"} · '
+        f'GUID диска {info.get("disk_guid") or "—"} · подпись MBR {signature_mbr}',
+        f'Компьютер: {info.get("computer") or "?"} · прошивка {info.get("firmware") or "?"} · состояние {info.get("health") or "?"}',
+    ]
+    if info.get('describe_error'):
+        lines.append('Не удалось получить часть сведений Windows: ' + info['describe_error'])
+    return lines
+
 def safe_relative(rel):
     p = PureWindowsPath(rel)
     if not p.parts or p.is_absolute() or p.drive or any(x in ('.', '..') or ':' in x for x in p.parts):
         raise ValueError('Unsafe relative path')
     return p.parts
 
+def append_run(job, event):
+    with (job / 'runs.jsonl').open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + '\n')
+
 def process(job):
+    global JOB_LOG
     manifest = json.loads((job / 'job.json').read_text(encoding='utf-8'))
     if manifest.get('version') != VERSION or manifest['policy'] != POLICY:
         raise RuntimeError('Different scan policy; use the original worker version')
     disk_id, record = manifest['disk_id'], manifest['record']
+    base_state = {'job': str(job), 'disk_id': disk_id, 'model': record.get('model', ''),
+                  'hardware_serial': record.get('hardware_serial', ''), 'volume_serial': record.get('volume_serial', '')}
+    publish({**base_state, 'phase': 'identify', 'phase_title': 'Проверка диска'})
     root, physical = discover_disk(record)
     require_separate_output(job, root)
     def check():
+        if STOP_FILE and STOP_FILE.exists():
+            raise KeyboardInterrupt()
         if volume(root)[0] != record['volume_serial'] or shutil.disk_usage(root).total != record['volume_bytes']:
             raise RuntimeError('Source disconnected or replaced')
     with lock(job / 'worker.lock'), awake():
+        JOB_LOG = job / 'log.txt'
+        run_id = uuid.uuid4().hex
+        info = describe(root[0])
+        base_state.update(letter=root[0], bus_type=info.get('bus_type', ''), media_type=info.get('media_type', ''))
+        say(f'=== Запуск {datetime.now():%d.%m.%Y %H:%M} · программа {APP_VERSION} · задание {job.name}')
+        for line in identity_text(disk_id, info):
+            say(line)
+        append_run(job, {'event': 'start', 'run_id': run_id, 'utc': utc(), 'app_version': APP_VERSION,
+                         'disk_id': disk_id, 'letter': root[0], 'physical': physical, 'identity': info})
         check()
+        started = time.monotonic()
         inv = job / 'inventory.sqlite'
         if not inv.exists() or not manifest.get('inventory_finished'):
             # An interrupted metadata pass is rebuilt; hashes are never discarded.
             if inv.exists():
                 inv.rename(job / ('inventory_interrupted_' + uuid.uuid4().hex + '.sqlite'))
+            used = max(shutil.disk_usage(root).used, 1)
+            last_publish = [0.0]
+            def inventory_progress(summary):
+                now = time.monotonic()
+                if now - last_publish[0] < 2:
+                    return
+                last_publish[0] = now
+                # Used space includes service folders, so this is an approximation.
+                publish({**base_state, 'phase': 'inventory', 'phase_title': 'Этап 1 из 2: опись файлов',
+                         'percent': min(99.0, round(100 * summary['bytes'] / used, 1)),
+                         'files_done': summary['files'], 'bytes_done': summary['bytes'], 'bytes_total': used,
+                         'errors': summary['errors'], 'elapsed_seconds': round(now - started)})
+            say('Этап 1 из 2: опись файлов (только имена, размеры и даты)')
             with closing(sqlite3.connect(inv)) as db:
-                summary = inventory(root, db, check)
+                summary = inventory(root, db, check, inventory_progress)
             write_json(job / 'inventory_summary.json', summary)
             if summary['status'] not in ('complete', 'complete_with_errors'):
+                append_run(job, {'event': 'finish', 'run_id': run_id, 'utc': utc(), 'status': 'inventory_interrupted'})
+                publish({**base_state, 'phase': 'stopped', 'phase_title': 'Опись остановлена'})
                 raise RuntimeError('Inventory interrupted; resume this job')
             manifest['inventory_finished'] = True
             write_json(job / 'job.json', manifest)
+            say(f'Опись завершена: {summary["files"]:,} файлов, {summary["bytes"] / 1e9:,.1f} ГБ, ошибок {summary["errors"]}')
         else:
             summary = json.loads((job / 'inventory_summary.json').read_text(encoding='utf-8'))
         with closing(sqlite3.connect(inv.as_uri() + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(job / 'hashes.sqlite')) as target:
@@ -113,17 +267,51 @@ def process(job):
             # Selection uses precisely the same function as the main project.
             rows = [(p, s, m, i) for p, s, m, i in source.execute('select path,size,mtime_ns,file_id from files order by size,path') if select(p, s)]
             total = sum(r[1] for r in rows)
+            # Saved hashes that will probably be reused are excluded from the forecast.
+            known = {p: (s, m, i) for p, s, m, i, st in target.execute(
+                'select path,size,mtime_ns,file_id,status from hashes where disk_id=?', (disk_id,)) if st == 'verified'}
+            to_read = total - sum(s for p, s, m, i in rows if known.get(p) == (s, str(m), str(i)))
             cached = hashed = finished = read = 0
-            started = last = time.monotonic()
+            hash_started = last_line = last_file_line = last_publish = time.monotonic()
+            rate = Rate()
             report = {'disk_id': disk_id, 'status': 'running', 'selected_files': len(rows),
                       'selected_bytes': total, 'inventory_errors': summary['errors'], 'physical': physical}
             write_json(job / 'result.json', report)
-            def progress(count=0, force=False):
-                nonlocal last
+            say(f'Этап 2 из 2: контрольные суммы SHA-256 — {len(rows):,} файлов, {total / 1e9:,.1f} ГБ; '
+                f'прочитать предстоит {to_read / 1e9:,.1f} ГБ')
+            def state(count=0, phase='hashing', title='Этап 2 из 2: контрольные суммы'):
                 now = time.monotonic()
-                if force or now - last >= 10:
-                    print(f'{disk_id}: reused={cached:,}; new={hashed:,}; processed={(finished+count)/1e9:.2f}/{total/1e9:.2f} GB; newly read={(read+count)/1e9:.2f} GB', flush=True)
-                    last = now
+                position, newly = finished + count, read + count
+                rate.add(now, newly)
+                speed = rate.value()
+                remaining = max(0, to_read - newly)
+                eta = 0 if position >= total else (remaining / speed if speed else None)
+                return {**base_state, 'phase': phase, 'phase_title': title,
+                        'percent': round(100 * position / total, 2) if total else 100.0,
+                        'bytes_done': position, 'bytes_total': total, 'files_done': cached + hashed,
+                        'files_total': len(rows), 'reused_files': cached, 'new_files': hashed,
+                        'read_bytes': newly, 'to_read_bytes': to_read, 'rate_bytes_per_second': speed,
+                        'eta_seconds': round(eta) if eta is not None else None,
+                        'elapsed_seconds': round(now - started), 'errors': summary['errors']}
+            def progress(count=0, force=False):
+                nonlocal last_line, last_file_line, last_publish
+                if not force and STOP_FILE and STOP_FILE.exists():
+                    raise KeyboardInterrupt()
+                now = time.monotonic()
+                if not force and now - last_publish < 2:
+                    return
+                last_publish = now
+                current = state(count)
+                publish(current)
+                if force or now - last_line >= 10:
+                    speed = current['rate_bytes_per_second']
+                    say(f'{disk_id}: {current["percent"]:.1f}% · {current["bytes_done"] / 1e9:,.1f} из {total / 1e9:,.1f} ГБ · '
+                        f'файлов {current["files_done"]:,} из {len(rows):,} (готовых хешей {cached:,}, новых {hashed:,}) · '
+                        f'{(speed or 0) / 1e6:.0f} МБ/с · осталось {duration(current["eta_seconds"])}',
+                        to_file=force or now - last_file_line >= 60)
+                    last_line = now
+                    if force or now - last_file_line >= 60:
+                        last_file_line = now
             try:
                 for rel, size, mtime, file_id in rows:
                     path = Path(root).joinpath(*safe_relative(rel))
@@ -142,6 +330,7 @@ def process(job):
                     except (OSError, RuntimeError) as exc:
                         target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)', (disk_id, rel, *expected, None, 'error', str(exc)))
                         target.commit()
+                        say(f'ОШИБКА чтения: {rel}: {exc}')
                         raise
                     target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)', (disk_id, rel, *expected, digest, 'verified', ''))
                     target.commit()
@@ -154,9 +343,22 @@ def process(job):
                 report.update(status='error', error=str(exc))
             finally:
                 report.update(hashed_files=hashed, cached_files=cached, newly_read_bytes=read,
-                              seconds=round(time.monotonic()-started, 2))
+                              seconds=round(time.monotonic()-started, 2), app_version=APP_VERSION)
                 write_json(job / 'result.json', report)
                 progress(force=True)
+                phase = {'complete': 'done', 'complete_with_inventory_errors': 'done', 'interrupted': 'stopped'}.get(report['status'], 'error')
+                titles = {'done': 'Сканирование завершено', 'stopped': 'Остановлено с сохранением', 'error': 'Остановлено из-за ошибки'}
+                final = state(phase=phase, title=titles[phase])
+                if phase != 'done':
+                    final['eta_seconds'] = None
+                final['status'] = report['status']
+                publish(final)
+                append_run(job, {'event': 'finish', 'run_id': run_id, 'utc': utc(), 'status': report['status'],
+                                 'hashed_files': hashed, 'cached_files': cached, 'newly_read_bytes': read,
+                                 'seconds': report['seconds'], 'error': report.get('error', '')})
+                say(f'=== Итог: {report["status"]} · новых хешей {hashed:,}, готовых {cached:,} · '
+                    f'прочитано {read / 1e9:,.1f} ГБ за {duration(time.monotonic() - started)}'
+                    + (f' · {report["error"]}' if report.get('error') else ''))
                 print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report['status'].startswith('complete') else 2
 
@@ -173,7 +375,7 @@ def export(job, destination):
         result = json.loads((job / 'result.json').read_text(encoding='utf-8'))
         if not result['status'].startswith('complete'):
             raise RuntimeError('Only completed jobs can be exported')
-        names = ['job.json', 'result.json', 'inventory_summary.json', 'inventory.sqlite', 'hashes.sqlite']
+        names = REQUIRED_EXPORTS + [n for n in OPTIONAL_EXPORTS if (job / n).exists()]
         folder = destination / job.name
         folder.mkdir(parents=True, exist_ok=False)
         hashes = {}
@@ -187,9 +389,8 @@ def export(job, destination):
         print('Exported:', folder)
 
 def import_result(folder, destination):
-    allowed = {'job.json', 'result.json', 'inventory_summary.json', 'inventory.sqlite', 'hashes.sqlite'}
     hashes = json.loads((folder / 'checksums.json').read_text(encoding='utf-8'))
-    if set(hashes) != allowed:
+    if not set(REQUIRED_EXPORTS) <= set(hashes) <= set(REQUIRED_EXPORTS + OPTIONAL_EXPORTS):
         raise ValueError('Unexpected export file list')
     for name, digest in hashes.items():
         if checksum(folder / name) != digest:
@@ -200,7 +401,7 @@ def import_result(folder, destination):
     # Keep imports separate; never overwrite a local registry or existing scan.
     output = destination / (manifest['disk_id'] + '_' + uuid.uuid4().hex)
     output.mkdir(parents=True, exist_ok=False)
-    for name in [*allowed, 'checksums.json']:
+    for name in [*hashes, 'checksums.json']:
         shutil.copy2(folder / name, output / name)
     for name, digest in hashes.items():
         if checksum(output / name) != digest:
@@ -208,17 +409,21 @@ def import_result(folder, destination):
     print('Imported for review (registry unchanged):', output)
 
 def main():
+    global STOP_FILE, PROGRESS_FILE
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--stop-file', type=Path)
+    parser.add_argument('--progress-file', type=Path, help='Machine-readable progress for the window')
     sub = parser.add_subparsers(dest='command', required=True)
     start = sub.add_parser('start')
     start.add_argument('--disk', required=True)
     start.add_argument('--letter', required=True)
+    start.add_argument('--yes', action='store_true', help='Confirmation already obtained by graphical launcher')
     start.add_argument('--output', type=Path, default=Path(os.environ.get('LOCALAPPDATA', '.')) / 'HDDScanner' / 'results')
     resume = sub.add_parser('resume'); resume.add_argument('job', type=Path)
     exp = sub.add_parser('export'); exp.add_argument('job', type=Path); exp.add_argument('destination', type=Path)
     imp = sub.add_parser('import'); imp.add_argument('folder', type=Path); imp.add_argument('destination', type=Path)
     if len(sys.argv) == 1:
-        print('HDD Scanner ' + VERSION)
+        print('HDD Scanner ' + APP_VERSION)
         print('1 - New disk scan\n2 - Resume\n3 - Export to USB\n4 - Import on main PC')
         choice = input('Choose 1-4: ').strip()
         def ask(prompt):
@@ -236,6 +441,7 @@ def main():
         args = parser.parse_args(values)
     else:
         args = parser.parse_args()
+    STOP_FILE, PROGRESS_FILE = args.stop_file, args.progress_file
     if args.command == 'start':
         if not re.fullmatch('HDD[0-9]{2,}', args.disk) or int(args.disk[3:]) < 3:
             parser.error('Assign a new central disk ID, HDD03 or higher; HDD01/02 already exist')
@@ -244,12 +450,14 @@ def main():
         if output.drive.upper() == args.letter.rstrip(':\\').upper() + ':':
             parser.error('Output must not be on source volume')
         print(json.dumps({'disk_id': args.disk, **record}, ensure_ascii=False, indent=2))
-        if input('Check central disk ID and device. Type YES to scan: ').strip() != 'YES':
+        if not args.yes and input('Check central disk ID and device. Type YES to scan: ').strip() != 'YES':
             return 1
         job = output / (args.disk + '_' + uuid.uuid4().hex)
         job.mkdir(parents=True, exist_ok=False)
+        # The full description is kept beside the identity record used for checks.
         write_json(job / 'job.json', {'version': VERSION, 'job_id': job.name, 'disk_id': args.disk,
-                    'record': record, 'policy': POLICY, 'created_utc': datetime.now(timezone.utc).isoformat()})
+                    'record': record, 'policy': POLICY, 'created_utc': utc(), 'app_version': APP_VERSION,
+                    'identity_at_registration': describe(args.letter)})
         print('JOB (save this path for resume/export):', job, flush=True)
         return process(job)
     if args.command == 'resume':
