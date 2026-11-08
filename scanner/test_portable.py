@@ -81,9 +81,11 @@ class PortableTests(unittest.TestCase):
                 (base / 'usb' / job.name / 'hashes.sqlite').write_bytes(b'damaged')
                 with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
                     portable.import_result(base / 'usb' / job.name, base / 'imports')
+                # A file changed since the inventory is skipped and recorded, not a stop.
                 photo.write_bytes(b'b' * 1048576)
-                self.assertEqual(portable.process(job), 2)
-                self.assertEqual(json.loads((job / 'result.json').read_text())['status'], 'error')
+                self.assertEqual(portable.process(job), 0)
+                result = json.loads((job / 'result.json').read_text())
+                self.assertEqual((result['status'], result['unread_files']), ('complete_with_unread_files', 1))
 
     def make_job(self, results, disk_id, letter_root, files, policy, hashed=()):
         job_id = disk_id + '_' + uuid.uuid4().hex
@@ -140,6 +142,56 @@ class PortableTests(unittest.TestCase):
             self.assertEqual((result['selected_files'], result['cached_files'], result['hashed_files']), (3, 1, 2))
             self.assertIn('policy_upgrade', (job / 'runs.jsonl').read_text(encoding='utf-8'))
             self.assertIn('| v2 |', (base / 'results' / 'Реестр дисков.md').read_text(encoding='utf-8'))
+
+    def test_unreadable_file_is_skipped_and_retried_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); root = base / 'disk'; root.mkdir()
+            names = ['a.jpg', 'locked.jpg', 'c.jpg']
+            for n in names:
+                (root / n).write_bytes(n.encode() * 100_000)
+            job = self.make_job(base / 'results', 'HDD06', root, names, portable.POLICY_V2)
+            def denied(path, expected, progress):
+                if path.name == 'locked.jpg':
+                    raise PermissionError(13, 'Permission denied')
+                return 'h' * 64
+            with self.patched(root), patch.object(portable, 'hash_one', side_effect=denied):
+                self.assertEqual(portable.process(job), 0)
+            result = json.loads((job / 'result.json').read_text(encoding='utf-8'))
+            self.assertEqual((result['status'], result['hashed_files'], result['unread_files']),
+                             ('complete_with_unread_files', 2, 1))
+            self.assertIn('ПРОПУЩЕН (нет доступа к файлу): locked.jpg', (job / 'log.txt').read_text(encoding='utf-8'))
+            index = (base / 'results' / 'Реестр дисков.md').read_text(encoding='utf-8')
+            self.assertIn('HDD06 (1)', index)
+            # After access is fixed, a resume reads only the skipped file.
+            read = []
+            def ok(path, expected, progress):
+                read.append(path.name); return 'h' * 64
+            with self.patched(root), patch.object(portable, 'hash_one', side_effect=ok):
+                self.assertEqual(portable.process(job), 0)
+            self.assertEqual(read, ['locked.jpg'])
+            self.assertEqual(json.loads((job / 'result.json').read_text(encoding='utf-8'))['status'], 'complete')
+
+    def test_device_errors_in_a_row_stop_the_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); root = base / 'disk'; root.mkdir()
+            names = [f'{i:02}.jpg' for i in range(8)]
+            for n in names:
+                (root / n).write_bytes(b'x' * 100_000)
+            job = self.make_job(base / 'results', 'HDD07', root, names, portable.POLICY_V2)
+            failing = OSError(5, 'Input/output error'); failing.winerror = 1117  # device I/O error
+            with self.patched(root), patch.object(portable, 'hash_one', side_effect=failing):
+                self.assertEqual(portable.process(job), 2)
+            result = json.loads((job / 'result.json').read_text(encoding='utf-8'))
+            self.assertEqual((result['status'], result['unread_files']), ('error', portable.MAX_DEVICE_ERRORS_IN_ROW))
+            self.assertIn('неисправен', result['error'])
+
+    def test_error_kinds(self):
+        self.assertEqual(portable.error_kind(PermissionError(13, 'denied')), 'file')
+        self.assertEqual(portable.error_kind(RuntimeError('File changed since inventory')), 'file')
+        sharing = OSError(13, 'busy'); sharing.winerror = 32
+        self.assertEqual(portable.error_kind(sharing), 'file')
+        crc = OSError(22, 'CRC'); crc.winerror = 23
+        self.assertEqual(portable.error_kind(crc), 'device')
 
     def test_unknown_policy_refused_and_logged_in_job(self):
         with tempfile.TemporaryDirectory() as tmp:

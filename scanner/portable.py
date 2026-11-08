@@ -23,7 +23,7 @@ from hash_files import hash_one, signature
 # VERSION is the job format/algorithm. It is unchanged, so jobs started by
 # 1.0.x continue with this program. APP_VERSION is the program release.
 VERSION = '1.0.0'
-APP_VERSION = '1.2.0'
+APP_VERSION = '1.2.1'
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
@@ -35,6 +35,18 @@ POLICY_V2 = {'version': 2, 'algorithm': 'sha256', 'thresholds_bytes': THRESHOLDS
              'media_extensions': sorted(MEDIA), 'excluded_dirs': sorted(EXCLUDED_DIRS)}
 POLICY = POLICY_V2  # for new jobs; version 1 jobs are upgraded by a top-up pass
 POLICY_TEXT = 'фото JPEG/HEIC от 50 КБ, прочие изображения и RAW от 150 КБ, видео любого размера'
+
+# An unreadable file is skipped; only these signs of a failing disk stop the scan.
+MAX_DEVICE_ERRORS_IN_ROW = 5
+# Windows codes that concern one file, not the device: access denied, sharing and
+# lock violations, file cannot be accessed by the system, file or path not found.
+FILE_WINERRORS = {2, 3, 5, 32, 33, 1920}
+
+def error_kind(exc):
+    """'file' — this file only (access, changed since inventory); 'device' — read failure."""
+    if isinstance(exc, (RuntimeError, PermissionError, FileNotFoundError)):
+        return 'file'
+    return 'file' if getattr(exc, 'winerror', None) in FILE_WINERRORS else 'device'
 
 def policy_version(policy):
     if policy == POLICY_V2:
@@ -256,6 +268,13 @@ def read_json(path, default=None):
     except (OSError, ValueError):
         return default
 
+def unread_count(job):
+    try:
+        with closing(sqlite3.connect((job / 'hashes.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
+            return db.execute("select count(*) from hashes where status='error'").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+
 def job_row(job, root):
     manifest = read_json(job / 'job.json', {})
     record = manifest.get('record', {})
@@ -284,6 +303,7 @@ def job_row(job, root):
         'Фото/видео с хешем': result.get('selected_files', ''),
         'Их объём, ГБ': round(result['selected_bytes'] / 1e9, 1) if result.get('selected_bytes') else '',
         'Ошибок описи': summary.get('errors', ''),
+        'Не прочитано': unread_count(job),
         'Правила': {2: 'v2', 1: 'v1 — нужен добор'}.get(policy_version(manifest.get('policy')), 'другие'),
         'Дата': (last_run.get('utc') or manifest.get('created_utc', ''))[:10],
         'Папка': str(job.relative_to(root)),
@@ -300,6 +320,11 @@ def write_index(root):
         by_serial.setdefault((r['Серийный номер устройства'], r['Серийный номер тома']), set()).add(r['Номер'])
     warnings += [f'Номер {k} назначен разным дискам — нужно разобраться вручную.' for k, v in by_id.items() if len(v) > 1]
     warnings += [f'Один диск (серийный номер {k[0]}) записан под номерами {", ".join(sorted(v))}.' for k, v in by_serial.items() if len(v) > 1]
+    unread_disks = [f'{r["Номер"]} ({r["Не прочитано"]})' for r in rows if r['Не прочитано']]
+    if unread_disks:
+        warnings.append('Есть непрочитанные файлы (в скобках — сколько): ' + ', '.join(unread_disks) +
+                        '. Причины — в log.txt задания. Исправьте доступ и продолжите сканирование: '
+                        'дочитаются только эти файлы.')
     old_rules = sorted({r['Номер'] for r in rows if r['Правила'] != 'v2'})
     if old_rules:
         warnings.append(f'Сканированы по старым правилам (всё от 1 МиБ): {", ".join(old_rules)}. Подключите диск и нажмите '
@@ -311,8 +336,9 @@ def write_index(root):
         writer.writeheader(); writer.writerows(rows)
     temporary.replace(root / (INDEX_NAME + '.csv'))
     status_text = {'complete': 'завершён', 'complete_with_inventory_errors': 'завершён, есть недоступные папки',
+                   'complete_with_unread_files': 'завершён, есть непрочитанные файлы',
                    'interrupted': 'остановлен', 'error': 'ошибка', 'running': 'не завершён'}
-    short = ['Номер', 'Модель', 'Ёмкость', 'Метка тома', 'Тип', 'Подключение', 'Состояние', 'Правила', 'Фото/видео с хешем', 'Их объём, ГБ', 'Дата', 'Папка']
+    short = ['Номер', 'Модель', 'Ёмкость', 'Метка тома', 'Тип', 'Подключение', 'Состояние', 'Правила', 'Не прочитано', 'Фото/видео с хешем', 'Их объём, ГБ', 'Дата', 'Папка']
     lines = [f'# {INDEX_NAME}', '', f'Создан автоматически {datetime.now():%d.%m.%Y %H:%M}. Не редактировать вручную: '
              'файл пересоздаётся после каждого сканирования и импорта. Полные сведения, включая серийные номера, — в '
              f'«{INDEX_NAME}.csv» (открывается в Excel).', '',
@@ -425,7 +451,7 @@ def process(job):
             known = {p: (s, m, i) for p, s, m, i, st in target.execute(
                 'select path,size,mtime_ns,file_id,status from hashes where disk_id=?', (disk_id,)) if st == 'verified'}
             to_read = total - sum(s for p, s, m, i in rows if known.get(p) == (s, str(m), str(i)))
-            cached = hashed = finished = read = 0
+            cached = hashed = finished = read = unread = unread_bytes = device_in_row = 0
             hash_started = last_line = last_file_line = last_publish = time.monotonic()
             rate = Rate()
             report = {'disk_id': disk_id, 'status': 'running', 'selected_files': len(rows),
@@ -442,8 +468,8 @@ def process(job):
                 eta = 0 if position >= total else (remaining / speed if speed else None)
                 return {**base_state, 'phase': phase, 'phase_title': title,
                         'percent': round(100 * position / total, 2) if total else 100.0,
-                        'bytes_done': position, 'bytes_total': total, 'files_done': cached + hashed,
-                        'files_total': len(rows), 'reused_files': cached, 'new_files': hashed,
+                        'bytes_done': position, 'bytes_total': total, 'files_done': cached + hashed + unread,
+                        'files_total': len(rows), 'reused_files': cached, 'new_files': hashed, 'unread_files': unread,
                         'read_bytes': newly, 'to_read_bytes': to_read, 'rate_bytes_per_second': speed,
                         'eta_seconds': round(eta) if eta is not None else None,
                         'elapsed_seconds': round(now - started), 'errors': summary['errors']}
@@ -460,8 +486,9 @@ def process(job):
                 if force or now - last_line >= 10:
                     speed = current['rate_bytes_per_second']
                     say(f'{disk_id}: {current["percent"]:.1f}% · {current["bytes_done"] / 1e9:,.1f} из {total / 1e9:,.1f} ГБ · '
-                        f'файлов {current["files_done"]:,} из {len(rows):,} (готовых хешей {cached:,}, новых {hashed:,}) · '
-                        f'{(speed or 0) / 1e6:.0f} МБ/с · осталось {duration(current["eta_seconds"])}',
+                        f'файлов {current["files_done"]:,} из {len(rows):,} (готовых хешей {cached:,}, новых {hashed:,}'
+                        + (f', не прочитано {unread:,}' if unread else '') + ') · '
+                        + f'{(speed or 0) / 1e6:.0f} МБ/с · осталось {duration(current["eta_seconds"])}',
                         to_file=force or now - last_file_line >= 60)
                     last_line = now
                     if force or now - last_file_line >= 60:
@@ -472,36 +499,55 @@ def process(job):
                     expected = size, str(mtime), str(file_id)
                     check()
                     old = target.execute('select size,mtime_ns,file_id,status from hashes where disk_id=? and path=?', (disk_id, rel)).fetchone()
-                    current = signature(path.stat())
-                    if old == (*expected, 'verified') and current[:2] == expected[:2] and (expected[2] == '0' or current[2] == expected[2]):
-                        cached += 1
-                        finished += size
-                        progress()
-                        continue
                     try:
+                        current = signature(path.stat())
+                        if old == (*expected, 'verified') and current[:2] == expected[:2] and (expected[2] == '0' or current[2] == expected[2]):
+                            cached += 1
+                            finished += size
+                            progress()
+                            continue
                         digest = hash_one(path, expected, progress)
-                        check()
                     except (OSError, RuntimeError) as exc:
+                        # One unreadable file is skipped and recorded; it is read
+                        # again on the next resume. A vanished disk (check below)
+                        # or several device errors in a row stop the scan.
+                        kind = error_kind(exc)
                         target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)', (disk_id, rel, *expected, None, 'error', str(exc)))
                         target.commit()
-                        say(f'ОШИБКА чтения: {rel}: {exc}')
-                        raise
+                        unread += 1; unread_bytes += size; finished += size
+                        check()
+                        say(f'ПРОПУЩЕН ({"нет доступа к файлу" if kind == "file" else "ошибка чтения устройства"}): {rel}: {exc}')
+                        if kind == 'device':
+                            device_in_row += 1
+                            if device_in_row >= MAX_DEVICE_ERRORS_IN_ROW:
+                                raise RuntimeError(f'{device_in_row} ошибок чтения устройства подряд — возможно, диск '
+                                                   'неисправен. Остановлено; готовые хеши сохранены.')
+                        progress()
+                        continue
+                    check()
                     target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)', (disk_id, rel, *expected, digest, 'verified', ''))
                     target.commit()
                     hashed += 1; finished += size; read += size
+                    device_in_row = 0
                     progress()
-                report['status'] = 'complete_with_inventory_errors' if summary['errors'] else 'complete'
+                if unread:
+                    report['status'] = 'complete_with_unread_files'
+                else:
+                    report['status'] = 'complete_with_inventory_errors' if summary['errors'] else 'complete'
             except KeyboardInterrupt:
                 report.update(status='interrupted', error='Stopped by user')
             except (OSError, RuntimeError) as exc:
                 report.update(status='error', error=str(exc))
             finally:
                 report.update(hashed_files=hashed, cached_files=cached, newly_read_bytes=read,
+                              unread_files=unread, unread_bytes=unread_bytes,
                               seconds=round(time.monotonic()-started, 2), app_version=APP_VERSION)
                 write_json(job / 'result.json', report)
                 progress(force=True)
-                phase = {'complete': 'done', 'complete_with_inventory_errors': 'done', 'interrupted': 'stopped'}.get(report['status'], 'error')
+                phase = 'stopped' if report['status'] == 'interrupted' else ('done' if report['status'].startswith('complete') else 'error')
                 titles = {'done': 'Сканирование завершено', 'stopped': 'Остановлено с сохранением', 'error': 'Остановлено из-за ошибки'}
+                if unread and phase == 'done':
+                    titles['done'] = f'Завершено, не прочитано файлов: {unread:,}'.replace(',', ' ')
                 final = state(phase=phase, title=titles[phase])
                 if phase != 'done':
                     final['eta_seconds'] = None
@@ -509,9 +555,11 @@ def process(job):
                 publish(final)
                 append_run(job, {'event': 'finish', 'run_id': run_id, 'utc': utc(), 'status': report['status'],
                                  'hashed_files': hashed, 'cached_files': cached, 'newly_read_bytes': read,
-                                 'seconds': report['seconds'], 'error': report.get('error', '')})
+                                 'unread_files': unread, 'seconds': report['seconds'], 'error': report.get('error', '')})
                 say(f'=== Итог: {report["status"]} · новых хешей {hashed:,}, готовых {cached:,} · '
                     f'прочитано {read / 1e9:,.1f} ГБ за {duration(time.monotonic() - started)}'
+                    + (f' · НЕ ПРОЧИТАНО файлов: {unread:,} ({unread_bytes / 1e9:,.2f} ГБ) — список в hashes.sqlite '
+                       '(status=error) и выше в журнале; при продолжении они читаются заново' if unread else '')
                     + (f' · {report["error"]}' if report.get('error') else ''))
                 print(json.dumps(report, ensure_ascii=False, indent=2))
     refresh_index(results_root(job))

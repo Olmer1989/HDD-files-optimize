@@ -7,7 +7,7 @@ $script:worker = $null
 $script:stopping = $false
 $script:progressFile = $null
 $script:operation = ''
-$AppVersion = '1.2.0'
+$AppVersion = '1.2.1'
 
 $form = New-Object Windows.Forms.Form
 $form.Text = "Анализ фото и видео на дисках — версия $AppVersion"
@@ -47,6 +47,7 @@ function Status-Text($status) {
     switch ([string]$status) {
         'complete' { return 'завершён' }
         'complete_with_inventory_errors' { return 'завершён (есть недоступные папки)' }
+        'complete_with_unread_files' { return 'завершён (есть непрочитанные файлы)' }
         'interrupted' { return 'остановлен, можно продолжить' }
         'error' { return 'остановлен из-за ошибки' }
         'running' { return 'не завершён (или идёт сейчас)' }
@@ -273,6 +274,7 @@ $eta = Add-Label $g4 '' 12 126 1020 24 $bold
 $identity = Add-Label $g4 '' 12 152 1020 24
 function Reset-Progress {
     $phase.Text = 'Запуск…'; $bar.Value = 0; $percent.Text = ''; $amount.Text = ''; $eta.Text = ''; $identity.Text = ''
+    $script:lastStatus = ''; $script:lastUnread = 0
 }
 function Show-Progress {
     if (-not $script:progressFile -or -not (Test-Path -LiteralPath $script:progressFile)) { return }
@@ -280,6 +282,8 @@ function Show-Progress {
     if (-not $raw) { return }
     try { $p = $raw | ConvertFrom-Json } catch { return }
     $phase.Text = ([string]$p.phase_title) + '  —  ' + ([string]$p.disk_id)
+    $script:lastStatus = [string]$p.status
+    if ($p.unread_files) { $script:lastUnread = [int]$p.unread_files }
     if ($null -ne $p.percent) {
         $value = [int][math]::Round([double]$p.percent * 10)
         $bar.Value = [math]::Max(0, [math]::Min(1000, $value))
@@ -316,7 +320,8 @@ function Update-Worker {
         if ($script:worker.HasExited) {
             $script:worker.WaitForExit()
             $timer.Stop()
-            if ($script:worker.ExitCode -eq 0) { $status.ForeColor = [Drawing.Color]::DarkGreen; $status.Text='Операция завершена успешно. Журнал задания — log.txt в его папке; журналы окна — в «_Журналы окна» папки результатов.' }
+            if ($script:worker.ExitCode -eq 0 -and $script:lastUnread -gt 0) { $status.ForeColor = [Drawing.Color]::DarkOrange; $status.Text="Сканирование завершено, но $($script:lastUnread) файл(ов) не удалось прочитать (обычно — нет доступа). Список и причины — в журнале ниже и в log.txt; после исправления доступа продолжите сканирование: дочитаются только они." }
+            elseif ($script:worker.ExitCode -eq 0) { $status.ForeColor = [Drawing.Color]::DarkGreen; $status.Text='Операция завершена успешно. Журнал задания — log.txt в его папке; журналы окна — в «_Журналы окна» папки результатов.' }
             elseif ($script:stopping) { $status.ForeColor = [Drawing.Color]::DarkOrange; $status.Text='Сканирование остановлено. Чтобы продолжить, выберите диск и нажмите «Начать сканирование» — программа предложит продолжить.' }
             else { $status.ForeColor = [Drawing.Color]::DarkRed; $status.Text='Операция остановлена с ошибкой. Подробности ниже; готовые хеши сохранены.' }
             if (-not $IntegrationTest -and $script:operation -match '^(start|resume)') { Refresh-Disks }
