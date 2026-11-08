@@ -7,7 +7,7 @@ $script:worker = $null
 $script:stopping = $false
 $script:progressFile = $null
 $script:operation = ''
-$AppVersion = '1.1.0'
+$AppVersion = '1.2.0'
 
 $form = New-Object Windows.Forms.Form
 $form.Text = "Анализ фото и видео на дисках — версия $AppVersion"
@@ -88,6 +88,7 @@ function Get-Jobs($folder) {
             $state = 'не завершён'
             $resultFile = Join-Path $dir.FullName 'result.json'
             if (Test-Path -LiteralPath $resultFile) { $state = Status-Text (Read-Json $resultFile).status }
+            if ($job.policy.version -ne 2) { $state += ' · старые правила, нужен добор' }
             [void]$found.Add([pscustomobject]@{Path=$dir.FullName; DiskId=[string]$job.disk_id; Serial=[string]$job.record.hardware_serial
                 Bytes=[int64]$job.record.physical_bytes; VolumeSerial=[string]$job.record.volume_serial; State=$state})
         } catch { }
@@ -168,15 +169,20 @@ function Read-LiveLog($path) {
 }
 function Launch($arguments, $label) {
     if (Busy) { Failure 'Дождитесь завершения текущей операции или нажмите «Остановить». Чтобы сканировать другой диск параллельно, откройте второе окно.'; return }
-    $logs = Join-Path $env:LOCALAPPDATA 'HDDScanner\logs'
-    if ($IntegrationTest) { $logs = Join-Path $script:testFolder 'logs' }
-    [void][IO.Directory]::CreateDirectory($logs)
+    # Window logs live inside the results folder, so copying that folder from
+    # another computer brings them along; '_' keeps them out of the register.
+    # Temporary progress/stop signals stay in the local profile.
+    $logs = Join-Path $output.Text '_Журналы окна'
+    $temp = Join-Path $env:LOCALAPPDATA 'HDDScanner\run'
+    if ($IntegrationTest) { $logs = Join-Path $script:testFolder 'logs'; $temp = $logs }
+    try { [void][IO.Directory]::CreateDirectory($logs) } catch { $logs = Join-Path $env:LOCALAPPDATA 'HDDScanner\logs'; [void][IO.Directory]::CreateDirectory($logs) }
+    [void][IO.Directory]::CreateDirectory($temp)
     # Readable names: date, operation and disk number, plus a short unique suffix.
     $token = (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') + '_' + $label + '_' + [guid]::NewGuid().ToString('N').Substring(0,6)
     $script:stdout = Join-Path $logs ($token+'.out.txt')
     $script:stderr = Join-Path $logs ($token+'.err.txt')
-    $script:stopFile = Join-Path $logs ($token+'.stop')
-    $script:progressFile = Join-Path $logs ($token+'.progress.json')
+    $script:stopFile = Join-Path $temp ($token+'.stop')
+    $script:progressFile = Join-Path $temp ($token+'.progress.json')
     $script:operation = $label
     $python = Join-Path $PSScriptRoot '..\runtime\python.exe'
     $app = Join-Path $PSScriptRoot 'portable.py'
@@ -204,7 +210,7 @@ $start = Add-Button $g3 'Начать сканирование' 12 24 250 {
         $prior = @($disk.Prior)
         if ($prior.Count -gt 0) {
             $p = $prior[0]
-            $text = "Этот диск уже сканировался (найден по серийному номеру, буква не важна):`n`nНомер: $($p.DiskId)`nСостояние: $($p.State)`nПапка: $($p.Path)`n`nДа — продолжить это задание (готовые хеши сохранятся).`nНет — начать сканирование заново под тем же номером.`nОтмена — ничего не делать."
+            $text = "Этот диск уже сканировался (найден по серийному номеру, буква не важна):`n`nНомер: $($p.DiskId)`nСостояние: $($p.State)`nПапка: $($p.Path)`n`nДа — продолжить это задание (готовые хеши сохранятся; по старым правилам — дочитать мелкие фото и видео).`nНет — начать сканирование заново под тем же номером.`nОтмена — ничего не делать."
             $answer = [Windows.Forms.MessageBox]::Show($text,'Диск уже знаком','YesNoCancel','Warning')
             if ($answer -eq 'Yes') { Launch @('resume',$p.Path) ('resume_'+$p.DiskId); return }
             if ($answer -ne 'No') { return }
@@ -214,7 +220,7 @@ $start = Add-Button $g3 'Начать сканирование' 12 24 250 {
         $known = Get-Jobs $output.Text
         $taken = @($known | Where-Object { $_.DiskId -eq $id.Text -and $_.Serial -ne $disk.Serial })
         if ($taken.Count -gt 0) { throw "Номер $($id.Text) уже назначен другому диску (папка $($taken[0].Path)). Выберите другой номер." }
-        $message = "Диск: $($selected.Text)`nМодель: $($selected.SubItems[1].Text)`nСерийный номер: $($disk.Serial)`nНомер архива: $($id.Text)`nРезультаты: $($output.Text)`n`nБудут прочитаны метаданные и рассчитаны SHA-256 фото/видео от 1 МиБ. Файлы на диске не изменяются. Начать?"
+        $message = "Диск: $($selected.Text)`nМодель: $($selected.SubItems[1].Text)`nСерийный номер: $($disk.Serial)`nНомер архива: $($id.Text)`nРезультаты: $($output.Text)`n`nБудут прочитаны метаданные и рассчитаны SHA-256: фото JPEG/HEIC от 50 КБ, прочие изображения и RAW от 150 КБ, видео любого размера. Файлы на диске не изменяются. Начать?"
         if ([Windows.Forms.MessageBox]::Show($message,'Проверьте выбранный диск','YesNo','Question') -eq 'Yes') {
             Save-Settings
             Launch @('start','--disk',$id.Text,'--letter',$disk.Letter,'--output',$output.Text,'--yes') ('start_'+$id.Text)
@@ -233,12 +239,17 @@ $stop = Add-Button $g3 'Остановить с сохранением' 532 24 2
     if (Busy) { [IO.File]::WriteAllText($script:stopFile,'stop'); $script:stopping=$true; $status.Text='Останавливаемся и сохраняем результаты. Не закрывайте окно.' }
 }
 $export = Add-Button $g3 'Экспорт на флешку…' 12 62 250 {
-    try { if (Busy) { throw 'Сначала дождитесь завершения операции.' }; $job=Folder 'Папка завершённого задания'; if ($job) { $dest=Folder 'Папка назначения на флешке'; if ($dest) { Launch @('export',$job,$dest) 'export' } } } catch { Failure $_.Exception.Message }
+    try {
+        if (Busy) { throw 'Сначала дождитесь завершения операции.' }
+        $answer = [Windows.Forms.MessageBox]::Show("Да — выгрузить все завершённые задания из папки результатов:`n$($output.Text)`n(уже выгруженные без изменений пропускаются).`n`nНет — выбрать одно задание.",'Экспорт на флешку','YesNoCancel','Question')
+        if ($answer -eq 'Yes') { $dest=Folder 'Папка на флешке (например, HDD_RESULTS)'; if ($dest) { Launch @('export-all',$output.Text,$dest) 'export-all' } }
+        elseif ($answer -eq 'No') { $job=Folder 'Папка завершённого задания'; if ($job) { $dest=Folder 'Папка назначения на флешке'; if ($dest) { Launch @('export',$job,$dest) 'export' } } }
+    } catch { Failure $_.Exception.Message }
 }
 $import = Add-Button $g3 'Импорт с флешки…' 272 62 250 {
     # Imports go straight into the results folder, into the folder of their disk.
-    try { if (Busy) { throw 'Сначала дождитесь завершения операции.' }; $job=Folder 'Папка экспортированного задания на флешке'; if ($job) {
-        if ([Windows.Forms.MessageBox]::Show("Задание будет проверено по контрольным суммам и помещено в папку своего диска внутри:`n$($output.Text)`n`nПродолжить?",'Импорт','YesNo','Question') -eq 'Yes') { Launch @('import',$job,$output.Text) 'import' }
+    try { if (Busy) { throw 'Сначала дождитесь завершения операции.' }; $job=Folder 'Папка на флешке: одно задание или папка с несколькими (например, HDD_RESULTS)'; if ($job) {
+        if ([Windows.Forms.MessageBox]::Show("Все найденные задания будут проверены по контрольным суммам и помещены в папки своих дисков внутри:`n$($output.Text)`n`nПродолжить?",'Импорт','YesNo','Question') -eq 'Yes') { Launch @('import',$job,$output.Text) 'import' }
     } } catch { Failure $_.Exception.Message }
 }
 $open = Add-Button $g3 'Открыть папку результатов' 532 62 250 {
@@ -305,7 +316,7 @@ function Update-Worker {
         if ($script:worker.HasExited) {
             $script:worker.WaitForExit()
             $timer.Stop()
-            if ($script:worker.ExitCode -eq 0) { $status.ForeColor = [Drawing.Color]::DarkGreen; $status.Text='Операция завершена успешно. Итог — в журнале ниже; полный журнал сохранён и в папке задания (log.txt).' }
+            if ($script:worker.ExitCode -eq 0) { $status.ForeColor = [Drawing.Color]::DarkGreen; $status.Text='Операция завершена успешно. Журнал задания — log.txt в его папке; журналы окна — в «_Журналы окна» папки результатов.' }
             elseif ($script:stopping) { $status.ForeColor = [Drawing.Color]::DarkOrange; $status.Text='Сканирование остановлено. Чтобы продолжить, выберите диск и нажмите «Начать сканирование» — программа предложит продолжить.' }
             else { $status.ForeColor = [Drawing.Color]::DarkRed; $status.Text='Операция остановлена с ошибкой. Подробности ниже; готовые хеши сохранены.' }
             if (-not $IntegrationTest -and $script:operation -match '^(start|resume)') { Refresh-Disks }

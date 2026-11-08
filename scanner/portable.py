@@ -17,18 +17,31 @@ import time
 import uuid
 
 from inventory import inventory, volume, discover_disk, MEDIA, MIN_BYTES, EXCLUDED_DIRS
-from build_selection import select
+from build_selection import select, THRESHOLDS_V1, THRESHOLDS_V2, CAMERA_IMAGES, VIDEO
 from hash_files import hash_one, signature
 
 # VERSION is the job format/algorithm. It is unchanged, so jobs started by
 # 1.0.x continue with this program. APP_VERSION is the program release.
 VERSION = '1.0.0'
-APP_VERSION = '1.1.0'
+APP_VERSION = '1.2.0'
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
-POLICY = {'algorithm': 'sha256', 'min_bytes': MIN_BYTES,
-          'media_extensions': sorted(MEDIA), 'excluded_dirs': sorted(EXCLUDED_DIRS)}
+# POLICY_V1 must stay byte-for-byte equal to the policy stored by 1.0.x jobs.
+POLICY_V1 = {'algorithm': 'sha256', 'min_bytes': MIN_BYTES,
+             'media_extensions': sorted(MEDIA), 'excluded_dirs': sorted(EXCLUDED_DIRS)}
+POLICY_V2 = {'version': 2, 'algorithm': 'sha256', 'thresholds_bytes': THRESHOLDS_V2,
+             'camera_image_extensions': sorted(CAMERA_IMAGES), 'video_extensions': sorted(VIDEO),
+             'media_extensions': sorted(MEDIA), 'excluded_dirs': sorted(EXCLUDED_DIRS)}
+POLICY = POLICY_V2  # for new jobs; version 1 jobs are upgraded by a top-up pass
+POLICY_TEXT = 'фото JPEG/HEIC от 50 КБ, прочие изображения и RAW от 150 КБ, видео любого размера'
+
+def policy_version(policy):
+    if policy == POLICY_V2:
+        return 2
+    if policy == POLICY_V1:
+        return 1
+    return None
 REQUIRED_EXPORTS = ['job.json', 'result.json', 'inventory_summary.json', 'inventory.sqlite', 'hashes.sqlite']
 OPTIONAL_EXPORTS = ['runs.jsonl', 'log.txt']  # absent in exports made by 1.0.x
 
@@ -270,7 +283,9 @@ def job_row(job, root):
         'Файлов на диске': summary.get('files', ''), 'Занято файлами, ГБ': round(summary['bytes'] / 1e9, 1) if summary.get('bytes') else '',
         'Фото/видео с хешем': result.get('selected_files', ''),
         'Их объём, ГБ': round(result['selected_bytes'] / 1e9, 1) if result.get('selected_bytes') else '',
-        'Ошибок описи': summary.get('errors', ''), 'Дата': (last_run.get('utc') or manifest.get('created_utc', ''))[:10],
+        'Ошибок описи': summary.get('errors', ''),
+        'Правила': {2: 'v2', 1: 'v1 — нужен добор'}.get(policy_version(manifest.get('policy')), 'другие'),
+        'Дата': (last_run.get('utc') or manifest.get('created_utc', ''))[:10],
         'Папка': str(job.relative_to(root)),
     }
 
@@ -285,6 +300,10 @@ def write_index(root):
         by_serial.setdefault((r['Серийный номер устройства'], r['Серийный номер тома']), set()).add(r['Номер'])
     warnings += [f'Номер {k} назначен разным дискам — нужно разобраться вручную.' for k, v in by_id.items() if len(v) > 1]
     warnings += [f'Один диск (серийный номер {k[0]}) записан под номерами {", ".join(sorted(v))}.' for k, v in by_serial.items() if len(v) > 1]
+    old_rules = sorted({r['Номер'] for r in rows if r['Правила'] != 'v2'})
+    if old_rules:
+        warnings.append(f'Сканированы по старым правилам (всё от 1 МиБ): {", ".join(old_rules)}. Подключите диск и нажмите '
+                        '«Начать сканирование» — программа предложит продолжить и дочитает только мелкие фото и видео.')
     columns = list(rows[0]) if rows else ['Номер']
     temporary = root / (INDEX_NAME + '.csv.tmp')
     with temporary.open('w', encoding='utf-8-sig', newline='') as handle:
@@ -293,7 +312,7 @@ def write_index(root):
     temporary.replace(root / (INDEX_NAME + '.csv'))
     status_text = {'complete': 'завершён', 'complete_with_inventory_errors': 'завершён, есть недоступные папки',
                    'interrupted': 'остановлен', 'error': 'ошибка', 'running': 'не завершён'}
-    short = ['Номер', 'Модель', 'Ёмкость', 'Метка тома', 'Тип', 'Подключение', 'Состояние', 'Фото/видео с хешем', 'Их объём, ГБ', 'Дата', 'Папка']
+    short = ['Номер', 'Модель', 'Ёмкость', 'Метка тома', 'Тип', 'Подключение', 'Состояние', 'Правила', 'Фото/видео с хешем', 'Их объём, ГБ', 'Дата', 'Папка']
     lines = [f'# {INDEX_NAME}', '', f'Создан автоматически {datetime.now():%d.%m.%Y %H:%M}. Не редактировать вручную: '
              'файл пересоздаётся после каждого сканирования и импорта. Полные сведения, включая серийные номера, — в '
              f'«{INDEX_NAME}.csv» (открывается в Excel).', '',
@@ -331,7 +350,8 @@ def append_run(job, event):
 def process(job):
     global JOB_LOG
     manifest = json.loads((job / 'job.json').read_text(encoding='utf-8'))
-    if manifest.get('version') != VERSION or manifest['policy'] != POLICY:
+    JOB_LOG = job / 'log.txt'  # early, so that a refusal is also kept with the job
+    if manifest.get('version') != VERSION or policy_version(manifest['policy']) is None:
         raise RuntimeError('Different scan policy; use the original worker version')
     disk_id, record = manifest['disk_id'], manifest['record']
     base_state = {'job': str(job), 'disk_id': disk_id, 'model': record.get('model', ''),
@@ -345,7 +365,6 @@ def process(job):
         if volume(root)[0] != record['volume_serial'] or shutil.disk_usage(root).total != record['volume_bytes']:
             raise RuntimeError('Source disconnected or replaced')
     with lock(job / 'worker.lock'), awake():
-        JOB_LOG = job / 'log.txt'
         run_id = uuid.uuid4().hex
         info = describe(root[0])
         base_state.update(letter=root[0], bus_type=info.get('bus_type', ''), media_type=info.get('media_type', ''))
@@ -386,10 +405,21 @@ def process(job):
             say(f'Опись завершена: {summary["files"]:,} файлов, {summary["bytes"] / 1e9:,.1f} ГБ, ошибок {summary["errors"]}')
         else:
             summary = json.loads((job / 'inventory_summary.json').read_text(encoding='utf-8'))
+        if policy_version(manifest['policy']) == 1:
+            # Top-up: the inventory already lists small files, so only the newly
+            # selected ones are read; all saved hashes are reused. Recorded first,
+            # so an older program refuses to continue this job under old rules.
+            manifest.setdefault('policy_history', []).append({'from': 1, 'to': 2, 'utc': utc(), 'app_version': APP_VERSION})
+            manifest['policy'] = POLICY_V2
+            write_json(job / 'job.json', manifest)
+            append_run(job, {'event': 'policy_upgrade', 'run_id': run_id, 'utc': utc(), 'from': 1, 'to': 2})
+            say('Правила выборки обновлены с версии 1 (всё от 1 МиБ) до версии 2: ' + POLICY_TEXT +
+                '. Готовые хеши сохраняются, дочитываются только новые мелкие файлы.')
         with closing(sqlite3.connect(inv.as_uri() + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(job / 'hashes.sqlite')) as target:
             target.execute('create table if not exists hashes(disk_id text,path text,size integer,mtime_ns text,file_id text,sha256 text,status text,error text,primary key(disk_id,path))')
             # Selection uses precisely the same function as the main project.
-            rows = [(p, s, m, i) for p, s, m, i in source.execute('select path,size,mtime_ns,file_id from files order by size,path') if select(p, s)]
+            rows = [(p, s, m, i) for p, s, m, i in source.execute('select path,size,mtime_ns,file_id from files order by size,path')
+                    if select(p, s, THRESHOLDS_V2)]
             total = sum(r[1] for r in rows)
             # Saved hashes that will probably be reused are excluded from the forecast.
             known = {p: (s, m, i) for p, s, m, i, st in target.execute(
@@ -495,13 +525,13 @@ def checksum(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
-def export(job, destination):
+def export(job, destination, name=None):
     with lock(job / 'worker.lock'):
         result = json.loads((job / 'result.json').read_text(encoding='utf-8'))
         if not result['status'].startswith('complete'):
             raise RuntimeError('Only completed jobs can be exported')
         names = REQUIRED_EXPORTS + [n for n in OPTIONAL_EXPORTS if (job / n).exists()]
-        folder = destination / job.name
+        folder = destination / (name or job.name)
         folder.mkdir(parents=True, exist_ok=False)
         hashes = {}
         for name in names:
@@ -513,7 +543,59 @@ def export(job, destination):
         write_json(folder / 'checksums.json', hashes)
         print('Exported:', folder)
 
-def import_result(folder, destination):
+def export_all(root, destination):
+    """Export every completed job of a results folder; unchanged exports are skipped."""
+    done = skipped = failed = 0
+    for job in find_jobs(root):
+        status = read_json(job / 'result.json', {}).get('status', '')
+        if not status.startswith('complete'):
+            print(f'Пропущено (сканирование не завершено): {job.name}')
+            skipped += 1
+            continue
+        try:
+            names = REQUIRED_EXPORTS + [n for n in OPTIONAL_EXPORTS if (job / n).exists()]
+            target = destination / job.name
+            if target.exists():
+                saved = read_json(target / 'checksums.json', {})
+                if set(saved) == set(names) and all(checksum(job / n) == saved[n] for n in names):
+                    print(f'Уже на флешке, без изменений: {job.name}')
+                    skipped += 1
+                    continue
+                # Updated since the previous export (e.g. a top-up pass): a new copy beside it.
+                export(job, destination, f'{job.name}_{datetime.now():%Y%m%d_%H%M%S}')
+            else:
+                export(job, destination)
+            done += 1
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f'ОШИБКА экспорта {job.name}: {exc}', file=sys.stderr)
+            failed += 1
+    print(f'Экспорт: выгружено {done}, пропущено {skipped}, ошибок {failed}')
+    return 2 if failed else 0
+
+def verified_count(folder):
+    try:
+        with closing(sqlite3.connect((folder / 'hashes.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
+            return db.execute("select count(*) from hashes where status='verified'").fetchone()[0]
+    except sqlite3.Error:
+        return -1
+
+def import_any(folder, destination):
+    """Import one exported job, or every exported job inside a folder (a whole USB stick)."""
+    folders = [folder] if (folder / 'checksums.json').exists() else sorted(p for p in folder.iterdir() if (p / 'checksums.json').exists())
+    if not folders:
+        raise ValueError('No exported jobs (checksums.json) in ' + str(folder))
+    failed = 0
+    for item in folders:
+        try:
+            import_result(item, destination, refresh=False)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            print(f'ОШИБКА импорта {item.name}: {exc}', file=sys.stderr)
+            failed += 1
+    refresh_index(destination)
+    print(f'Импорт: обработано {len(folders)}, ошибок {failed}')
+    return 2 if failed else 0
+
+def import_result(folder, destination, refresh=True):
     hashes = json.loads((folder / 'checksums.json').read_text(encoding='utf-8'))
     if not set(REQUIRED_EXPORTS) <= set(hashes) <= set(REQUIRED_EXPORTS + OPTIONAL_EXPORTS):
         raise ValueError('Unexpected export file list')
@@ -526,11 +608,19 @@ def import_result(folder, destination):
     job_id = str(manifest.get('job_id', ''))
     if not JOB_ID.fullmatch(job_id) or not job_id.startswith(manifest['disk_id'] + '_'):
         raise ValueError('Invalid job ID')
-    # Filed into the folder of its disk under the original job ID; an existing
-    # scan is never overwritten.
+    # Filed into the folder of its disk under the original job ID. Nothing is
+    # overwritten: a newer version of the same job moves the old one to _Архив.
     output = disk_folder(destination, manifest['disk_id'], manifest.get('record', {})) / job_id
     if output.exists():
-        raise ValueError('This job has already been imported: ' + str(output))
+        if all((output / n).exists() and checksum(output / n) == d for n, d in hashes.items()):
+            print('Уже импортировано, без изменений:', output)
+            return output
+        if verified_count(folder) < verified_count(output):
+            raise ValueError('Импортируемое задание старее уже имеющегося (меньше хешей); ничего не изменено: ' + str(output))
+        archived = destination / '_Архив' / 'Заменённые задания' / f'{job_id}_{datetime.now():%Y%m%d_%H%M%S}'
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        output.rename(archived)
+        print('Прежняя версия задания перенесена в', archived)
     output.mkdir(parents=True, exist_ok=False)
     for name in [*hashes, 'checksums.json']:
         shutil.copy2(folder / name, output / name)
@@ -538,7 +628,9 @@ def import_result(folder, destination):
         if checksum(output / name) != digest:
             raise ValueError('Imported copy checksum mismatch: ' + name)
     print('Imported for review:', output)
-    refresh_index(destination)
+    if refresh:
+        refresh_index(destination)
+    return output
 
 def main():
     global STOP_FILE, PROGRESS_FILE
@@ -553,7 +645,10 @@ def main():
     start.add_argument('--output', type=Path, default=Path(os.environ.get('LOCALAPPDATA', '.')) / 'HDDScanner' / 'results')
     resume = sub.add_parser('resume'); resume.add_argument('job', type=Path)
     exp = sub.add_parser('export'); exp.add_argument('job', type=Path); exp.add_argument('destination', type=Path)
-    imp = sub.add_parser('import'); imp.add_argument('folder', type=Path); imp.add_argument('destination', type=Path)
+    exa = sub.add_parser('export-all', help='Export all completed jobs of a results folder')
+    exa.add_argument('root', type=Path); exa.add_argument('destination', type=Path)
+    imp = sub.add_parser('import', help='One exported job or a folder with several')
+    imp.add_argument('folder', type=Path); imp.add_argument('destination', type=Path)
     idx = sub.add_parser('index', help='Rebuild the disk register of a results folder'); idx.add_argument('root', type=Path)
     if len(sys.argv) == 1:
         print('HDD Scanner ' + APP_VERSION)
@@ -597,11 +692,13 @@ def main():
         return process(args.job.resolve())
     if args.command == 'export':
         export(args.job.resolve(), args.destination.resolve())
+    elif args.command == 'export-all':
+        return export_all(args.root.resolve(), args.destination.resolve())
     elif args.command == 'index':
         rows = write_index(args.root.resolve())
         print(f'{INDEX_NAME}: {len(rows)} jobs ->', args.root.resolve() / (INDEX_NAME + '.md'))
     else:
-        import_result(args.folder.resolve(), args.destination.resolve())
+        return import_any(args.folder.resolve(), args.destination.resolve())
     return 0
 
 if __name__ == '__main__':
@@ -609,4 +706,10 @@ if __name__ == '__main__':
         sys.exit(main())
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print('STOP:', exc, file=sys.stderr)
+        if JOB_LOG:
+            try:
+                with JOB_LOG.open('a', encoding='utf-8') as handle:
+                    handle.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S ') + f'ОСТАНОВКА: {exc}\n')
+            except OSError:
+                pass
         sys.exit(2)

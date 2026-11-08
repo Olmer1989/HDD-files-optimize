@@ -8,11 +8,30 @@ from inventory import MEDIA, MIN_BYTES, EXCLUDED_DIRS, excluded_file
 
 BASE = Path(__file__).resolve().parents[1]
 
-def select(path, size):
+# Selection rules. Version 1: every media file from 1 MiB. Version 2 (agreed
+# 08.11.2026): camera photos (JPEG/HEIC) from 50 KB, which keeps old
+# camera/phone photos; other images and RAW from 150 KB, which skips web
+# graphics and thumbnails; video of any non-zero size (old 3GP clips are tiny).
+CAMERA_IMAGES = frozenset('.jpg .jpeg .heic .heif'.split())
+VIDEO = frozenset('.mov .mp4 .avi .mkv .m4v .mts .m2ts .mpg .mpeg .wmv .3gp .vob .mod .tod .mxf .ts .m2v .webm .flv'.split())
+THRESHOLDS_V1 = {'default': MIN_BYTES}
+THRESHOLDS_V2 = {'camera_image': 50_000, 'video': 1, 'other_media': 150_000}
+
+def threshold(extension, thresholds):
+    if 'default' in thresholds:
+        return thresholds['default']
+    if extension in CAMERA_IMAGES:
+        return thresholds['camera_image']
+    if extension in VIDEO:
+        return thresholds['video']
+    return thresholds['other_media']
+
+def select(path, size, thresholds=THRESHOLDS_V1):
     parts = PureWindowsPath(path).parts
     if any(p.lower() in EXCLUDED_DIRS or excluded_file(p) for p in parts):
         return False
-    return PureWindowsPath(path).suffix.lower() in MEDIA and size >= MIN_BYTES
+    extension = PureWindowsPath(path).suffix.lower()
+    return extension in MEDIA and size >= threshold(extension, thresholds)
 
 def main():
     registry = json.loads(Path(__file__).with_name('disks.json').read_text(encoding='utf-8'))

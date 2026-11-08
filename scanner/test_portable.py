@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 import portable
@@ -64,8 +65,9 @@ class PortableTests(unittest.TestCase):
                 imported = base / 'imports' / 'HDD03 - Test disk - 2 ТБ - Фото' / job_id
                 self.assertTrue((imported / 'hashes.sqlite').exists())
                 self.assertIn('HDD03', (base / 'imports' / 'Реестр дисков.csv').read_text(encoding='utf-8-sig'))
-                with self.assertRaisesRegex(ValueError, 'already been imported'):
-                    portable.import_result(base / 'usb' / job.name, base / 'imports')
+                # Importing the very same export again changes nothing.
+                self.assertEqual(portable.import_result(base / 'usb' / job.name, base / 'imports'), imported)
+                self.assertFalse((base / 'imports' / '_Архив').exists())
                 # Exports from 1.0.x have no runs.jsonl/log.txt and must still import.
                 old = base / 'old_usb' / job.name
                 old.mkdir(parents=True)
@@ -82,6 +84,103 @@ class PortableTests(unittest.TestCase):
                 photo.write_bytes(b'b' * 1048576)
                 self.assertEqual(portable.process(job), 2)
                 self.assertEqual(json.loads((job / 'result.json').read_text())['status'], 'error')
+
+    def make_job(self, results, disk_id, letter_root, files, policy, hashed=()):
+        job_id = disk_id + '_' + uuid.uuid4().hex
+        job = results / f'{disk_id} - Test - 1 ТБ' / job_id
+        job.mkdir(parents=True)
+        record = {'volume_serial': 'ABC', 'volume_bytes': shutil.disk_usage(letter_root).total, 'model': 'Test',
+                  'physical_bytes': 10**12, 'hardware_serial': 'SER-' + disk_id}
+        portable.write_json(job / 'job.json', {'version': portable.VERSION, 'job_id': job_id, 'disk_id': disk_id,
+                            'record': record, 'policy': policy, 'inventory_finished': True})
+        portable.write_json(job / 'inventory_summary.json', {'errors': 0, 'files': len(files), 'bytes': 1})
+        with closing(sqlite3.connect(job / 'inventory.sqlite')) as db:
+            db.execute('create table files(path text,size integer,mtime_ns text,file_id text)')
+            for name in files:
+                st = (letter_root / name).stat()
+                db.execute('insert into files values (?,?,?,?)', (name, st.st_size, str(st.st_mtime_ns), str(st.st_ino)))
+            db.commit()
+        with closing(sqlite3.connect(job / 'hashes.sqlite')) as db:
+            db.execute('create table hashes(disk_id text,path text,size integer,mtime_ns text,file_id text,sha256 text,status text,error text,primary key(disk_id,path))')
+            for name in hashed:
+                st = (letter_root / name).stat()
+                db.execute('insert into hashes values (?,?,?,?,?,?,?,?)', (disk_id, name, st.st_size, str(st.st_mtime_ns),
+                           str(st.st_ino), 'x' * 64, 'verified', ''))
+            db.commit()
+        return job
+
+    def patched(self, root):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        for name, value in [('discover_disk', (str(root), {})), ('describe', {'letter': 'Z'}),
+                            ('volume', ('ABC', '', '')), ('awake', nullcontext())]:
+            stack.enter_context(patch.object(portable, name, return_value=value))
+        stack.enter_context(patch.object(portable, 'require_separate_output'))
+        stack.enter_context(redirect_stdout(io.StringIO()))
+        return stack
+
+    def test_policy_1_job_is_topped_up_not_rescanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); root = base / 'disk'; root.mkdir()
+            (root / 'big.jpg').write_bytes(b'b' * 1048576)      # hashed under version 1
+            (root / 'old_phone.jpg').write_bytes(b'p' * 60_000)  # new under version 2
+            (root / 'icon.png').write_bytes(b'i' * 60_000)       # stays outside (< 150 KB)
+            (root / 'clip.3gp').write_bytes(b'v' * 200_000)      # new: any video size
+            job = self.make_job(base / 'results', 'HDD04', root, ['big.jpg', 'old_phone.jpg', 'icon.png', 'clip.3gp'],
+                                portable.POLICY_V1, hashed=['big.jpg'])
+            read = []
+            def fake_hash(path, expected, progress):
+                read.append(path.name); return 'h' * 64
+            with self.patched(root), patch.object(portable, 'hash_one', side_effect=fake_hash):
+                self.assertEqual(portable.process(job), 0)
+            self.assertEqual(sorted(read), ['clip.3gp', 'old_phone.jpg'])  # big.jpg reused, icon.png not selected
+            manifest = json.loads((job / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual((manifest['policy'], manifest['policy_history'][0]['from']), (portable.POLICY_V2, 1))
+            result = json.loads((job / 'result.json').read_text(encoding='utf-8'))
+            self.assertEqual((result['selected_files'], result['cached_files'], result['hashed_files']), (3, 1, 2))
+            self.assertIn('policy_upgrade', (job / 'runs.jsonl').read_text(encoding='utf-8'))
+            self.assertIn('| v2 |', (base / 'results' / 'Реестр дисков.md').read_text(encoding='utf-8'))
+
+    def test_unknown_policy_refused_and_logged_in_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); root = base / 'disk'; root.mkdir()
+            job = self.make_job(base / 'r', 'HDD05', root, [], {'algorithm': 'md5'})
+            with patch.object(portable, 'JOB_LOG', None):
+                with self.assertRaisesRegex(RuntimeError, 'policy'):
+                    portable.process(job)
+                self.assertEqual(portable.JOB_LOG, job / 'log.txt')  # main() writes the STOP line there
+
+    def test_export_all_and_import_whole_stick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); root = base / 'disk'; root.mkdir()
+            (root / 'a.jpg').write_bytes(b'a' * 1048576)
+            results = base / 'other_pc'
+            jobs = [self.make_job(results, d, root, ['a.jpg'], portable.POLICY_V2, hashed=['a.jpg']) for d in ('HDD06', 'HDD07')]
+            unfinished = self.make_job(results, 'HDD08', root, ['a.jpg'], portable.POLICY_V2)
+            for job in jobs:
+                portable.write_json(job / 'result.json', {'status': 'complete'})
+            portable.write_json(unfinished / 'result.json', {'status': 'interrupted'})
+            stick, main = base / 'usb', base / 'main'
+            with redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(portable.export_all(results, stick), 0)
+                self.assertEqual(portable.export_all(results, stick), 0)  # nothing changed: skipped
+            self.assertEqual(sorted(p.name for p in stick.iterdir()), sorted(j.name for j in jobs))
+            self.assertIn('без изменений', out.getvalue())
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(portable.import_any(stick, main), 0)
+                self.assertEqual(portable.import_any(stick, main), 0)  # repeated import is harmless
+            self.assertEqual(len(portable.find_jobs(main)), 2)
+            # A newer export of the same job (one more hash) replaces the old import, which is archived.
+            with closing(sqlite3.connect(jobs[0] / 'hashes.sqlite')) as db:
+                db.execute("insert into hashes values ('HDD06','b.jpg',1,'1','1','y','verified','')"); db.commit()
+            with redirect_stdout(io.StringIO()):
+                portable.export_all(results, stick)
+                portable.import_any(stick, main)
+            self.assertEqual(portable.verified_count(portable.find_jobs(main)[0]), 2)
+            self.assertEqual(len(list((main / '_Архив' / 'Заменённые задания').iterdir())), 1)
+            # An older export never replaces a newer import.
+            with self.assertRaisesRegex(ValueError, 'старее'):
+                portable.import_result(stick / jobs[0].name, main)
 
     def test_forecast_and_duration(self):
         rate = portable.Rate(window=600, minimum=30)
