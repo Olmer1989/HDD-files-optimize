@@ -19,3 +19,8 @@ __pycache__/
 /git-acl-*.txt
 /git-acl-*.txt.owner.txt
 
+
+# Scan results (serial numbers, paths) — never commit
+/РЕЗУЛЬТАТЫ СКАНИРОВАНИЯ - сводные/
+/Сканирование основного десктопа/
+/HDDScanner-Windows-x64 - СКАНИРОВАНИЕ ДИСКОВ  - финальный вариант/
