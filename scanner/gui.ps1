@@ -74,7 +74,13 @@ function GB($bytes) { return ('{0:N1} ГБ' -f ([double]$bytes / 1e9)) }
 function Get-Jobs($folder) {
     $found = New-Object System.Collections.ArrayList
     if (-not $folder -or -not (Test-Path -LiteralPath $folder -PathType Container)) { return ,$found }
-    foreach ($dir in @(Get-ChildItem -LiteralPath $folder -Directory -ErrorAction SilentlyContinue)) {
+    # Layout: <results>\<HDDxx - модель - ёмкость - метка>\<задание>; older jobs may lie directly in <results>.
+    $dirs = New-Object System.Collections.ArrayList
+    foreach ($top in @(Get-ChildItem -LiteralPath $folder -Directory -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('_') })) {
+        [void]$dirs.Add($top)
+        foreach ($sub in @(Get-ChildItem -LiteralPath $top.FullName -Directory -ErrorAction SilentlyContinue)) { [void]$dirs.Add($sub) }
+    }
+    foreach ($dir in $dirs) {
         $file = Join-Path $dir.FullName 'job.json'
         if (-not (Test-Path -LiteralPath $file)) { continue }
         try {
@@ -138,8 +144,16 @@ $id = New-Object Windows.Forms.TextBox; $id.SetBounds(255,27,110,28); $id.Text='
 $null = Add-Label $g2 'HDD01 и HDD02 заняты. Один номер — только одному физическому диску.' 380 30 650
 $null = Add-Label $g2 'Папка результатов:' 12 64 240
 $output = New-Object Windows.Forms.TextBox; $output.SetBounds(255,61,620,28); $output.Font=$form.Font
-$output.Text = Join-Path $env:LOCALAPPDATA 'HDDScanner\results'; $g2.Controls.Add($output)
-$browse = Add-Button $g2 'Выбрать папку…' 885 57 147 { $p=Folder 'Папка результатов на внутреннем диске'; if ($p) { $output.Text=$p; Refresh-Disks } }
+# The chosen results folder is remembered on this computer.
+$settingsFile = Join-Path $env:LOCALAPPDATA 'HDDScanner\settings.json'
+$output.Text = Join-Path $env:LOCALAPPDATA 'HDDScanner\results'
+try { if (-not $IntegrationTest -and (Test-Path -LiteralPath $settingsFile)) { $saved = [string](Read-Json $settingsFile).output; if ($saved -and (Test-Path -LiteralPath $saved -PathType Container)) { $output.Text = $saved } } } catch { }
+$g2.Controls.Add($output)
+function Save-Settings {
+    if ($IntegrationTest -or $SmokeTest) { return }
+    try { [void][IO.Directory]::CreateDirectory((Split-Path $settingsFile)); [IO.File]::WriteAllText($settingsFile, ([pscustomobject]@{output=$output.Text} | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) } catch { }
+}
+$browse = Add-Button $g2 'Выбрать папку…' 885 57 147 { $p=Folder 'Папка результатов на внутреннем диске'; if ($p) { $output.Text=$p; Save-Settings; Refresh-Disks } }
 
 # 3. Actions
 $g3 = Add-Group '3. Действия' 12 368 1045 104
@@ -202,6 +216,7 @@ $start = Add-Button $g3 'Начать сканирование' 12 24 250 {
         if ($taken.Count -gt 0) { throw "Номер $($id.Text) уже назначен другому диску (папка $($taken[0].Path)). Выберите другой номер." }
         $message = "Диск: $($selected.Text)`nМодель: $($selected.SubItems[1].Text)`nСерийный номер: $($disk.Serial)`nНомер архива: $($id.Text)`nРезультаты: $($output.Text)`n`nБудут прочитаны метаданные и рассчитаны SHA-256 фото/видео от 1 МиБ. Файлы на диске не изменяются. Начать?"
         if ([Windows.Forms.MessageBox]::Show($message,'Проверьте выбранный диск','YesNo','Question') -eq 'Yes') {
+            Save-Settings
             Launch @('start','--disk',$id.Text,'--letter',$disk.Letter,'--output',$output.Text,'--yes') ('start_'+$id.Text)
         }
     } catch { Failure $_.Exception.Message }
@@ -221,10 +236,20 @@ $export = Add-Button $g3 'Экспорт на флешку…' 12 62 250 {
     try { if (Busy) { throw 'Сначала дождитесь завершения операции.' }; $job=Folder 'Папка завершённого задания'; if ($job) { $dest=Folder 'Папка назначения на флешке'; if ($dest) { Launch @('export',$job,$dest) 'export' } } } catch { Failure $_.Exception.Message }
 }
 $import = Add-Button $g3 'Импорт с флешки…' 272 62 250 {
-    try { if (Busy) { throw 'Сначала дождитесь завершения операции.' }; $job=Folder 'Папка экспортированного задания на флешке'; if ($job) { $dest=Folder 'Локальная папка импорта на основном компьютере'; if ($dest) { Launch @('import',$job,$dest) 'import' } } } catch { Failure $_.Exception.Message }
+    # Imports go straight into the results folder, into the folder of their disk.
+    try { if (Busy) { throw 'Сначала дождитесь завершения операции.' }; $job=Folder 'Папка экспортированного задания на флешке'; if ($job) {
+        if ([Windows.Forms.MessageBox]::Show("Задание будет проверено по контрольным суммам и помещено в папку своего диска внутри:`n$($output.Text)`n`nПродолжить?",'Импорт','YesNo','Question') -eq 'Yes') { Launch @('import',$job,$output.Text) 'import' }
+    } } catch { Failure $_.Exception.Message }
 }
 $open = Add-Button $g3 'Открыть папку результатов' 532 62 250 {
     try { if (Test-Path -LiteralPath $output.Text -PathType Container) { Start-Process explorer.exe -ArgumentList ('"'+$output.Text+'"') } } catch { Failure $_.Exception.Message }
+}
+$register = Add-Button $g3 'Открыть реестр дисков' 792 62 240 {
+    try {
+        $file = Join-Path $output.Text 'Реестр дисков.csv'
+        if (-not (Test-Path -LiteralPath $file)) { throw 'В выбранной папке результатов ещё нет реестра. Он создаётся после сканирования или импорта.' }
+        Start-Process -FilePath $file
+    } catch { Failure $_.Exception.Message }
 }
 
 # 4. Progress

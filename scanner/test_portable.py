@@ -15,11 +15,14 @@ class PortableTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / 'source'; root.mkdir()
-            job = base / 'HDD03_job'; job.mkdir()
+            job_id = 'HDD03_' + 'a' * 32
+            results = base / 'results'
+            job = results / 'HDD03 - Test disk - 2 ТБ - Фото' / job_id; job.mkdir(parents=True)
             photo = root / 'photo.jpg'; photo.write_bytes(b'a' * 1048576)
             st = photo.stat()
-            record = {'volume_serial': 'ABC', 'volume_bytes': shutil.disk_usage(root).total}
-            portable.write_json(job / 'job.json', {'version': portable.VERSION, 'disk_id': 'HDD03', 'record': record,
+            record = {'volume_serial': 'ABC', 'volume_bytes': shutil.disk_usage(root).total, 'model': 'Test disk',
+                      'physical_bytes': 2 * 10**12, 'label_at_registration': 'Фото', 'hardware_serial': 'SER'}
+            portable.write_json(job / 'job.json', {'version': portable.VERSION, 'job_id': job_id, 'disk_id': 'HDD03', 'record': record,
                 'policy': portable.POLICY, 'inventory_finished': True})
             portable.write_json(job / 'inventory_summary.json', {'errors': 0})
             with closing(sqlite3.connect(job / 'inventory.sqlite')) as db:
@@ -55,16 +58,24 @@ class PortableTests(unittest.TestCase):
                 self.assertIn('Носитель HDD03: Test disk', (job / 'log.txt').read_text(encoding='utf-8'))
                 portable.export(job, base / 'usb')
                 self.assertTrue((base / 'usb' / job.name / 'runs.jsonl').exists())
+                index = (results / 'Реестр дисков.md').read_text(encoding='utf-8')
+                self.assertIn('| HDD03 | Test disk | 2 ТБ | Фото |', index)
                 portable.import_result(base / 'usb' / job.name, base / 'imports')
-                self.assertEqual(len(list((base / 'imports').iterdir())), 1)
+                imported = base / 'imports' / 'HDD03 - Test disk - 2 ТБ - Фото' / job_id
+                self.assertTrue((imported / 'hashes.sqlite').exists())
+                self.assertIn('HDD03', (base / 'imports' / 'Реестр дисков.csv').read_text(encoding='utf-8-sig'))
+                with self.assertRaisesRegex(ValueError, 'already been imported'):
+                    portable.import_result(base / 'usb' / job.name, base / 'imports')
                 # Exports from 1.0.x have no runs.jsonl/log.txt and must still import.
                 old = base / 'old_usb' / job.name
                 old.mkdir(parents=True)
                 for name in portable.REQUIRED_EXPORTS:
                     shutil.copy2(job / name, old / name)
+                manifest = json.loads((old / 'job.json').read_text(encoding='utf-8'))
+                portable.write_json(old / 'job.json', {**manifest, 'job_id': 'HDD03_' + 'b' * 32})
                 portable.write_json(old / 'checksums.json', {n: portable.checksum(old / n) for n in portable.REQUIRED_EXPORTS})
                 portable.import_result(old, base / 'imports')
-                self.assertEqual(len(list((base / 'imports').iterdir())), 2)
+                self.assertEqual(len(list((base / 'imports' / 'HDD03 - Test disk - 2 ТБ - Фото').iterdir())), 2)
                 (base / 'usb' / job.name / 'hashes.sqlite').write_bytes(b'damaged')
                 with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
                     portable.import_result(base / 'usb' / job.name, base / 'imports')
@@ -92,6 +103,20 @@ class PortableTests(unittest.TestCase):
             'volume_bytes': 3e12, 'letter': 'K', 'partition_style': 'MBR', 'mbr_signature': 305419896, 'computer': 'PC2'}))
         for text in ['WD Red', 'WD-1', 'HDD', 'SATA', 'AB12CD34', 'буква K:', '12345678', 'PC2', '«Фото»']:
             self.assertIn(text, lines)
+
+    def test_disk_folder_names(self):
+        self.assertEqual(portable.capacity(2000398933504), '2 ТБ')
+        self.assertEqual(portable.capacity(18 * 10**12), '18 ТБ')
+        self.assertEqual(portable.capacity(1.5 * 10**12), '1,5 ТБ')
+        self.assertEqual(portable.capacity(500074283008), '500 ГБ')
+        self.assertEqual(portable.disk_folder_name('HDD07', {'model': 'WD: Red?', 'physical_bytes': 3 * 10**12,
+                         'label_at_registration': 'Фото/2010'}), 'HDD07 - WD_ Red_ - 3 ТБ - Фото_2010')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'HDD07 - старое имя').mkdir()
+            self.assertEqual(portable.disk_folder(root, 'HDD07', {'model': 'новое'}).name, 'HDD07 - старое имя')
+            self.assertEqual(portable.results_root(root / 'HDD07 - старое имя' / ('HDD07_' + 'c' * 32)), root)
+            self.assertEqual(portable.results_root(root / ('HDD07_' + 'c' * 32)), root)
 
     def test_unfinished_export_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

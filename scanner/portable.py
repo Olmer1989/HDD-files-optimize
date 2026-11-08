@@ -194,6 +194,130 @@ def identity_text(disk_id, info):
         lines.append('Не удалось получить часть сведений Windows: ' + info['describe_error'])
     return lines
 
+# Uniform results layout, the same on every computer:
+#   <results root>/<HDDxx - model - capacity - label>/<job_id>/
+#   <results root>/Реестр дисков.md and .csv, rebuilt after each scan/import.
+JOB_ID = re.compile(r'HDD[0-9]{2,}_[0-9a-f]{32}')
+INDEX_NAME = 'Реестр дисков'
+
+def capacity(size):
+    if not size:
+        return 'размер неизвестен'
+    if size >= 1e12:
+        return f'{size / 1e12:.1f}'.replace('.0', '').replace('.', ',') + ' ТБ'
+    return f'{round(size / 1e9)} ГБ'
+
+def disk_folder_name(disk_id, record):
+    parts = [disk_id, (record.get('model') or 'модель неизвестна').strip(), capacity(record.get('physical_bytes'))]
+    if (record.get('label_at_registration') or '').strip():
+        parts.append(record['label_at_registration'].strip())
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', ' - '.join(parts)).strip(' .')
+    return name[:120].rstrip(' .')
+
+def disk_folder(root, disk_id, record):
+    # The folder of an already known disk is reused even if its label changed.
+    if root.is_dir():
+        for child in sorted(root.iterdir()):
+            if child.is_dir() and child.name.startswith(disk_id + ' - '):
+                return child
+    return root / disk_folder_name(disk_id, record)
+
+def results_root(job):
+    return job.parent.parent if job.parent.name.startswith(job.name.split('_')[0] + ' - ') else job.parent
+
+def find_jobs(root):
+    found = []
+    if not root.is_dir():
+        return found
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or child.name.startswith('_'):
+            continue  # _Входящие, _Архив… are not part of the catalogue
+        for folder in [child, *sorted(p for p in child.iterdir() if p.is_dir())]:
+            if (folder / 'job.json').is_file():
+                found.append(folder)
+    return found
+
+def read_json(path, default=None):
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return default
+
+def job_row(job, root):
+    manifest = read_json(job / 'job.json', {})
+    record = manifest.get('record', {})
+    result = read_json(job / 'result.json', {})
+    summary = read_json(job / 'inventory_summary.json', {})
+    identity = dict(manifest.get('identity_at_registration') or {})
+    last_run = {}
+    if (job / 'runs.jsonl').exists():
+        for line in (job / 'runs.jsonl').read_text(encoding='utf-8').splitlines():
+            event = json.loads(line)
+            if event.get('identity'):
+                identity.update({k: v for k, v in event['identity'].items() if v not in (None, '')})
+            last_run = event if event.get('event') in ('start', 'finish') else last_run
+    status = result.get('status', 'running')
+    marker = identity.get('partition_guid') or identity.get('disk_guid')
+    if not marker and isinstance(identity.get('mbr_signature'), int) and identity['mbr_signature']:
+        marker = f'MBR {identity["mbr_signature"]:08X}'
+    return {
+        'Номер': manifest.get('disk_id', '?'), 'Модель': record.get('model', ''), 'Ёмкость': capacity(record.get('physical_bytes')),
+        'Метка тома': record.get('label_at_registration', ''), 'Серийный номер устройства': record.get('hardware_serial', ''),
+        'Серийный номер тома': record.get('volume_serial', ''), 'Метка на диске (GUID/MBR)': marker or '',
+        'Тип': identity.get('media_type') if identity.get('media_type') in ('HDD', 'SSD') else '',
+        'Подключение': identity.get('bus_type', ''), 'Последняя буква': identity.get('letter', ''),
+        'Компьютер': identity.get('computer', ''), 'Состояние': status,
+        'Файлов на диске': summary.get('files', ''), 'Занято файлами, ГБ': round(summary['bytes'] / 1e9, 1) if summary.get('bytes') else '',
+        'Фото/видео с хешем': result.get('selected_files', ''),
+        'Их объём, ГБ': round(result['selected_bytes'] / 1e9, 1) if result.get('selected_bytes') else '',
+        'Ошибок описи': summary.get('errors', ''), 'Дата': (last_run.get('utc') or manifest.get('created_utc', ''))[:10],
+        'Папка': str(job.relative_to(root)),
+    }
+
+def write_index(root):
+    import csv
+    rows = [job_row(job, root) for job in find_jobs(root)]
+    rows.sort(key=lambda r: (int(r['Номер'][3:]) if r['Номер'][3:].isdigit() else 0, r['Дата']))
+    warnings = []
+    by_id, by_serial = {}, {}
+    for r in rows:
+        by_id.setdefault(r['Номер'], set()).add((r['Серийный номер устройства'], r['Серийный номер тома']))
+        by_serial.setdefault((r['Серийный номер устройства'], r['Серийный номер тома']), set()).add(r['Номер'])
+    warnings += [f'Номер {k} назначен разным дискам — нужно разобраться вручную.' for k, v in by_id.items() if len(v) > 1]
+    warnings += [f'Один диск (серийный номер {k[0]}) записан под номерами {", ".join(sorted(v))}.' for k, v in by_serial.items() if len(v) > 1]
+    columns = list(rows[0]) if rows else ['Номер']
+    temporary = root / (INDEX_NAME + '.csv.tmp')
+    with temporary.open('w', encoding='utf-8-sig', newline='') as handle:
+        writer = csv.DictWriter(handle, columns, delimiter=';')
+        writer.writeheader(); writer.writerows(rows)
+    temporary.replace(root / (INDEX_NAME + '.csv'))
+    status_text = {'complete': 'завершён', 'complete_with_inventory_errors': 'завершён, есть недоступные папки',
+                   'interrupted': 'остановлен', 'error': 'ошибка', 'running': 'не завершён'}
+    short = ['Номер', 'Модель', 'Ёмкость', 'Метка тома', 'Тип', 'Подключение', 'Состояние', 'Фото/видео с хешем', 'Их объём, ГБ', 'Дата', 'Папка']
+    lines = [f'# {INDEX_NAME}', '', f'Создан автоматически {datetime.now():%d.%m.%Y %H:%M}. Не редактировать вручную: '
+             'файл пересоздаётся после каждого сканирования и импорта. Полные сведения, включая серийные номера, — в '
+             f'«{INDEX_NAME}.csv» (открывается в Excel).', '',
+             f'Заданий: {len(rows)} · дисков: {len(by_id)} · фото/видео с хешем: '
+             + f'{sum(r["Фото/видео с хешем"] or 0 for r in rows):,}'.replace(',', ' ') + ' файлов, '
+             + f'{sum(r["Их объём, ГБ"] or 0 for r in rows):,.1f}'.replace(',', ' ') + ' ГБ', '']
+    if warnings:
+        lines += ['## Требует внимания', '', *[f'- {w}' for w in warnings], '']
+    lines += ['| ' + ' | '.join(short) + ' |', '|' + '---|' * len(short)]
+    for r in rows:
+        values = {**r, 'Состояние': status_text.get(r['Состояние'], r['Состояние']), 'Папка': r['Папка'].replace('\\', '/')}
+        lines.append('| ' + ' | '.join(str(values[c]).replace('|', '/') for c in short) + ' |')
+    temporary = root / (INDEX_NAME + '.md.tmp')
+    temporary.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    temporary.replace(root / (INDEX_NAME + '.md'))
+    return rows
+
+def refresh_index(root):
+    try:
+        write_index(root)
+        say(f'Реестр дисков обновлён: {root / (INDEX_NAME + ".md")}', to_file=False)
+    except (OSError, ValueError, KeyError) as exc:
+        say(f'Реестр дисков не обновлён (результаты сохранены): {exc}', to_file=False)
+
 def safe_relative(rel):
     p = PureWindowsPath(rel)
     if not p.parts or p.is_absolute() or p.drive or any(x in ('.', '..') or ':' in x for x in p.parts):
@@ -360,7 +484,8 @@ def process(job):
                     f'прочитано {read / 1e9:,.1f} ГБ за {duration(time.monotonic() - started)}'
                     + (f' · {report["error"]}' if report.get('error') else ''))
                 print(json.dumps(report, ensure_ascii=False, indent=2))
-        return 0 if report['status'].startswith('complete') else 2
+    refresh_index(results_root(job))
+    return 0 if report['status'].startswith('complete') else 2
 
 def require_separate_output(job, root):
     if job.resolve().drive.upper() == Path(root).drive.upper():
@@ -398,15 +523,22 @@ def import_result(folder, destination):
     manifest = json.loads((folder / 'job.json').read_text(encoding='utf-8'))
     if not re.fullmatch('HDD[0-9]{2,}', manifest['disk_id']):
         raise ValueError('Invalid disk ID')
-    # Keep imports separate; never overwrite a local registry or existing scan.
-    output = destination / (manifest['disk_id'] + '_' + uuid.uuid4().hex)
+    job_id = str(manifest.get('job_id', ''))
+    if not JOB_ID.fullmatch(job_id) or not job_id.startswith(manifest['disk_id'] + '_'):
+        raise ValueError('Invalid job ID')
+    # Filed into the folder of its disk under the original job ID; an existing
+    # scan is never overwritten.
+    output = disk_folder(destination, manifest['disk_id'], manifest.get('record', {})) / job_id
+    if output.exists():
+        raise ValueError('This job has already been imported: ' + str(output))
     output.mkdir(parents=True, exist_ok=False)
     for name in [*hashes, 'checksums.json']:
         shutil.copy2(folder / name, output / name)
     for name, digest in hashes.items():
         if checksum(output / name) != digest:
             raise ValueError('Imported copy checksum mismatch: ' + name)
-    print('Imported for review (registry unchanged):', output)
+    print('Imported for review:', output)
+    refresh_index(destination)
 
 def main():
     global STOP_FILE, PROGRESS_FILE
@@ -422,6 +554,7 @@ def main():
     resume = sub.add_parser('resume'); resume.add_argument('job', type=Path)
     exp = sub.add_parser('export'); exp.add_argument('job', type=Path); exp.add_argument('destination', type=Path)
     imp = sub.add_parser('import'); imp.add_argument('folder', type=Path); imp.add_argument('destination', type=Path)
+    idx = sub.add_parser('index', help='Rebuild the disk register of a results folder'); idx.add_argument('root', type=Path)
     if len(sys.argv) == 1:
         print('HDD Scanner ' + APP_VERSION)
         print('1 - New disk scan\n2 - Resume\n3 - Export to USB\n4 - Import on main PC')
@@ -452,7 +585,7 @@ def main():
         print(json.dumps({'disk_id': args.disk, **record}, ensure_ascii=False, indent=2))
         if not args.yes and input('Check central disk ID and device. Type YES to scan: ').strip() != 'YES':
             return 1
-        job = output / (args.disk + '_' + uuid.uuid4().hex)
+        job = disk_folder(output, args.disk, record) / (args.disk + '_' + uuid.uuid4().hex)
         job.mkdir(parents=True, exist_ok=False)
         # The full description is kept beside the identity record used for checks.
         write_json(job / 'job.json', {'version': VERSION, 'job_id': job.name, 'disk_id': args.disk,
@@ -464,6 +597,9 @@ def main():
         return process(args.job.resolve())
     if args.command == 'export':
         export(args.job.resolve(), args.destination.resolve())
+    elif args.command == 'index':
+        rows = write_index(args.root.resolve())
+        print(f'{INDEX_NAME}: {len(rows)} jobs ->', args.root.resolve() / (INDEX_NAME + '.md'))
     else:
         import_result(args.folder.resolve(), args.destination.resolve())
     return 0
