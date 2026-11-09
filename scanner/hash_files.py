@@ -12,6 +12,35 @@ from inventory import discover_disk, volume
 def signature(st):
     return st.st_size, str(st.st_mtime_ns), str(st.st_ino)
 
+class ReadFailure(OSError):
+    """Reading an already opened file failed: almost always the medium itself.
+
+    Python reports Windows read errors through the C runtime, which maps codes
+    19-36 (CRC error, sector not found, read fault...) to EACCES, so a damaged
+    sector looks like "Permission denied". The real Windows code is kept here.
+    """
+    def __init__(self, message, windows_code, offset):
+        super().__init__(message)
+        self.windows_code = windows_code
+        self.offset = offset
+
+WINDOWS_ERROR_TEXT = {21: 'устройство не готово', 23: 'ошибка в данных (CRC) — повреждённый сектор',
+                      25: 'ошибка позиционирования головки', 27: 'сектор не найден', 30: 'сбой чтения',
+                      31: 'устройство не работает', 33: 'часть файла заблокирована другой программой',
+                      483: 'аппаратная ошибка устройства', 1117: 'ошибка ввода-вывода устройства',
+                      1167: 'устройство отключено'}
+
+def last_windows_error():
+    """Windows code of the last failed C runtime call (_doserrno), or None."""
+    try:
+        import ctypes
+        value = ctypes.c_ulong()
+        if ctypes.CDLL('ucrtbase')._get_doserrno(ctypes.byref(value)) == 0 and value.value:
+            return value.value
+    except (OSError, AttributeError):
+        pass
+    return None
+
 def hash_one(path, expected, progress=None):
     # Refuse symlinks/junctions at every component, including ancestor directories.
     for part in [*path.parents, path]:
@@ -30,7 +59,13 @@ def hash_one(path, expected, progress=None):
         if signature(os.fstat(source.fileno())) != expected:
             raise RuntimeError('File changed before reading')
         while True:
-            block = source.read(4 * 1024 * 1024)
+            try:
+                block = source.read(4 * 1024 * 1024)
+            except OSError as exc:
+                code = getattr(exc, 'winerror', None) or last_windows_error()
+                text = WINDOWS_ERROR_TEXT.get(code, exc.strerror or str(exc))
+                raise ReadFailure(f'ошибка чтения около байта {count:,}: {text} (код Windows {code or "неизвестен"})',
+                                  code, count) from exc
             if not block:
                 break
             count += len(block)

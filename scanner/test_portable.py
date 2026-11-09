@@ -9,6 +9,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
+import hash_files
 import portable
 
 class PortableTests(unittest.TestCase):
@@ -185,7 +186,60 @@ class PortableTests(unittest.TestCase):
             self.assertEqual((result['status'], result['unread_files']), ('error', portable.MAX_DEVICE_ERRORS_IN_ROW))
             self.assertIn('неисправен', result['error'])
 
+    def test_damaged_sector_is_reported_as_disk_damage_not_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); root = base / 'disk'; root.mkdir()
+            names = ['a.jpg', 'bad.mp4', 'c.jpg']
+            for n in names:
+                (root / n).write_bytes(n.encode() * 100_000)
+            job = self.make_job(base / 'results', 'HDD72', root, names, portable.POLICY_V2)
+            def crc(path, expected, progress):
+                if path.name == 'bad.mp4':
+                    raise hash_files.ReadFailure('ошибка чтения около байта 0: CRC', 23, 0)
+                return 'h' * 64
+            with self.patched(root), patch.object(portable, 'hash_one', side_effect=crc):
+                self.assertEqual(portable.process(job), 0)
+            result = json.loads((job / 'result.json').read_text(encoding='utf-8'))
+            self.assertEqual((result['status'], result['unread_files'], result['damaged_files']),
+                             ('complete_with_unread_files', 1, 1))
+            self.assertIn('ПРОПУЩЕН (ПОВРЕЖДЕНИЕ НОСИТЕЛЯ): bad.mp4', (job / 'log.txt').read_text(encoding='utf-8'))
+            index = (base / 'results' / 'Реестр дисков.md').read_text(encoding='utf-8')
+            self.assertIn('ПОВРЕЖДЕНИЯ НОСИТЕЛЯ', index)
+            self.assertIn('HDD72 (1)', index)
+            self.assertNotIn('Есть непрочитанные файлы', index)
+            # A record of version 1.3.1 and older ("Permission denied" while reading)
+            # counts as damage too; a refused open names the file and does not.
+            with closing(sqlite3.connect(job / 'hashes.sqlite')) as db:
+                db.execute("update hashes set status='error', error=? where path='bad.mp4'", (portable.LEGACY_READ_ERROR,))
+                db.execute("update hashes set status='error', error=? where path='c.jpg'",
+                           ("[Errno 13] Permission denied: 'X:\\\\c.jpg'",))
+                db.commit()
+            self.assertEqual((portable.unread_count(job), portable.unread_count(job, damaged_only=True)), (2, 1))
+
+    def test_read_failure_keeps_the_real_windows_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'bad.mp4'; path.write_bytes(b'x' * 1000)
+            st = path.stat(); expected = (st.st_size, str(st.st_mtime_ns), str(st.st_ino))
+            real_open = Path.open
+            class Broken:
+                def __init__(self, handle): self.handle = handle
+                def __enter__(self): return self
+                def __exit__(self, *a): self.handle.close()
+                def fileno(self): return self.handle.fileno()
+                def read(self, n): raise PermissionError(13, 'Permission denied')
+            with patch.object(Path, 'open', lambda self, *a, **k: Broken(real_open(self, *a, **k))), \
+                 patch.object(hash_files, 'last_windows_error', return_value=23):
+                with self.assertRaises(hash_files.ReadFailure) as caught:
+                    hash_files.hash_one(path, expected)
+            self.assertEqual(caught.exception.windows_code, 23)
+            self.assertIn('CRC', str(caught.exception))
+            self.assertEqual(portable.error_kind(caught.exception), 'device')
+
     def test_error_kinds(self):
+        self.assertEqual(portable.error_kind(hash_files.ReadFailure('x', None, 0)), 'device')
+        self.assertEqual(portable.error_kind(hash_files.ReadFailure('x', 33, 0)), 'file')
+        crc_as_access = PermissionError(13, 'Permission denied'); crc_as_access.winerror = 23
+        self.assertEqual(portable.error_kind(crc_as_access), 'device')
         self.assertEqual(portable.error_kind(PermissionError(13, 'denied')), 'file')
         self.assertEqual(portable.error_kind(RuntimeError('File changed since inventory')), 'file')
         sharing = OSError(13, 'busy'); sharing.winerror = 32

@@ -7,7 +7,7 @@ $script:worker = $null
 $script:stopping = $false
 $script:progressFile = $null
 $script:operation = ''
-$AppVersion = '1.3.1'
+$AppVersion = '1.3.2'
 
 $form = New-Object Windows.Forms.Form
 $form.Text = "Анализ фото и видео на дисках и флешках — версия $AppVersion"
@@ -320,7 +320,7 @@ $eta = Add-Label $g4 '' 12 126 1020 24 $bold
 $identity = Add-Label $g4 '' 12 152 1020 24
 function Reset-Progress {
     $phase.Text = 'Запуск…'; $bar.Value = 0; $percent.Text = ''; $amount.Text = ''; $eta.Text = ''; $identity.Text = ''
-    $script:lastStatus = ''; $script:lastUnread = 0
+    $script:lastStatus = ''; $script:lastUnread = 0; $script:lastDamaged = 0
 }
 function Show-Progress {
     if (-not $script:progressFile -or -not (Test-Path -LiteralPath $script:progressFile)) { return }
@@ -330,6 +330,7 @@ function Show-Progress {
     $phase.Text = ([string]$p.phase_title) + '  —  ' + ([string]$p.disk_id)
     $script:lastStatus = [string]$p.status
     if ($p.unread_files) { $script:lastUnread = [int]$p.unread_files }
+    if ($p.damaged_files) { $script:lastDamaged = [int]$p.damaged_files }
     if ($null -ne $p.percent) {
         $value = [int][math]::Round([double]$p.percent * 10)
         $bar.Value = [math]::Max(0, [math]::Min(1000, $value))
@@ -366,7 +367,13 @@ function Update-Worker {
         if ($script:worker.HasExited) {
             $script:worker.WaitForExit()
             $timer.Stop()
-            if ($script:worker.ExitCode -eq 0 -and $script:lastUnread -gt 0) { $status.ForeColor = [Drawing.Color]::DarkOrange; $status.Text="Сканирование завершено, но $($script:lastUnread) файл(ов) не удалось прочитать (обычно — нет доступа). Список и причины — в журнале ниже и в log.txt; после исправления доступа продолжите сканирование: дочитаются только они." }
+            if ($script:worker.ExitCode -eq 0 -and $script:lastDamaged -gt 0) {
+                $damagedText = "ДИСК ПОВРЕЖДЁН: $($script:lastDamaged) файл(ов) не читаются из-за ошибок самого носителя (CRC, сектор не найден). Проверьте SMART (CrystalDiskInfo), не сканируйте диск повторно без необходимости и в первую очередь перенесите с него данные. Список — в журнале ниже и в log.txt."
+                if ($script:lastUnread -gt $script:lastDamaged) { $damagedText += " Ещё $($script:lastUnread - $script:lastDamaged) файл(ов) — нет доступа." }
+                $status.ForeColor = [Drawing.Color]::DarkRed; $status.Text = $damagedText
+                if (-not $IntegrationTest) { [void][Windows.Forms.MessageBox]::Show($form, $damagedText, 'Повреждения носителя', 'OK', 'Warning') }
+            }
+            elseif ($script:worker.ExitCode -eq 0 -and $script:lastUnread -gt 0) { $status.ForeColor = [Drawing.Color]::DarkOrange; $status.Text="Сканирование завершено, но $($script:lastUnread) файл(ов) не удалось прочитать: нет доступа. Список и причины — в журнале ниже и в log.txt; после исправления доступа продолжите сканирование: дочитаются только они." }
             elseif ($script:worker.ExitCode -eq 0) { $status.ForeColor = [Drawing.Color]::DarkGreen; $status.Text='Операция завершена успешно. Журнал задания — log.txt в его папке; журналы окна — в «_Журналы окна» папки результатов.' }
             elseif ($script:stopping) { $status.ForeColor = [Drawing.Color]::DarkOrange; $status.Text='Сканирование остановлено. Чтобы продолжить, выберите диск и нажмите «Начать сканирование» — программа предложит продолжить.' }
             else { $status.ForeColor = [Drawing.Color]::DarkRed; $status.Text='Операция остановлена с ошибкой. Подробности ниже; готовые хеши сохранены.' }

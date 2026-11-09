@@ -19,12 +19,12 @@ import uuid
 
 from inventory import inventory, volume, discover_disk, MEDIA, MIN_BYTES, EXCLUDED_DIRS
 from build_selection import select, THRESHOLDS_V1, THRESHOLDS_V2, CAMERA_IMAGES, VIDEO
-from hash_files import hash_one, signature
+from hash_files import hash_one, signature, ReadFailure
 
 # VERSION is the job format/algorithm. It is unchanged, so jobs started by
 # 1.0.x continue with this program. APP_VERSION is the program release.
 VERSION = '1.0.0'
-APP_VERSION = '1.3.1'
+APP_VERSION = '1.3.2'
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
@@ -42,12 +42,24 @@ MAX_DEVICE_ERRORS_IN_ROW = 5
 # Windows codes that concern one file, not the device: access denied, sharing and
 # lock violations, file cannot be accessed by the system, file or path not found.
 FILE_WINERRORS = {2, 3, 5, 32, 33, 1920}
+# Windows codes of a damaged or failing medium: not ready, CRC error, seek error,
+# sector not found, read fault, general failure, hardware and I/O device errors.
+DEVICE_WINERRORS = {21, 23, 25, 27, 30, 31, 483, 1117, 1167}
 
 def error_kind(exc):
-    """'file' — this file only (access, changed since inventory); 'device' — read failure."""
+    """'file' — this file only (access, changed since inventory); 'device' — read failure.
+
+    A read that fails after the file was opened is a device error unless Windows
+    names a file-level cause: Python reports a CRC error there as "Permission denied".
+    """
+    code = getattr(exc, 'windows_code', None) or getattr(exc, 'winerror', None)
+    if code in DEVICE_WINERRORS:
+        return 'device'
+    if isinstance(exc, ReadFailure):
+        return 'file' if code in FILE_WINERRORS else 'device'
     if isinstance(exc, (RuntimeError, PermissionError, FileNotFoundError)):
         return 'file'
-    return 'file' if getattr(exc, 'winerror', None) in FILE_WINERRORS else 'device'
+    return 'file' if code in FILE_WINERRORS else 'device'
 
 def policy_version(policy):
     if policy == POLICY_V2:
@@ -330,10 +342,17 @@ def read_json(path, default=None):
     except (OSError, ValueError):
         return default
 
-def unread_count(job):
+# Versions up to 1.3.1 recorded a damaged sector as this text: the error came from
+# reading an opened file, so unlike a refused open it carries no file name.
+LEGACY_READ_ERROR = '[Errno 13] Permission denied'
+
+def unread_count(job, damaged_only=False):
+    """Skipped files of a job: status 'error' — file-level cause, 'damaged' — read error of the medium."""
+    condition = "status='damaged' or (status='error' and error=?)" if damaged_only else "status in ('error','damaged')"
     try:
         with closing(sqlite3.connect((job / 'hashes.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
-            return db.execute("select count(*) from hashes where status='error'").fetchone()[0]
+            return db.execute(f'select count(*) from hashes where {condition}',
+                              (LEGACY_READ_ERROR,) if damaged_only else ()).fetchone()[0]
     except sqlite3.Error:
         return 0
 
@@ -367,6 +386,7 @@ def job_row(job, root):
         'Их объём, ГБ': round(result['selected_bytes'] / 1e9, 1) if result.get('selected_bytes') else '',
         'Ошибок описи': summary.get('errors', ''),
         'Не прочитано': unread_count(job),
+        'Из них — повреждения диска': unread_count(job, damaged_only=True),
         'Правила': {2: 'v2', 1: 'v1 — нужен добор'}.get(policy_version(manifest.get('policy')), 'другие'),
         'Дата': (last_run.get('utc') or manifest.get('created_utc', ''))[:10],
         'Папка': str(job.relative_to(root)),
@@ -384,7 +404,14 @@ def write_index(root):
     warnings += [f'Номер {k} назначен разным носителям — нужно разобраться вручную.' for k, v in by_id.items() if len(v) > 1]
     warnings += [f'Один носитель (серийный номер {k[0] or "—"}, том {k[1]}) записан под номерами {", ".join(sorted(v))}.'
                  for k, v in by_serial.items() if len(v) > 1]
-    unread_disks = [f'{r["Номер"]} ({r["Не прочитано"]})' for r in rows if r['Не прочитано']]
+    damaged_disks = [f'{r["Номер"]} ({r["Из них — повреждения диска"]})' for r in rows if r['Из них — повреждения диска']]
+    if damaged_disks:
+        warnings.append('ПОВРЕЖДЕНИЯ НОСИТЕЛЯ — файлы не читаются из-за ошибок самого диска (CRC, сектор не найден), '
+                        'в скобках — сколько: ' + ', '.join(damaged_disks) + '. Проверьте SMART (например, '
+                        'CrystalDiskInfo), не сканируйте такой носитель повторно без необходимости и в первую '
+                        'очередь перенесите с него данные. Список файлов — в log.txt задания.')
+    unread_disks = [f'{r["Номер"]} ({r["Не прочитано"] - r["Из них — повреждения диска"]})' for r in rows
+                    if r['Не прочитано'] > r['Из них — повреждения диска']]
     if unread_disks:
         warnings.append('Есть непрочитанные файлы (в скобках — сколько): ' + ', '.join(unread_disks) +
                         '. Причины — в log.txt задания. Исправьте доступ и продолжите сканирование: '
@@ -418,7 +445,11 @@ def write_index(root):
             continue
         lines += [f'## {title}', '', '| ' + ' | '.join(short) + ' |', '|' + '---|' * len(short)]
         for r in group:
+            damaged = r['Из них — повреждения диска']
             values = {**r, 'Состояние': status_text.get(r['Состояние'], r['Состояние']), 'Папка': r['Папка'].replace('\\', '/')}
+            if damaged:
+                values['Состояние'] += '; ПОВРЕЖДЕНИЯ ДИСКА — см. «Требует внимания»'
+                values['Не прочитано'] = f'{r["Не прочитано"]} (повреждения: {damaged})'
             lines.append('| ' + ' | '.join(str(values[c]).replace('|', '/') for c in short) + ' |')
         lines.append('')
     temporary = root / (INDEX_NAME + '.md.tmp')
@@ -521,7 +552,7 @@ def process(job):
             known = {p: (s, m, i) for p, s, m, i, st in target.execute(
                 'select path,size,mtime_ns,file_id,status from hashes where disk_id=?', (disk_id,)) if st == 'verified'}
             to_read = total - sum(s for p, s, m, i in rows if known.get(p) == (s, str(m), str(i)))
-            cached = hashed = finished = read = unread = unread_bytes = device_in_row = 0
+            cached = hashed = finished = read = unread = unread_bytes = device_in_row = damaged = damaged_bytes = 0
             hash_started = last_line = last_file_line = last_publish = time.monotonic()
             rate = Rate()
             report = {'disk_id': disk_id, 'status': 'running', 'selected_files': len(rows),
@@ -539,7 +570,7 @@ def process(job):
                 return {**base_state, 'phase': phase, 'phase_title': title,
                         'percent': round(100 * position / total, 2) if total else 100.0,
                         'bytes_done': position, 'bytes_total': total, 'files_done': cached + hashed + unread,
-                        'files_total': len(rows), 'reused_files': cached, 'new_files': hashed, 'unread_files': unread,
+                        'files_total': len(rows), 'reused_files': cached, 'new_files': hashed, 'unread_files': unread, 'damaged_files': damaged,
                         'read_bytes': newly, 'to_read_bytes': to_read, 'rate_bytes_per_second': speed,
                         'eta_seconds': round(eta) if eta is not None else None,
                         'elapsed_seconds': round(now - started), 'errors': summary['errors']}
@@ -557,7 +588,8 @@ def process(job):
                     speed = current['rate_bytes_per_second']
                     say(f'{disk_id}: {current["percent"]:.1f}% · {current["bytes_done"] / 1e9:,.1f} из {total / 1e9:,.1f} ГБ · '
                         f'файлов {current["files_done"]:,} из {len(rows):,} (готовых хешей {cached:,}, новых {hashed:,}'
-                        + (f', не прочитано {unread:,}' if unread else '') + ') · '
+                        + (f', не прочитано {unread:,}' if unread else '')
+                        + (f', из них повреждения диска {damaged:,}' if damaged else '') + ') · '
                         + f'{(speed or 0) / 1e6:.0f} МБ/с · осталось {duration(current["eta_seconds"])}',
                         to_file=force or now - last_file_line >= 60)
                     last_line = now
@@ -582,11 +614,14 @@ def process(job):
                         # again on the next resume. A vanished disk (check below)
                         # or several device errors in a row stop the scan.
                         kind = error_kind(exc)
-                        target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)', (disk_id, rel, *expected, None, 'error', str(exc)))
+                        target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)',
+                                       (disk_id, rel, *expected, None, 'damaged' if kind == 'device' else 'error', str(exc)))
                         target.commit()
                         unread += 1; unread_bytes += size; finished += size
+                        if kind == 'device':
+                            damaged += 1; damaged_bytes += size
                         check()
-                        say(f'ПРОПУЩЕН ({"нет доступа к файлу" if kind == "file" else "ошибка чтения устройства"}): {rel}: {exc}')
+                        say(f'ПРОПУЩЕН ({"нет доступа к файлу" if kind == "file" else "ПОВРЕЖДЕНИЕ НОСИТЕЛЯ"}): {rel}: {exc}')
                         if kind == 'device':
                             device_in_row += 1
                             if device_in_row >= MAX_DEVICE_ERRORS_IN_ROW:
@@ -611,6 +646,7 @@ def process(job):
             finally:
                 report.update(hashed_files=hashed, cached_files=cached, newly_read_bytes=read,
                               unread_files=unread, unread_bytes=unread_bytes,
+                              damaged_files=damaged, damaged_bytes=damaged_bytes,
                               seconds=round(time.monotonic()-started, 2), app_version=APP_VERSION)
                 write_json(job / 'result.json', report)
                 progress(force=True)
@@ -618,6 +654,8 @@ def process(job):
                 titles = {'done': 'Сканирование завершено', 'stopped': 'Остановлено с сохранением', 'error': 'Остановлено из-за ошибки'}
                 if unread and phase == 'done':
                     titles['done'] = f'Завершено, не прочитано файлов: {unread:,}'.replace(',', ' ')
+                if damaged and phase == 'done':
+                    titles['done'] = f'Завершено. ДИСК ПОВРЕЖДЁН: не читаются {damaged:,} файл(ов)'.replace(',', ' ')
                 final = state(phase=phase, title=titles[phase])
                 if phase != 'done':
                     final['eta_seconds'] = None
@@ -625,11 +663,13 @@ def process(job):
                 publish(final)
                 append_run(job, {'event': 'finish', 'run_id': run_id, 'utc': utc(), 'status': report['status'],
                                  'hashed_files': hashed, 'cached_files': cached, 'newly_read_bytes': read,
-                                 'unread_files': unread, 'seconds': report['seconds'], 'error': report.get('error', '')})
+                                 'unread_files': unread, 'damaged_files': damaged, 'seconds': report['seconds'], 'error': report.get('error', '')})
                 say(f'=== Итог: {report["status"]} · новых хешей {hashed:,}, готовых {cached:,} · '
                     f'прочитано {read / 1e9:,.1f} ГБ за {duration(time.monotonic() - started)}'
                     + (f' · НЕ ПРОЧИТАНО файлов: {unread:,} ({unread_bytes / 1e9:,.2f} ГБ) — список в hashes.sqlite '
-                       '(status=error) и выше в журнале; при продолжении они читаются заново' if unread else '')
+                       '(status=error или damaged) и выше в журнале; при продолжении они читаются заново' if unread else '')
+                    + (f' · ИЗ НИХ ПОВРЕЖДЕНИЯ НОСИТЕЛЯ: {damaged:,} ({damaged_bytes / 1e9:,.2f} ГБ) — ошибки чтения '
+                       'самого диска; проверьте SMART и в первую очередь перенесите с него данные' if damaged else '')
                     + (f' · {report["error"]}' if report.get('error') else ''))
                 print(json.dumps(report, ensure_ascii=False, indent=2))
     refresh_index(results_root(job))

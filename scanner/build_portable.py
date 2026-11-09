@@ -23,7 +23,9 @@ def main():
     if actual != SHA256:
         raise RuntimeError('Official Python archive checksum mismatch')
     app_version = re.search(r"^APP_VERSION = '([0-9.]+)'", (BASE / 'scanner' / 'portable.py').read_text(encoding='utf-8'), re.M).group(1)
-    folder = dist / 'HDDScanner-Windows-x64'
+    # Staged in dist\_build, never in dist\HDDScanner-Windows-x64: a scanner may be
+    # running from that folder, and wiping it once deleted the app of a live scan.
+    folder = dist / '_build' / 'HDDScanner-Windows-x64'
     if folder.exists():
         shutil.rmtree(folder)  # build output only; avoids stale files from older versions
     runtime = folder / 'runtime'
