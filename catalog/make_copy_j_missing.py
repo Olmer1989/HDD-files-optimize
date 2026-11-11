@@ -11,7 +11,7 @@
 Результат в «Каталог дисков\\J - недостающее на 45 и 77»: список.tsv, тома.tsv.
 Скрипт для пользователя там же: «Копировать недостающее.ps1».
 
-Запуск:  py catalog\\make_copy_j_missing.py
+Запуск:  py catalog\\make_copy_j_missing.py [main | france-estonia]
 """
 import collections
 import io
@@ -27,9 +27,20 @@ FOLDERS = [IND + SEP + x for x in ('Видео из Франции', 'Фотог
     'Метц', 'На разборку', 'Перемещение с Никона от 19 июля 2013', 'Перемещение с Никона от 30 апреля 2013',
     'Селекция Топ Озера 2013', 'Топ Озеро 2013 - фото - исходник']
 OUT = bp.OUT_DIR / 'J - недостающее на 45 и 77'
+# Наборы: имя -> (папки, целевые диски, папка результата). 'main' — первый список (12.11.2026).
+SETS = {
+    'main': (FOLDERS, TARGETS, OUT),
+    # 12.11.2026: «Эстонское кино» — семейное (раздел «Эстония», ~2001–2004); «Фотографии из Франции»
+    # в корне J: — недостающее на HDD77. «Фильмы» и «Music» не трогаем.
+    'france-estonia': (['Фотографии из Франции', 'Эстонское кино с Арнольдом Мери'], ('HDD77',),
+                       bp.OUT_DIR / 'J - Франция и Эстония на 77'),
+}
 
 
 def main():
+    import sys
+    global FOLDERS, TARGETS, OUT
+    FOLDERS, TARGETS, OUT = SETS[sys.argv[1] if len(sys.argv) > 1 else 'main']
     jobs = bp.find_jobs()
     sha_t, ns_t = {}, {}
     for d in TARGETS:
@@ -66,7 +77,7 @@ def main():
         for r in rows:
             f.write('\t'.join(map(str, r)) + '\n')
     with io.open(OUT / 'тома.tsv', 'w', encoding='utf-8-sig', newline='\r\n') as f:
-        for d in (SRC,) + TARGETS:
+        for d in (SRC, 'HDD45', 'HDD77'):
             ser = json.loads((jobs[d]['dir'] / 'job.json').read_text(encoding='utf-8'))['record']['volume_serial']
             f.write(f'{d}\t{ser}\n')
     t = collections.defaultdict(lambda: [0, 0])
