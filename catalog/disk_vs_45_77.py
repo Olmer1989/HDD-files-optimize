@@ -16,6 +16,8 @@
   py catalog\\disk_vs_45_77.py HDD17
   py catalog\\disk_vs_45_77.py HDD17 HDD61 --depth 2 --min 1 --everywhere
   py catalog\\disk_vs_45_77.py HDD17 --tsv          (ещё и таблица в «Каталог дисков\\Сверка с 45 и 77»)
+  py catalog\\disk_vs_45_77.py HDD61 --list   (Excel: каждый файл, которого нет ни на 45, ни на 77,
+                                              и на каких ещё дисках он есть; включает --everywhere)
 """
 import argparse
 import collections
@@ -51,7 +53,7 @@ def folder_of(path, depth):
     return SEP.join(parts[:min(depth, len(parts) - 1)])
 
 
-def analyse(disk, jobs, depth, sha_g, sha_77, sha_other):
+def analyse(disk, jobs, depth, sha_g, sha_77, sha_other, listed=None):
     sha_of = hashes(jobs[disk])
     t = collections.defaultdict(lambda: [0] * (len(COLS) + 1))
     unhashed = {c: [0, 0] for c in MEDIA}  # фото/видео без проверенного хеша: [файлов, байт]
@@ -73,11 +75,42 @@ def analyse(disk, jobs, depth, sha_g, sha_77, sha_other):
             r[5] += size * (g and s77)
             if not g and not s77:
                 r[6] += size
+                if listed is not None:
+                    listed.append((path, size, sorted(sha_other.get(sha, set()) - {disk})))
                 if sha_other is not None:
                     others = sha_other.get(sha)
                     if not others or others == {disk}:
                         r[7] += size
     return t, unhashed
+
+
+def write_list(disk, listed):
+    """Excel: файлы диска, которых нет ни на HDD45, ни на HDD77 (по SHA-256)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Нет на 45 и 77'
+    ws.append(['Папка', 'Файл', 'МБ', 'Только здесь', 'Есть ещё на дисках'])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    listed.sort(key=lambda x: x[0].lower())
+    for path, size, others in listed:
+        folder, _, name = path.rpartition(SEP)
+        ws.append([folder, name, round(size / 1024 ** 2, 1), 'да' if not others else '', ', '.join(others)])
+    total = sum(x[1] for x in listed)
+    only = sum(x[1] for x in listed if not x[2])
+    ws.append([])
+    ws.append(['ИТОГО', f'{len(listed):,} файлов', round(total / 1024 ** 2, 1),
+               f'только здесь {only / bp.GIB:,.1f} ГБ', f'всего {total / bp.GIB:,.1f} ГБ'])
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = f'A1:E{len(listed) + 1}'
+    for col, w in zip('ABCDE', (80, 40, 10, 12, 30)):
+        ws.column_dimensions[col].width = w
+    OUT.mkdir(parents=True, exist_ok=True)
+    name = OUT / f'{disk} - файлы, которых нет на 45 и 77.xlsx'
+    wb.save(name)
+    return name
 
 
 def main():
@@ -88,6 +121,7 @@ def main():
     ap.add_argument('--depth', type=int, default=1, help='уровень папок (1 — верхний)')
     ap.add_argument('--min', type=float, default=0.3, help='не показывать папки меньше N ГБ')
     ap.add_argument('--everywhere', action='store_true', help='колонка «больше нигде» по всем дискам')
+    ap.add_argument('--list', action='store_true', help='Excel со списком файлов, которых нет ни на 45, ни на 77')
     ap.add_argument('--tsv', action='store_true', help='сохранить таблицу в «Каталог дисков»')
     a = ap.parse_args()
     if a.depth < 1:
@@ -106,6 +140,8 @@ def main():
 
     sha_g = sha_set(jobs['HDD45'])
     sha_77 = sha_set(jobs['HDD77'])
+    if a.list:
+        a.everywhere = True
     sha_other = None
     if a.everywhere:
         sha_other = collections.defaultdict(set)
@@ -120,7 +156,8 @@ def main():
 
     cols = COLS + (('больше нигде',) if a.everywhere else ())
     for disk in disks:
-        t, unhashed = analyse(disk, jobs, a.depth, sha_g, sha_77, sha_other)
+        listed = [] if a.list else None
+        t, unhashed = analyse(disk, jobs, a.depth, sha_g, sha_77, sha_other, listed)
         total = [sum(r[i] for r in t.values()) for i in range(len(cols))]
         rows = sorted(t.items(), key=lambda kv: -kv[1][1])
         shown = [(k, r) for k, r in rows if r[1] >= a.min * bp.GIB]
@@ -147,6 +184,8 @@ def main():
                 for k, r in rows + [('ИТОГО', total)]:
                     f.write('\t'.join([k, str(r[0])] + [f'{x / bp.GIB:.2f}' for x in r[1:len(cols)]]) + '\n')
             print('Таблица:', name)
+        if a.list:
+            print('Список файлов:', write_list(disk, listed))
 
 
 if __name__ == '__main__':
