@@ -28,19 +28,23 @@ FOLDERS = [IND + SEP + x for x in ('Видео из Франции', 'Фотог
     'Селекция Топ Озера 2013', 'Топ Озеро 2013 - фото - исходник']
 OUT = bp.OUT_DIR / 'J - недостающее на 45 и 77'
 # Наборы: имя -> (папки, целевые диски, папка результата). 'main' — первый список (12.11.2026).
+#   значение: (диск-источник, папки, целевые диски, папка результата, только фото/видео)
 SETS = {
-    'main': (FOLDERS, TARGETS, OUT),
+    'main': ('HDD51', FOLDERS, TARGETS, OUT, False),
     # 12.11.2026: «Эстонское кино» — семейное (раздел «Эстония», ~2001–2004); «Фотографии из Франции»
     # в корне J: — недостающее на HDD77. «Фильмы» и «Music» не трогаем.
-    'france-estonia': (['Фотографии из Франции', 'Эстонское кино с Арнольдом Мери'], ('HDD77',),
-                       bp.OUT_DIR / 'J - Франция и Эстония на 77'),
+    'france-estonia': ('HDD51', ['Фотографии из Франции', 'Эстонское кино с Арнольдом Мери'], ('HDD77',),
+                       bp.OUT_DIR / 'J - Франция и Эстония на 77', False),
+    # 12.11.2026: фото/видео с рабочего стола Зои (HDD55, I:), которых нет на HDD77. Оригинал не трогается.
+    'zoya-desktop': ('HDD55', ['Зойкин компьютер - перенос' + SEP + 'Users' + SEP + 'SONY' + SEP + 'Desktop'],
+                     ('HDD77',), bp.OUT_DIR / 'I - рабочий стол Зои на 77', True),
 }
 
 
 def main():
     import sys
-    global FOLDERS, TARGETS, OUT
-    FOLDERS, TARGETS, OUT = SETS[sys.argv[1] if len(sys.argv) > 1 else 'main']
+    global SRC, FOLDERS, TARGETS, OUT
+    SRC, FOLDERS, TARGETS, OUT, media_only = SETS[sys.argv[1] if len(sys.argv) > 1 else 'main']
     jobs = bp.find_jobs()
     sha_t, ns_t = {}, {}
     for d in TARGETS:
@@ -61,7 +65,7 @@ def main():
             if not any(p.startswith(f + SEP) for f in FOLDERS):
                 continue
             h = sha.get(p)
-            if not h and cat == 'media_small':
+            if not h and (cat == 'media_small' or media_only):
                 continue
             for d in TARGETS:
                 if d == 'HDD45' and p in copied:
