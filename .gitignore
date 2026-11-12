@@ -1,5 +1,7 @@
 # Private inventories, manifests, reports and local hardware identities
-/Каталог дисков/
+/Каталог дисков/*
+# the single copy template is code, not private data — keep it in Git
+!/Каталог дисков/_ШАБЛОН копирования/
 /Анализ/
 /scanner/disks.json
 /scanner/finalize_initial.py
