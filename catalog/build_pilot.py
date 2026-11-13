@@ -96,7 +96,13 @@ def norm_name(event):
     return re.sub(r'[\W_]+', '', last)
 
 
+def is_partial(info):
+    """Задание сканера, которое описывает только отдельные папки носителя (сканер 1.3.2-partial)."""
+    return str(info.get('scan_scope') or '').lower() == 'partial' or bool(info.get('folders'))
+
+
 def find_jobs():
+    """Полные описи носителей: по одному (самому свежему) заданию на носитель. Частичные сканы сюда не входят."""
     jobs = {}
     for root in SCAN_ROOTS:
         for result in glob.glob(str(root / '*' / '*' / 'result.json')):
@@ -107,6 +113,8 @@ def find_jobs():
                 info = json.loads(Path(result).read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 continue
+            if is_partial(info):
+                continue                 # частичный скан папок - НЕ опись носителя: иначе он заменил бы полную опись
             disk = info.get('disk_id') or job.name.split('_')[0]
             mtime = os.path.getmtime(result)
             if disk not in jobs or mtime > jobs[disk]['mtime']:

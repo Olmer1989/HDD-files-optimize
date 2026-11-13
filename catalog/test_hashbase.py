@@ -49,6 +49,30 @@ def make_disk(scans, disk, serial, hashed, unhashed=()):
     i.commit(); i.close()
 
 
+def make_partial(scans, disk, serial, folders, files, sub='Повторное сканирование', name='part', status='complete'):
+    """Частичный скан папок (сканер 1.3.2-partial): хеши у всех файлов этих папок. files: (путь, размер, sha)."""
+    job = scans / sub / f'{disk} - тест' / f'{disk}_{name}' if sub else scans / f'{disk} - тест' / f'{disk}_{name}'
+    job.mkdir(parents=True)
+    (job / 'result.json').write_text(json.dumps({
+        'disk_id': disk, 'scan_scope': 'partial', 'folders': folders, 'hash_scope': 'all_regular_files',
+        'status': status, 'damaged_files': 0, 'unread_files': 0, 'app_version': '1.3.2-partial-four-folders'},
+        ensure_ascii=False), encoding='utf-8')
+    (job / 'job.json').write_text(json.dumps({'record': {'volume_serial': serial}}), encoding='utf-8')
+    h = sqlite3.connect(job / 'hashes.sqlite')
+    h.execute('create table hashes(disk_id text,path text,size integer,mtime_ns text,file_id text,sha256 text,'
+              'status text,error text,primary key(disk_id,path))')
+    h.executemany('insert into hashes values (?,?,?,?,?,?,?,?)',
+                  [(disk, p, size, '0', '', sha, 'verified', '') for p, size, sha in files])
+    h.commit(); h.close()
+    i = sqlite3.connect(job / 'inventory.sqlite')
+    i.execute('create table files(path text primary key,size integer,mtime_ns text,ctime_ns text,file_id text,'
+              'attributes integer,category text)')
+    i.execute('create table errors(path text,operation text,message text)')
+    i.executemany('insert into files values (?,?,?,?,?,?,?)', [(p, size, '0', '0', '', 32, 'other') for p, size, _ in files])
+    i.commit(); i.close()
+    return job
+
+
 class Base(unittest.TestCase):
     """Общая обвязка без собственных проверок."""
 
@@ -371,6 +395,21 @@ class NoHashTest(Base):
         self.assertEqual(self.nohash()['Док\\план.doc'][1], 1)
         self.assertIn('пересобираю рабочую базу', self.printed)
         self.assertNotIn('собираю снимок', self.printed)      # снимок описей второй раз не собирается
+
+
+class PartialGuardTest(Base):
+    """Шаг 1 ТЗ v3: частичный скан никогда не считается полной описью носителя."""
+
+    def test_partial_scan_is_never_a_full_inventory(self):
+        time.sleep(0.05)
+        # рядом с полной описью (тот же уровень, файл новее) и в «Повторное сканирование» (уровнем глубже)
+        make_partial(self.scans, 'HDD45', 'AAAA0045', ['X'], [('X\\1.jpg', 100, S[1])], sub=None, name='p1')
+        make_partial(self.scans, 'HDD45', 'AAAA0045', ['X'], [('X\\1.jpg', 100, S[1])], name='p2')
+        jobs = bp.find_jobs()
+        self.assertEqual(jobs['HDD45']['dir'].name, 'HDD45_job')
+        self.assertEqual(set(jobs), {'HDD90', 'HDD45', 'HDD77', 'HDD91'})
+        # в базе HDD45 по-прежнему весь: X\2.jpg вне частичного скана не пропал
+        self.assertIsNotNone(self.row('HDD45', 'X\\2.jpg'))
 
 
 if __name__ == '__main__':
