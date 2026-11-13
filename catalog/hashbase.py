@@ -23,9 +23,14 @@
   py catalog\\hashbase.py mklist HDD17 --to HDD45 HDD77 --name "K - остаток" [--folder "папка"] [--dry]
                                                              папка задачи для единого шаблона копирования
                                                              (--dry - только посчитать, ничего не создавать)
-  py catalog\\hashbase.py build                               пересобрать базу сейчас
-  py catalog\\hashbase.py stats                               что в базе и какие поправки учтены
-В чат печатается короткая сводка; полный список по файлам - в «Каталог дисков\\_БАЗА\\ответы\\».
+  py catalog\\hashbase.py folders HDD45 [папка] [--depth 2]   сколько занимают папка и подпапки, по типам файлов
+  py catalog\\hashbase.py find Сафари [--disk HDD45]          папки со словами в пути, на всех носителях
+  py catalog\\hashbase.py build                               применить новые модули и показать сводку
+  py catalog\\hashbase.py stats                               что в базе и какие модули учтены
+  py catalog\\hashbase.py rebuild                             самопроверка: база с нуля против базы по шагам
+Модули (ТЗ v3): описи, частичные сканы («Повторное сканирование»), журналы, строки ручных операций и
+исключений («_БАЗА\\исключения.tsv»). Каждая команда применяет только новые модули (таблица applied).
+На экран - не больше 20 строк; полный ответ - «_БАЗА\\ответы\\последний ответ.txt», списки - там же.
 """
 import argparse
 import collections
@@ -1286,15 +1291,19 @@ def save(name, head, rows):
     return path
 
 
-def table(head, rows, limit=25):
+def table(head, rows, limit=10, total=None):
+    """Таблица на экран: не больше limit строк; total - итоговая строка, видна всегда."""
     rows = list(rows)
-    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows[:limit])) if rows else len(str(h)) for i, h in enumerate(head)]
+    shown = rows[:limit] + ([total] if total else [])
+    widths = [max(len(str(h)), *(len(str(r[i])) for r in shown)) if shown else len(str(h)) for i, h in enumerate(head)]
     line = lambda r: '  '.join(str(x).ljust(w) if i == 0 else str(x).rjust(w) for i, (x, w) in enumerate(zip(r, widths)))
     out(line(head))
     for r in rows[:limit]:
         out(line(r))
     if len(rows) > limit:
         out(f'... ещё {len(rows) - limit} строк - см. файл')
+    if total:
+        out(line(total))
 
 
 def presence(c, disk, prefix, exclude=None, weak=False):
@@ -1501,7 +1510,7 @@ def cmd_missing(a, only=False):
     order = sorted(agg.items(), key=lambda kv: -(kv[1][1] if only else max(kv[1][2], kv[1][3])))
     body = [(k[:60], v[0], gb(v[1]), gb(v[2]), gb(v[3]), gb(v[4]), gb(v[5])) for k, v in order
             if only or v[2] or v[3]]
-    table(head, body + [('ИТОГО', tot[0], gb(tot[1]), gb(tot[2]), gb(tot[3]), gb(tot[4]), gb(tot[5]))])
+    table(head, body, total=('ИТОГО', tot[0], gb(tot[1]), gb(tot[2]), gb(tot[3]), gb(tot[4]), gb(tot[5])))
     if weak45 or weak77:
         out(f'Из «нет»: на {MAIN[0]} у {weak45} файлов и на {MAIN[1]} у {weak77} лежит НЕПОДТВЕРЖДЁННАЯ копия '
             f'(сверен только размер или со слов пользователя). Копией она не считается, пока файл не прочитан.')
@@ -1974,6 +1983,53 @@ def cmd_family_check(a):
         raise SystemExit(2)
 
 
+MAX_LINES = 20            # ответ команды на экран - не больше 20 строк (ТЗ v3, 6.2); остальное - в файл
+
+
+class ShortAnswer(io.TextIOBase):
+    """Поток вывода команды: на экран - первые строки и последние строки ответа (там итог и пути к файлам),
+    всё целиком - в «ответы\\последний ответ.txt». Всего на экране не больше MAX_LINES строк."""
+
+    def __init__(self, stream, path, limit=MAX_LINES, tail=6):
+        self.stream, self.path, self.head, self.tail = stream, path, limit - tail - 1, tail
+        self.lines, self.buf, self.shown, self.last = [], '', 0, collections.deque(maxlen=tail)
+
+    def writable(self):
+        return True
+
+    def write(self, s):
+        self.buf += s
+        while '\n' in self.buf:
+            line, self.buf = self.buf.split('\n', 1)
+            self.lines.append(line)
+            if self.shown < self.head:
+                self.stream.write(line + '\n')
+                self.stream.flush()
+                self.shown += 1
+            else:
+                self.last.append(line)
+        return len(s)
+
+    def flush(self):
+        self.stream.flush()
+
+    def close_answer(self):
+        if self.buf:
+            self.write('\n')
+        hidden = len(self.lines) - self.shown - len(self.last)
+        if hidden > 0:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text('\n'.join(self.lines) + '\n', encoding='utf-8-sig')
+                where = f'полный ответ: {self.path}'
+            except OSError:
+                where = 'полный ответ сохранить не удалось'
+            self.stream.write(f'... ещё {hidden} строк не показано - {where}\n')
+        for line in self.last:
+            self.stream.write(line + '\n')
+        self.stream.flush()
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         try:
@@ -2019,6 +2075,17 @@ def main():
     p.add_argument('--cached', action='store_true', help='работать только с сохранёнными оглавлениями')
     a = ap.parse_args()
     t0 = time.time()
+    real, ans = sys.stdout, ShortAnswer(sys.stdout, ANSWERS / 'последний ответ.txt')
+    sys.stdout = ans
+    try:
+        run_command(a)
+        out(f'[{time.time() - t0:.1f} с]')
+    finally:
+        sys.stdout = real
+        ans.close_answer()
+
+
+def run_command(a):
     if a.cmd == 'build':
         build()
         cmd_stats(a)
@@ -2026,7 +2093,6 @@ def main():
         {'missing': cmd_missing, 'only': lambda x: cmd_missing(x, True), 'cmp': cmd_cmp, 'where': cmd_where,
          'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'rebuild': cmd_rebuild, 'folders': cmd_folders, 'find': cmd_find, 'recovery-plan': cmd_recovery_plan,
          'recovery-staging': cmd_recovery_staging, 'family-plan': cmd_family_plan, 'family-check': cmd_family_check}[a.cmd](a)
-    out(f'[{time.time() - t0:.1f} с]')
 
 
 if __name__ == '__main__':

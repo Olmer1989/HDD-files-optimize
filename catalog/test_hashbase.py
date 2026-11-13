@@ -618,5 +618,47 @@ class DerivedTablesTest(PartialSetup):
         self.assertIn('ИТОГ: совпала', self.printed)
 
 
+class ShortAnswerTest(PartialSetup):
+    """Шаг 5 ТЗ v3: ни одна команда не выводит на экран больше 20 строк."""
+
+    def run_main(self, *argv):
+        buf = io.StringIO()
+        saved = sys.argv
+        sys.argv = ['hashbase.py', *argv]
+        try:
+            with contextlib.redirect_stdout(buf):
+                hb.main()
+        finally:
+            sys.argv = saved
+            hb.close_last()
+        return buf.getvalue().splitlines()
+
+    def test_long_answer_is_cut_to_20_lines(self):
+        buf = io.StringIO()
+        path = self.tmp / 'ответ.txt'
+        ans = hb.ShortAnswer(buf, path)
+        for i in range(50):
+            ans.write(f'строка {i}\n')
+        ans.close_answer()
+        shown = buf.getvalue().splitlines()
+        self.assertEqual(len(shown), 20)
+        self.assertEqual(shown[-1], 'строка 49')                     # итог в конце ответа виден
+        self.assertIn('полный ответ', shown[13])
+        self.assertEqual(len(path.read_text(encoding='utf-8-sig').splitlines()), 50)
+
+    def test_every_command_fits_20_lines(self):
+        for i in range(40):                                           # много папок и решений - длинные таблицы
+            make_partial(self.scans, 'HDD90', 'AAAA0090', [f'Много{i}'], [(f'Много{i}\\f.jpg', 1000 + i, f'{100 + i:064x}')],
+                         name=f'm{i}')
+        hb.ensure_tables()
+        self.decide(*[f'HDD90\tМного{i}\tраздел: Р{i}\tпроба' for i in range(0, 40, 2)])
+        for argv in (['build'], ['stats'], ['missing', 'HDD90'], ['only', 'HDD90'], ['where', 'HDD90', 'A'],
+                     ['cmp', 'HDD90', 'A', 'HDD45', 'X'], ['candel', 'HDD90', 'A'], ['folders', 'HDD90'],
+                     ['find', 'много'], ['mklist', 'HDD90', '--name', 'Длинная', '--dry'], ['rebuild']):
+            lines = self.run_main(*argv)
+            self.assertLessEqual(len(lines), 20, f'{argv}: {len(lines)} строк\n' + '\n'.join(lines))
+            self.assertTrue(lines, argv)
+
+
 if __name__ == '__main__':
     unittest.main()
