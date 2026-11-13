@@ -1,0 +1,12 @@
+{
+  "HDD01": {
+    "number": 1,
+    "model": "REPLACE_WITH_ACTUAL_MODEL",
+    "hardware_serial": "REPLACE_WITH_HARDWARE_SERIAL",
+    "physical_bytes": 0,
+    "volume_serial": "REPLACE_WITH_VOLUME_SERIAL",
+    "volume_bytes": 0,
+    "label_at_registration": "Optional descriptive label",
+    "letter_at_registration": "Informational only; not used for identity"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "stage": "future_plan_only_no_moves_implemented",
+  "other_files_folder": "НЕ ФОТО и НЕ ВИДЕО",
+  "preserve_nonmedia_in_direct_media_folder": true,
+  "preserve_entire_reviewed_event_tree": true,
+  "event_roots_require_review": true,
+  "other_candidates_require_review": true,
+  "ambiguous_action": "keep_and_report",
+  "preserve_original_relative_paths": true,
+  "overwrite_conflicting_files": false,
+  "classification_uses_media_below_hash_size_threshold": true,
+  "exclude_service_folders_and_secrets_from_moves": true,
+  "notes": [
+    "DOC, PDF, presentations and all other companion formats stay beside media irrespective of extension.",
+    "Reviewed event roots include their subfolders, even document-only subfolders.",
+    "A shared ancestor containing media does not automatically protect all unrelated sibling folders.",
+    "No actual moves are authorized by this policy file. First produce and review a concrete plan."
+  ]
+}

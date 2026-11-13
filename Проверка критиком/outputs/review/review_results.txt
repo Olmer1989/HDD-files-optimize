@@ -1,0 +1,85 @@
+Independent project review, 2026-11-13. Python: 3.12.10
+All write operations use synthetic temporary files. Real disks are not scanned.
+
+Original documented catalog command (import failure expected in this package)
+.............E
+======================================================================
+ERROR: test_recovery_plan (unittest.loader._FailedTest.test_recovery_plan)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_recovery_plan
+Traceback (most recent call last):
+  File "C:\Python312\Lib\unittest\loader.py", line 137, in loadTestsFromName
+    module = __import__(module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Вадим\Documents\Codex\2026-11-13\new-chat\outputs\review\review-package\2 Программа быстрых ответов\test_recovery_plan.py", line 9, in <module>
+    from catalog.recovery_plan import section, original_candidate, cmd_recovery_plan
+ModuleNotFoundError: No module named 'catalog'
+
+
+----------------------------------------------------------------------
+Ran 14 tests in 1.260s
+
+FAILED (errors=1)
+Exit code: 1
+
+Original scanner tests
+.....................................
+----------------------------------------------------------------------
+Ran 37 tests in 0.638s
+
+OK
+Exit code: 0
+
+Recovery tests after explicit package-path adaptation
+test_northern_raw_has_priority (test_recovery_plan.RecoveryPlanTests.test_northern_raw_has_priority) ... ok
+test_plan_does_not_verify_or_promote_recovery (test_recovery_plan.RecoveryPlanTests.test_plan_does_not_verify_or_promote_recovery) ... ok
+test_short_digitized_piece_keeps_group (test_recovery_plan.RecoveryPlanTests.test_short_digitized_piece_keeps_group) ... ok
+test_variant_name_is_not_content_proof (test_recovery_plan.RecoveryPlanTests.test_variant_name_is_not_content_proof) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.008s
+
+OK
+Exit code: 0
+
+Dependency isolation probe (openpyxl import failure expected)
+Traceback (most recent call last):
+  File "C:\Users\Вадим\Documents\Codex\2026-11-13\new-chat\outputs\review\review-package\2 Программа быстрых ответов\hashbase.py", line 41, in <module>
+    import build_pilot as bp
+  File "C:\Users\Вадим\Documents\Codex\2026-11-13\new-chat\outputs\review\review-package\2 Программа быстрых ответов\build_pilot.py", line 20, in <module>
+    from openpyxl import Workbook
+ModuleNotFoundError: No module named 'openpyxl'
+Exit code: 1
+
+Independent regression probes (OK means the reported defects were reproduced)
+probe_cmp_unhashed (__main__.ReviewCases.probe_cmp_unhashed) ... ok
+probe_copy_existing_wrong_content_and_part_collision (__main__.ReviewCases.probe_copy_existing_wrong_content_and_part_collision) ... ok
+probe_decision_hides_unbacked_file (__main__.ReviewCases.probe_decision_hides_unbacked_file) ... ok
+probe_ignored_unique_database (__main__.ReviewCases.probe_ignored_unique_database) ... ok
+probe_move_twice_same_day (__main__.ReviewCases.probe_move_twice_same_day) ... ok
+probe_old_log_resurrects_file (__main__.ReviewCases.probe_old_log_resurrects_file) ... ok
+probe_partial_inventory (__main__.ReviewCases.probe_partial_inventory) ... ok
+probe_source_subfolder_bypasses_same_volume_guard (__main__.ReviewCases.probe_source_subfolder_bypasses_same_volume_guard) ... ok
+probe_stale_hash_overrides_inventory (__main__.ReviewCases.probe_stale_hash_overrides_inventory) ... ok
+probe_target_self_counted (__main__.ReviewCases.probe_target_self_counted) ... ok
+probe_unhashed_probable_copy_returns_yes (__main__.ReviewCases.probe_unhashed_probable_copy_returns_yes) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 1.828s
+
+OK
+CONFIRMED: cmp announces equal contents before reporting unique unhashed document
+CONFIRMED END TO END: wrong same-size destination -> skipped -> source hash inherited -> candel YES
+CONFIRMED: unrelated pre-existing .part is deleted without ownership check
+CONFIRMED: section assignment silently removes unbacked files from copy plan
+CONFIRMED: unique .mdb ignored -> YES
+CONFIRMED: two same-day manual moves leave phantom source C\5.jpg
+CONFIRMED: old log resurrects absent copy after new inventory -> YES
+CONFIRMED: incomplete scan accepted with no verdict warning
+CONFIRMED: source subfolder bypasses same-volume guard; writes on source volume
+CONFIRMED: stale hash row overrides newer inventory with different size -> YES
+CONFIRMED: deleting from HDD45 still counts HDD45 as retained copy -> YES
+CONFIRMED: unhashed document with one probable copy gets YES by photo/video
+Exit code: 0
+
+Scope: original >2 GiB copy test and live GUI were not executed. Copy behavior was tested with small synthetic files in Windows PowerShell.
