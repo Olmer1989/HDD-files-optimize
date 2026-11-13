@@ -856,6 +856,11 @@ def cmd_stats(a):
     out(f'Решения ({DECISIONS.name}): {len(read_tsv(DECISIONS)) - 1}')
 
 
+def cmd_recovery_plan(a):
+    import recovery_plan
+    recovery_plan.cmd_recovery_plan(a, sys.modules[__name__])
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         try:
@@ -877,6 +882,8 @@ def main():
     p.add_argument('--folder', action='append')
     p.add_argument('--dry', action='store_true', help='только посчитать, папку задачи не создавать')
     sub.add_parser('build'); sub.add_parser('stats')
+    p = sub.add_parser('recovery-plan', help='разбор оглавления восстановленной папки, без чтения содержимого')
+    p.add_argument('disk'); p.add_argument('--root', type=Path, required=True)
     a = ap.parse_args()
     t0 = time.time()
     if a.cmd == 'build':
@@ -884,7 +891,7 @@ def main():
         cmd_stats(a)
     else:
         {'missing': cmd_missing, 'only': lambda x: cmd_missing(x, True), 'cmp': cmd_cmp, 'where': cmd_where,
-         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats}[a.cmd](a)
+         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'recovery-plan': cmd_recovery_plan}[a.cmd](a)
     out(f'[{time.time() - t0:.1f} с]')
 
 
