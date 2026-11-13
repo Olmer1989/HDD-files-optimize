@@ -403,13 +403,95 @@ class PartialGuardTest(Base):
     def test_partial_scan_is_never_a_full_inventory(self):
         time.sleep(0.05)
         # рядом с полной описью (тот же уровень, файл новее) и в «Повторное сканирование» (уровнем глубже)
-        make_partial(self.scans, 'HDD45', 'AAAA0045', ['X'], [('X\\1.jpg', 100, S[1])], sub=None, name='p1')
-        make_partial(self.scans, 'HDD45', 'AAAA0045', ['X'], [('X\\1.jpg', 100, S[1])], name='p2')
+        make_partial(self.scans, 'HDD45', 'AAAA0045', ['W'], [('W\\9.jpg', 100, S[9])], sub=None, name='p1')
+        make_partial(self.scans, 'HDD45', 'AAAA0045', ['W'], [('W\\9.jpg', 100, S[9])], name='p2')
         jobs = bp.find_jobs()
         self.assertEqual(jobs['HDD45']['dir'].name, 'HDD45_job')
         self.assertEqual(set(jobs), {'HDD90', 'HDD45', 'HDD77', 'HDD91'})
-        # в базе HDD45 по-прежнему весь: X\2.jpg вне частичного скана не пропал
+        # в базе HDD45 по-прежнему весь: файлы вне папки частичного скана не пропали, сам скан добавил свою папку
         self.assertIsNotNone(self.row('HDD45', 'X\\2.jpg'))
+        self.assertEqual(self.row('HDD45', 'W\\9.jpg')[:2], (S[9], hb.EV_SCAN))
+
+
+T2099_06 = time.mktime((2099, 6, 1, 0, 0, 0, 0, 0, -1))
+
+
+class PartialScanTest(Base):
+    """Шаг 2 ТЗ v3: частичный скан папок и исключения."""
+
+    def setUp(self):
+        super().setUp()
+        # журнал ДО скана: «уже есть» (Z), копия с хешем (C), копия во временную папку владельца
+        self.task('До скана', [('HDD90', 'AAAA0090'), ('HDD77', 'AAAA0077')], 'Журнал копирования 2099-01-01 00-00-00.tsv',
+                  LOG_HEAD, [('1', 'HDD77', 'уже есть', '200', '', 'K:\\A\\2.jpg', 'S:\\П\\HDD90\\A\\2.jpg'),
+                             ('2', 'HDD77', 'скопирован, размер и SHA-256 совпали', '300', S[3], 'K:\\A\\sub\\3.mp4',
+                              'S:\\П\\HDD90\\A\\sub\\3.mp4'),
+                             ('3', 'HDD77', 'скопирован, размер и SHA-256 совпали', '400', S[4], 'K:\\B\\4.jpg',
+                              'S:\\П\\temp\\4.jpg')])
+        # журнал ПОСЛЕ скана
+        self.task('После скана', [('HDD90', 'AAAA0090'), ('HDD77', 'AAAA0077')], 'Журнал копирования 2100-01-01 00-00-00.tsv',
+                  LOG_HEAD, [('1', 'HDD77', 'скопирован, размер и SHA-256 совпали', '500', S[5], 'K:\\B\\5.jpg',
+                              'S:\\П\\HDD90\\B\\5.jpg'),
+                             ('2', 'HDD77', 'скопирован, размер и SHA-256 совпали', '100', S[1], 'K:\\A\\1.jpg',
+                              'S:\\П\\temp\\1.jpg')])
+        job = make_partial(self.scans, 'HDD77', 'AAAA0077', ['П'], [
+            ('П\\HDD90\\A\\2.jpg', 200, S[2]), ('П\\HDD90\\new.jpg', 600, S[6]), ('П\\doc.txt', 10, S[7]),
+            ('П\\temp\\t.jpg', 700, S[8]), ('П\\temp\\dup.jpg', 100, S[1])])
+        os.utime(job / 'inventory.sqlite', (T2099_06, T2099_06))
+        hb.ensure_tables()
+        hb.EXCLUSIONS.write_text(hb.EXCLUSION_HEAD + '\nHDD77\tП\\temp\tвременная копия владельца\n', encoding='utf-8-sig')
+
+    def paths(self, disk='HDD77'):
+        return {r[0]: r[1] for r in self.db().execute('select path, ev from files where disk=?', (disk,))}
+
+    def test_partial_scan_changes_only_its_folders(self):
+        got = self.paths()
+        self.assertEqual(got['Y\\1.jpg'], hb.EV_SCAN)                      # вне папки скана - не тронуто
+        self.assertEqual(got['П\\HDD90\\A\\2.jpg'], hb.EV_SCAN)            # было Z - стало S
+        self.assertEqual(got['П\\HDD90\\new.jpg'], hb.EV_SCAN)             # найден впервые
+        self.assertEqual(self.row('HDD77', 'П\\doc.txt')[:2], (S[7], hb.EV_SCAN))   # хеш прочих файлов сохраняется
+        self.assertNotIn('П\\HDD90\\A\\sub\\3.mp4', got)                   # в скане нет - исчез
+        self.assertEqual(len(self.paths('HDD90')), 6)                       # другие носители не тронуты
+        rep = json.loads(self.db().execute("select value from meta where key='report'").fetchone()[0])
+        line = rep['partial'][0]
+        self.assertIn('стало S: Z 1', line)
+        self.assertIn('новые 2', line)
+        self.assertIn('исчезли из базы 1', line)
+        self.assertIn('хеш не совпал 0', line)
+        self.assertIn('пропущено по исключениям 2', line)
+
+    def test_old_log_does_not_change_folders_after_newer_partial_scan(self):
+        got = self.paths()
+        self.assertNotIn('П\\HDD90\\A\\sub\\3.mp4', got)                   # старый журнал не воскрешает
+        self.assertEqual(got['П\\HDD90\\B\\5.jpg'], hb.EV_COPY)             # новый журнал действует
+        self.quiet(hb.cmd_stats, NS())
+        self.assertIn('Частичные сканы папок', self.printed)
+        # ручная операция старше скана в его папке не действует, новее - действует
+        self.manual('01.03.2099\tскопировано\tHDD90\tB\tHDD77\tП\\вручную\tдо скана',
+                    '01.01.2101\tудалено\tHDD77\tП\\doc.txt\t\t\tпосле скана')
+        got = self.paths()
+        self.assertFalse(any(p.startswith('П\\вручную') for p in got))
+        self.assertNotIn('П\\doc.txt', got)
+
+    def test_exclusions(self):
+        got = self.paths()
+        self.assertFalse(any(p.startswith('П\\temp') for p in got))         # ни из скана, ни из журналов
+        # фото и видео из исключённой папки, которых больше нигде нет, - в отдельном списке
+        lines = (hb.ANSWERS / 'исключения - больше нигде нет - HDD77.tsv').read_text(encoding='utf-8-sig').splitlines()[1:]
+        self.assertEqual([x.split('\t')[0] for x in lines], ['П\\temp\\t.jpg'])
+        self.quiet(hb.cmd_stats, NS())
+        self.assertIn('нет больше ни на одном носителе', self.printed)
+        # без исключения временные файлы попадают в базу
+        hb.EXCLUSIONS.write_text(hb.EXCLUSION_HEAD + '\n', encoding='utf-8-sig')
+        self.assertIn('П\\temp\\t.jpg', self.paths())
+
+    def test_partial_scan_older_than_full_inventory_is_ignored(self):
+        job = next((self.scans / 'Повторное сканирование' / 'HDD77 - тест').iterdir())
+        os.utime(job / 'inventory.sqlite', (1, 1))
+        got = self.paths()
+        self.assertNotIn('П\\HDD90\\new.jpg', got)
+        self.quiet(hb.cmd_stats, NS())
+        self.assertIn('полная опись носителя новее', self.printed)
 
 
 if __name__ == '__main__':

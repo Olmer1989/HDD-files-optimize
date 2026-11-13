@@ -51,12 +51,13 @@ MAIN = ('HDD45', 'HDD77')
 
 def set_root(out_dir):
     """Где лежат база и таблицы поправок (в тестах - временная папка)."""
-    global BASE_DIR, DB, SNAP, MANUAL, DECISIONS, ANSWERS, TEMPLATE
+    global BASE_DIR, DB, SNAP, MANUAL, DECISIONS, EXCLUSIONS, ANSWERS, TEMPLATE
     BASE_DIR = Path(out_dir) / '_БАЗА'
     DB = BASE_DIR / 'хеши.sqlite'          # рабочая база: снимок описей + поправки
     SNAP = BASE_DIR / 'описи.sqlite'       # снимок описей; пересобирается, только если изменились сами описи
     MANUAL = BASE_DIR / 'ручные операции.tsv'
     DECISIONS = BASE_DIR / 'решения.tsv'
+    EXCLUSIONS = BASE_DIR / 'исключения.tsv'   # папки, которые база не учитывает (временные копии владельца)
     ANSWERS = BASE_DIR / 'ответы'
     TEMPLATE = Path(out_dir) / '_ШАБЛОН копирования'
 
@@ -75,6 +76,8 @@ FOLDER_MOVES = {
 }
 MANUAL_HEAD = 'дата\tдействие\tдиск\tпуть\tдиск2\tпуть2\tкомментарий'
 DECISION_HEAD = 'диск\tпуть\tрешение\tкомментарий'
+EXCLUSION_HEAD = 'диск\tпуть\tкомментарий'
+PARTIAL_DIR = 'Повторное сканирование'     # частичные сканы папок: <корень сканов>\Повторное сканирование\<носитель>\<задание>
 SNAPSHOT_VERSION = 3          # менять при изменении структуры снимка
 
 # Степень подтверждения записи «файл лежит на носителе». Колонка sha заполнена ТОЛЬКО у подтверждённых (S и C):
@@ -161,12 +164,45 @@ def scans_signature(jobs):
     return json.dumps(sig, ensure_ascii=False, sort_keys=True)
 
 
+def find_partials():
+    """Частичные сканы папок (result.json с scan_scope=partial) - и в «Повторное сканирование», и рядом с описями."""
+    res, seen = [], set()
+    for root in bp.SCAN_ROOTS:
+        for pattern in (('*', '*', 'result.json'), (PARTIAL_DIR, '*', '*', 'result.json')):
+            for result in sorted(glob.glob(str(Path(root).joinpath(*pattern)))):
+                job = Path(result).parent
+                if '_Архив' in str(job) or job in seen:
+                    continue
+                try:
+                    info = json.loads(Path(result).read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    continue
+                if not bp.is_partial(info):
+                    continue
+                seen.add(job)
+                inv = job / 'inventory.sqlite'
+                res.append(dict(dir=job, name=job.name, disk=info.get('disk_id') or job.name.split('_')[0],
+                                folders=[str(f) for f in info.get('folders') or []], status=info.get('status', '?'),
+                                info=info, time=os.path.getmtime(inv) if inv.exists() else os.path.getmtime(result)))
+    return sorted(res, key=lambda p: (p['time'], p['name']))
+
+
+def partials_signature(parts):
+    sig = []
+    for pj in parts:
+        for fn in ('result.json', 'hashes.sqlite', 'inventory.sqlite'):
+            p = pj['dir'] / fn
+            if p.exists():
+                sig.append((str(p), p.stat().st_mtime_ns, p.stat().st_size))
+    return sig
+
+
 def sources_signature(jobs):
     sig = [('программа', os.path.getmtime(__file__)),      # изменилась программа - поправки накладываются заново
-           ('описи', scans_signature(jobs))]
+           ('описи', scans_signature(jobs)), ('частичные сканы', partials_signature(find_partials()))]
     for p in sorted(glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv'))):
         sig.append((p, os.path.getmtime(p), os.path.getsize(p)))
-    for p in (MANUAL, DECISIONS):
+    for p in (MANUAL, DECISIONS, EXCLUSIONS):
         if p.exists():
             sig.append((str(p), p.stat().st_mtime_ns, p.stat().st_size))
     return json.dumps(sig, ensure_ascii=False, sort_keys=True)
@@ -179,6 +215,47 @@ def ensure_tables():
         MANUAL.write_text(MANUAL_HEAD + '\n', encoding='utf-8-sig')
     if not DECISIONS.exists():
         DECISIONS.write_text(DECISION_HEAD + '\n', encoding='utf-8-sig')
+    if not EXCLUSIONS.exists():
+        EXCLUSIONS.write_text(EXCLUSION_HEAD + '\n', encoding='utf-8-sig')
+
+
+def read_exclusions():
+    """Папки, которые база не учитывает: диск -> [папка]. Строка заголовка необязательна."""
+    res = collections.defaultdict(list)
+    for f in read_tsv(EXCLUSIONS):
+        f = [x.strip() for x in f] + ['', '']
+        if not f[0] or f[0].lower() == 'диск' or not f[1].strip(SEP):
+            continue
+        res[f[0]].append(f[1].strip(SEP))
+    return res
+
+
+def inside(path, folders):
+    """Папка из списка, внутри которой лежит путь (или None)."""
+    for f in folders:
+        if path == f or path.startswith(f + SEP):
+            return f
+    return None
+
+
+class Seen:
+    """Когда что описано последний раз: полная опись носителя или более новый частичный скан его папки.
+    Операция (журнал, ручная) действует на место, только если она НОВЕЕ этого времени."""
+
+    def __init__(self, full):
+        self.full = dict(full)
+        self.parts = collections.defaultdict(list)
+
+    def add(self, disk, folder, t):
+        self.parts[disk].append((folder, t))
+
+    def at(self, disk, path=None):
+        t = self.full.get(disk, 0)
+        if path is not None:
+            for f, pt in self.parts.get(disk, ()):
+                if pt > t and (path == f or path.startswith(f + SEP)):
+                    t = pt
+        return t
 
 
 def read_tsv(path):
@@ -213,7 +290,7 @@ def put_row(c, disk, path, size, sha, mtime, ev, sha_exp, origin):
               'values (?,?,?,?,?,?,?,?,?)', (disk, path, size, sha, origin, name_key(path), mtime, ev, sha_exp))
 
 
-def apply_log(c, log, jobs, serials, report, scanned):
+def apply_log(c, log, jobs, serials, report, seen):
     """Журнал скрипта -> поправки. Строка действует на диск, только если запуск был ПОЗЖЕ описи этого диска:
     иначе опись уже отражает результат (или его отсутствие), и старый журнал вернул бы исчезнувший файл."""
     task = Path(log).parent
@@ -224,7 +301,7 @@ def apply_log(c, log, jobs, serials, report, scanned):
     body = rows[1:]
     name = f'{task.name}\\{Path(log).name}'
     when = log_time(log)
-    newer = lambda disk: when > scanned.get(disk, 0)
+    newer = lambda disk, path=None: when > seen.at(disk, path)     # опись диска или частичный скан папки новее
     added = removed = moved = weak = old = 0
     origin = 'журнал: ' + name
     lookup = lambda disk, rel: c.execute('select sha, size, mtime, sha_exp, ev from files where disk=? and path=?',
@@ -247,7 +324,7 @@ def apply_log(c, log, jobs, serials, report, scanned):
             if not disk:
                 report['warn'].add(f'{name}: цель «{f[i_t]}» не опознана по тома.tsv - строки пропущены')
                 continue
-            if not newer(disk):
+            if not newer(disk, rel_of(f[i_dst])[1]):
                 old += 1
                 continue
             log_sha = (f[i_h].strip().lower() if i_h is not None and len(f) > i_h else '') or None
@@ -274,14 +351,14 @@ def apply_log(c, log, jobs, serials, report, scanned):
                 continue
             got = lookup(da, ra)
             if f[i_r].startswith('скопирован'):
-                if not newer(db_):
+                if not newer(db_, rb):
                     old += 1
                     continue
                 put_row(c, db_, rb, int(f[i_s]), None, got[2] if got else None, EV_SIZE,
                         (got[0] or got[3]) if got else None, origin)      # File.Copy + сверка размера
                 added += 1; weak += 1
             elif f[i_r].startswith('перемещ'):
-                if not newer(da):
+                if not newer(da, ra) or not newer(db_, rb):
                     old += 1
                     continue
                 if got:                                                   # тот же файл на том же диске
@@ -296,7 +373,7 @@ def apply_log(c, log, jobs, serials, report, scanned):
             if len(f) > i_a and f[i_r].startswith('в корзин'):
                 l, r = rel_of(f[i_a])
                 if l in letters:
-                    if not newer(letters[l]):
+                    if not newer(letters[l], r):
                         old += 1
                         continue
                     removed += c.execute('delete from files where disk=? and path=?', (letters[l], r)).rowcount
@@ -305,10 +382,10 @@ def apply_log(c, log, jobs, serials, report, scanned):
         for f in body:
             if len(f) < 3 or not f[1].startswith('перемещ'):
                 continue
-            if not newer(disk):
+            old_path = src_base + SEP + f[2]
+            if not newer(disk, old_path) or not newer(disk, dst_base + SEP + f[2]):
                 old += 1
                 continue
-            old_path = src_base + SEP + f[2]
             cond, args = prefix_cond('path', old_path)
             moved += c.execute(f'update files set path = ? || substr(path, ?), origin = ? where disk=? and {cond}',
                                [dst_base + SEP + f[2], len(old_path) + 1, origin, disk] + args).rowcount
@@ -318,7 +395,7 @@ def apply_log(c, log, jobs, serials, report, scanned):
     report['logs'].append(f'{name}: добавлено {added}, перемещено {moved}, убрано {removed}'
                           + (f' (из добавленных без подтверждения содержимого: {weak})' if weak else ''))
     if old:
-        report['old'].append(f'{name}: {old} строк не применены - запуск был раньше описи диска, опись новее')
+        report['old'].append(f'{name}: {old} строк не применены - запуск был раньше описи диска (или частичного скана папки), опись новее')
 
 
 def manual_time(date):
@@ -330,46 +407,88 @@ def manual_time(date):
         return time.time()
 
 
-def apply_manual(c, report, scanned):
-    """То, что пользователь сделал в Проводнике. Копия «со слов» никогда не становится подтверждённой."""
-    n = 0
-    for line_no, f in enumerate(read_tsv(MANUAL)[1:], 2):
-        f = [x.strip() for x in f] + [''] * 7
-        date, act, disk, path, disk2, path2 = f[:6]
-        act = act.lower()
-        when = manual_time(date)
-        origin = f'вручную {date}, строка {line_no}'
-        cond, args = prefix_cond('path', path)
-        label = f'{date} {act} {disk}:{path}' + (f' -> {disk2}:{path2}' if disk2 else '')
-        if act.startswith('удал'):
-            if when < scanned.get(disk, 0):
-                report['old'].append(label + ' - не применено: опись диска новее')
+def manual_rows():
+    """Строки таблицы ручных операций: (номер строки в файле, поля)."""
+    return [(line_no, [x.strip() for x in f] + [''] * 7) for line_no, f in enumerate(read_tsv(MANUAL)[1:], 2)]
+
+
+def apply_manual_row(c, line_no, f, report, seen):
+    """Одна ручная операция (то, что пользователь сделал в Проводнике). Копия «со слов» никогда не становится
+    подтверждённой. Операция не действует на место, которое ПОЗЖЕ описал частичный скан: скан и есть итог."""
+    f = [x.strip() for x in f] + [''] * 7
+    date, act, disk, path, disk2, path2 = f[:6]
+    act = act.lower()
+    when = manual_time(date)
+    origin = f'вручную {date}, строка {line_no}'
+    cond, args = prefix_cond('path', path)
+    label = f'{date} {act} {disk}:{path}' + (f' -> {disk2}:{path2}' if disk2 else '')
+    late = 0
+    if act.startswith('удал'):
+        if when < seen.at(disk):
+            report['old'].append(label + ' - не применено: опись диска новее')
+            return False
+        paths = [r[0] for r in c.execute(f'select path from files where disk=? and {cond}', [disk] + args)]
+        keep = [p for p in paths if when < seen.at(disk, p)]
+        late = len(keep)
+        if late:
+            keep = set(keep)
+            paths = [p for p in paths if p not in keep]
+        c.executemany('delete from files where disk=? and path=?', ((disk, p) for p in paths))
+        k = len(paths)
+    elif act.startswith(('скопир', 'перемещ')):
+        move = act.startswith('перемещ')
+        if when < seen.at(disk2) or (move and when < seen.at(disk)):
+            report['old'].append(label + ' - не применено: опись диска новее')
+            return False
+        rows = c.execute(f'select path, size, sha, mtime, ev, sha_exp from files where disk=? and {cond}',
+                         [disk] + args).fetchall()
+        base = path.rstrip(SEP)
+        todo = []
+        for p, size, sha, mt, ev, exp in rows:
+            tail = p[len(base):].lstrip(SEP)
+            newp = (path2.rstrip(SEP) + (SEP + tail if tail else '')) if tail or path2 else p
+            if when < seen.at(disk2, newp) or (move and when < seen.at(disk, p)):
+                late += 1                         # это место позже описал частичный скан
                 continue
-            k = c.execute(f'delete from files where disk=? and {cond}', [disk] + args).rowcount
-        elif act.startswith(('скопир', 'перемещ')):
-            move = act.startswith('перемещ')
-            if when < scanned.get(disk2, 0) or (move and when < scanned.get(disk, 0)):
-                report['old'].append(label + ' - не применено: опись диска новее')
-                continue
-            rows = c.execute(f'select path, size, sha, mtime, ev, sha_exp from files where disk=? and {cond}',
-                             [disk] + args).fetchall()
-            base = path.rstrip(SEP)
-            if move:                                  # сначала убрать ровно эти записи, потом создать новые
-                c.executemany('delete from files where disk=? and path=?', ((disk, r[0]) for r in rows))
-            for p, size, sha, mt, ev, exp in rows:
-                tail = p[len(base):].lstrip(SEP)
-                newp = (path2.rstrip(SEP) + (SEP + tail if tail else '')) if tail or path2 else p
-                if move and disk2 == disk:            # тот же файл на том же диске: подтверждение не меняется
-                    put_row(c, disk2, newp, size, sha, mt, ev, exp, origin)
-                else:                                 # содержимое копии никто не проверял
-                    put_row(c, disk2, newp, size, None, mt, EV_USER, sha or exp, origin)
-            k = len(rows)
-        else:
-            report['warn'].add(f'ручные операции: непонятное действие «{act}»')
-            continue
-        n += 1
-        report['manual'].append(label + f' - {k} файлов')
-    return n
+            todo.append((p, newp, size, sha, mt, ev, exp))
+        if move:                                  # сначала убрать ровно эти записи, потом создать новые
+            c.executemany('delete from files where disk=? and path=?', ((disk, r[0]) for r in todo))
+        for p, newp, size, sha, mt, ev, exp in todo:
+            if move and disk2 == disk:            # тот же файл на том же диске: подтверждение не меняется
+                put_row(c, disk2, newp, size, sha, mt, ev, exp, origin)
+            else:                                 # содержимое копии никто не проверял
+                put_row(c, disk2, newp, size, None, mt, EV_USER, sha or exp, origin)
+        k = len(todo)
+    else:
+        report['warn'].add(f'ручные операции: непонятное действие «{act}»')
+        return False
+    report['manual'].append(label + f' - {k} файлов')
+    if late:
+        report['old'].append(label + f' - {late} файлов не применено: это место позже описал частичный скан')
+    return True
+
+
+def apply_manual(c, report, seen):
+    return sum(apply_manual_row(c, n, f, report, seen) for n, f in manual_rows())
+
+
+def event_stream():
+    """Все поправки к описям одним потоком по времени: (время, порядок, имя, вид, данные).
+    Журнал скрипта - время запуска; частичный скан - время его описи; ручная операция - конец её дня."""
+    ev = [(log_time(p), 0, p, 'log', p) for p in glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv'))]
+    ev += [(pj['time'], 1, str(pj['dir']), 'partial', pj) for pj in find_partials()]
+    ev += [(manual_time(f[0]), 2, f'{n:09d}', 'manual', (n, f)) for n, f in manual_rows()]
+    return sorted(ev, key=lambda e: e[:3])
+
+
+def apply_event(c, ev, jobs, serials, report, seen, excl):
+    kind, data = ev[3], ev[4]
+    if kind == 'log':
+        apply_log(c, data, jobs, serials, report, seen)
+    elif kind == 'partial':
+        apply_partial(c, data, seen, excl, report)
+    else:
+        apply_manual_row(c, data[0], data[1], report, seen)
 
 
 def replace_file(src, dst):
@@ -465,6 +584,160 @@ def build_snapshot(jobs, quiet=False):
             f'из них с хешем {n_hash}, с устаревшим хешем {n_stale}.')
 
 
+def scan_row(disk, p, size, mt, got, origin):
+    """Строка таблицы files по записи описи и хешу сканера (та же логика, что в снимке описей)."""
+    mt_s = '' if mt is None else str(mt)
+    try:
+        mt_i = int(mt) // 1000000000 if mt else None
+    except (TypeError, ValueError):
+        mt_i = None
+    if not got or not size:                       # пустому файлу хеш не нужен: терять нечего
+        return disk, p, size or 0, None, origin, name_key(p), mt_i, EV_NONE, None
+    if got[0] == size and (not got[1] or not mt_s or got[1] == mt_s):
+        return disk, p, size or 0, got[2], origin, name_key(p), mt_i, EV_SCAN, None
+    return disk, p, size or 0, None, origin, name_key(p), mt_i, EV_STALE, got[2]   # файл изменился после хеша
+
+
+def apply_partial(c, pj, seen, excl, report):
+    """Частичный скан папок: строки носителя ВНУТРИ его папок заменяются строками скана (степень S),
+    строки вне этих папок не трогаются. Папки из исключений пропускаются. Итог - в report['partial']."""
+    disk, label = pj['disk'], f'частичный скан {pj["disk"]} ({pj["name"]})'
+    info = pj['info']
+    if not str(pj['status']).startswith('complete'):
+        report['warn'].add(f'{label}: состояние «{pj["status"]}» - скан не принят')
+        return False
+    if disk not in seen.full:
+        report['warn'].add(f'{label}: полной описи этого носителя нет в базе - скан не принят')
+        return False
+    if pj['time'] <= seen.full[disk]:
+        report['old'].append(f'{label}: не применён - полная опись носителя новее')
+        return False
+    folders = sorted({f.strip().strip(SEP) for f in pj['folders'] if f.strip().strip(SEP)}, key=lambda f: -len(f))
+    if not folders:
+        report['warn'].add(f'{label}: в result.json нет списка папок - скан не принят')
+        return False
+    hp, ip = pj['dir'] / 'hashes.sqlite', pj['dir'] / 'inventory.sqlite'
+    hashes, unread = {}, 0
+    if hp.exists():
+        with bp.ro(hp) as h:
+            for p, s, m, x, st in h.execute('select path, size, mtime_ns, lower(sha256), status from hashes'):
+                if st == 'verified' and x:
+                    hashes[p] = (s, '' if m is None else str(m), x)
+                else:
+                    unread += 1
+    with bp.ro(ip) as inv:
+        scan = inv.execute('select path, size, mtime_ns from files').fetchall()
+        try:
+            errors = inv.execute('select path, operation, message from errors').fetchall()
+        except sqlite3.Error:
+            errors = []
+    ex = excl.get(disk, [])
+    origin = f'частичный скан: {pj["name"]}'
+    st = {f: collections.Counter() for f in folders}
+    prev = {}
+    for f in folders:
+        cond, args = prefix_cond('path', f)
+        for p, sha, exp, ev, size in c.execute(f'select path, sha, sha_exp, ev, size from files where disk=? and {cond}',
+                                               [disk] + args):
+            prev[p] = (sha or exp, ev, size or 0)
+        c.execute(f'delete from files where disk=? and {cond}', [disk] + args)
+        c.execute(f'delete from issues where disk=? and {cond}', [disk] + args)
+        seen.add(disk, f, pj['time'])
+    rows, outside = [], 0
+    for p, size, mt in scan:
+        f = inside(p, folders)
+        if f is None:
+            outside += 1
+            continue
+        k = st[f]
+        k['файлов'] += 1; k['байт'] += size or 0
+        r = scan_row(disk, p, size, mt, hashes.get(p), origin)
+        h = r[3] or r[8]
+        if inside(p, ex):
+            k['исключено'] += 1; k['исключено байт'] += size or 0
+            c.execute('insert or replace into excluded values (?,?,?,?,?,?)', (disk, p, size or 0, h, r[5], origin))
+            continue
+        rows.append(r)
+        old = prev.pop(p, None)
+        if old is None:
+            k['новые'] += 1; k['новые байт'] += size or 0
+        elif old[0] and h and old[0] != h:
+            k['хеш не совпал'] += 1
+        elif r[7] == EV_SCAN:
+            k['было ' + (old[1] or EV_NONE)] += 1
+    c.executemany('insert or replace into files values (?,?,?,?,?,?,?,?,?)', rows)
+    for p, (h, ev, size) in prev.items():                        # было в базе, в скане нет
+        k = st[inside(p, folders)]
+        if inside(p, ex):
+            k['убрано по исключениям'] += 1
+        else:
+            k['исчезли'] += 1; k['исчезли байт'] += size
+    for p, op, msg in errors:
+        c.execute('insert into issues values (?,?,?,?)', (disk, rel_of(p or '')[1].rstrip(SEP),
+                                                          'не прочитано при частичном скане', f'{op}: {msg}'[:300]))
+    lines = []
+    for f in sorted(folders):
+        k = st[f]
+        conf = ', '.join(f'{e} {k["было " + e]}' for e in (EV_SIZE, EV_COPY, EV_USER, EV_STALE, EV_NONE) if k['было ' + e])
+        lines.append(f'{disk}\\{f}: в скане {k["файлов"]} файлов ({gb(k["байт"])} ГБ); стало S: {conf or "0"}'
+                     + (f', уже было S {k["было S"]}' if k['было S'] else '')
+                     + f'; новые {k["новые"]} ({gb(k["новые байт"])} ГБ); исчезли из базы {k["исчезли"]}'
+                     + f'; хеш не совпал {k["хеш не совпал"]}'
+                     + (f'; пропущено по исключениям {k["исключено"]} ({gb(k["исключено байт"])} ГБ)' if k['исключено'] else '')
+                     + (f'; старых записей убрано по исключениям {k["убрано по исключениям"]}'
+                        if k['убрано по исключениям'] else ''))
+    report.setdefault('partial', []).extend(lines)
+    report.setdefault('partial_stats', {})[pj['name']] = {f: dict(st[f]) for f in folders}
+    if outside:
+        report['warn'].add(f'{label}: {outside} файлов вне перечисленных папок - не приняты')
+    if unread or info.get('damaged_files') or info.get('unread_files') or errors:
+        report['warn'].add(f'{label}: не прочитано файлов {unread or info.get("unread_files") or 0}, '
+                           f'повреждено {info.get("damaged_files") or 0}, ошибок описи {len(errors)}')
+    return True
+
+
+EXCLUDED_DDL = ('create table if not exists excluded(disk text not null, path text not null, size integer, sha text, '
+                'name_lc text, origin text, primary key(disk, path)) without rowid')
+NOHASH_VIDEO = ('.m2t', '.dv')    # видео, которому сканер полных описей хеш не считает: копию ищем и по имени и размеру
+
+
+def apply_exclusions(c, excl, report):
+    """Папки из исключений не учитываются вовсе: строки внутри них убираются, откуда бы они ни пришли
+    (что убрано - запоминается в таблице excluded, чтобы проверить, не единственные ли это экземпляры)."""
+    for disk, folders in excl.items():
+        for f in folders:
+            cond, args = prefix_cond('path', f)
+            c.execute(f'insert or replace into excluded select disk, path, size, coalesce(sha, sha_exp), name_lc, origin '
+                      f'from files where disk=? and {cond}', [disk] + args)
+            n = c.execute(f'delete from files where disk=? and {cond}', [disk] + args).rowcount
+            if n:
+                report.setdefault('excluded', []).append(f'{disk}\\{f}: убрано записей {n}')
+
+
+def excluded_unique(c, report):
+    """Фото и видео из исключённых папок, которых нет больше ни на одном носителе в базе (по SHA-256): их нельзя
+    потерять при ручном переносе. Список - в «ответы», в отчёт сборки - одна строка на носитель."""
+    by_disk = collections.defaultdict(list)
+    q = '''select e.disk, e.path, e.size, e.sha,
+                  exists(select 1 from files g where g.name_lc=e.name_lc and g.size=e.size)
+           from excluded e where e.sha is not null
+             and not exists(select 1 from files g where g.sha=e.sha)
+             and not exists(select 1 from files g where g.sha_exp=e.sha)'''
+    for disk, p, size, sha, probable in c.execute(q):
+        ext = os.path.splitext(p)[1].lower()
+        if ext in bp.EXT_TYPE or ext in NOHASH_VIDEO:
+            kind = bp.file_type(p, size or 0) or 'Видео'
+            by_disk[disk].append((p, size, kind, 'есть файл с тем же именем и размером' if probable else '', sha))
+    for disk, rr in sorted(by_disk.items()):
+        path = save(f'исключения - больше нигде нет - {disk}', ('путь', 'размер', 'тип', 'вероятная копия', 'SHA-256'),
+                    sorted(rr))
+        small = sum(1 for r in rr if r[2] == bp.T_SMALL)
+        nohash = sum(1 for r in rr if os.path.splitext(r[0])[1].lower() in NOHASH_VIDEO)
+        report['warn'].add(f'в исключённых папках {disk} {len(rr)} фото и видео ({gb(sum(r[1] for r in rr))} ГБ) нет больше '
+                           f'ни на одном носителе в базе (из них мелких картинок {small}; видео .m2t/.dv, которым на других '
+                           f'дисках хеш не считали, {nohash}) - не потерять при ручном переносе: {path}')
+
+
 def snapshot_fresh(jobs):
     if not SNAP.exists():
         return False
@@ -525,12 +798,15 @@ def build(jobs=None, quiet=False):
         shutil.copyfile(SNAP, tmp)
         c = sqlite3.connect(tmp)
         c.executescript('pragma journal_mode=off; pragma synchronous=off; pragma cache_size=-200000;')
-        scanned = dict(c.execute('select disk, scanned from disks'))
-        report = dict(logs=[], skipped=[], manual=[], old=[], warn=set())
+        seen = Seen(c.execute('select disk, scanned from disks'))
+        report = dict(logs=[], skipped=[], manual=[], old=[], warn=set(), partial=[], excluded=[])
         serials = serial_map(jobs)
-        for log in sorted(glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv')), key=log_time):
-            apply_log(c, log, jobs, serials, report, scanned)
-        apply_manual(c, report, scanned)
+        excl = read_exclusions()
+        c.execute(EXCLUDED_DDL)
+        for ev in event_stream():           # журналы, частичные сканы, ручные операции - строго по времени
+            apply_event(c, ev, jobs, serials, report, seen, excl)
+        apply_exclusions(c, excl, report)
+        excluded_unique(c, report)
         report['warn'] = sorted(report['warn'])
         c.execute('insert into meta values (?,?)', ('signature', sources_signature(jobs)))
         c.execute('insert into meta values (?,?)', ('report', json.dumps(report, ensure_ascii=False)))
@@ -1156,6 +1432,12 @@ def cmd_stats(a):
         out('Не применено, потому что опись диска новее операции:')
         for x in rep['old']:
             out('  ' + x)
+    if rep.get('partial'):
+        out('Частичные сканы папок:')
+        for x in rep['partial']:
+            out('  ' + x)
+    for x in rep.get('excluded', []):
+        out(f'Исключения ({EXCLUSIONS.name}): {x}')
     out(f'Ручные операции ({MANUAL.name}): {len(rep["manual"])}')
     for x in rep['manual']:
         out('  ' + x)
