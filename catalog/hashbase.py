@@ -31,6 +31,7 @@ import argparse
 import collections
 import csv
 import glob
+import hashlib
 import io
 import json
 import os
@@ -78,7 +79,6 @@ MANUAL_HEAD = 'дата\tдействие\tдиск\tпуть\tдиск2\tпут
 DECISION_HEAD = 'диск\tпуть\tрешение\tкомментарий'
 EXCLUSION_HEAD = 'диск\tпуть\tкомментарий'
 PARTIAL_DIR = 'Повторное сканирование'     # частичные сканы папок: <корень сканов>\Повторное сканирование\<носитель>\<задание>
-SNAPSHOT_VERSION = 3          # менять при изменении структуры снимка
 
 # Степень подтверждения записи «файл лежит на носителе». Колонка sha заполнена ТОЛЬКО у подтверждённых (S и C):
 # поэтому всё, что сравнивается по sha, сравнивается по измеренным хешам. У остальных ожидаемый хеш лежит в sha_exp.
@@ -154,16 +154,6 @@ def prefix_cond(col, prefix):
 
 # ---------- сборка ----------
 
-def scans_signature(jobs):
-    sig = [('версия снимка', SNAPSHOT_VERSION)]
-    for d, j in jobs.items():
-        for fn in ('hashes.sqlite', 'inventory.sqlite'):
-            p = j['dir'] / fn
-            if p.exists():
-                sig.append((d, fn, p.stat().st_mtime_ns, p.stat().st_size))
-    return json.dumps(sig, ensure_ascii=False, sort_keys=True)
-
-
 def find_partials():
     """Частичные сканы папок (result.json с scan_scope=partial) - и в «Повторное сканирование», и рядом с описями."""
     res, seen = [], set()
@@ -185,27 +175,6 @@ def find_partials():
                                 folders=[str(f) for f in info.get('folders') or []], status=info.get('status', '?'),
                                 info=info, time=os.path.getmtime(inv) if inv.exists() else os.path.getmtime(result)))
     return sorted(res, key=lambda p: (p['time'], p['name']))
-
-
-def partials_signature(parts):
-    sig = []
-    for pj in parts:
-        for fn in ('result.json', 'hashes.sqlite', 'inventory.sqlite'):
-            p = pj['dir'] / fn
-            if p.exists():
-                sig.append((str(p), p.stat().st_mtime_ns, p.stat().st_size))
-    return sig
-
-
-def sources_signature(jobs):
-    sig = [('программа', os.path.getmtime(__file__)),      # изменилась программа - поправки накладываются заново
-           ('описи', scans_signature(jobs)), ('частичные сканы', partials_signature(find_partials()))]
-    for p in sorted(glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv'))):
-        sig.append((p, os.path.getmtime(p), os.path.getsize(p)))
-    for p in (MANUAL, DECISIONS, EXCLUSIONS):
-        if p.exists():
-            sig.append((str(p), p.stat().st_mtime_ns, p.stat().st_size))
-    return json.dumps(sig, ensure_ascii=False, sort_keys=True)
 
 
 def ensure_tables():
@@ -290,15 +259,16 @@ def put_row(c, disk, path, size, sha, mtime, ev, sha_exp, origin):
               'values (?,?,?,?,?,?,?,?,?)', (disk, path, size, sha, origin, name_key(path), mtime, ev, sha_exp))
 
 
-def apply_log(c, log, jobs, serials, report, seen):
+def apply_log(c, log, jobs, serials, report, seen, rows=None, start=0):
     """Журнал скрипта -> поправки. Строка действует на диск, только если запуск был ПОЗЖЕ описи этого диска:
-    иначе опись уже отражает результат (или его отсутствие), и старый журнал вернул бы исчезнувший файл."""
+    иначе опись уже отражает результат (или его отсутствие), и старый журнал вернул бы исчезнувший файл.
+    rows - уже прочитанные строки журнала; start - сколько строк данных уже учтено (журнал дописывается)."""
     task = Path(log).parent
-    rows = read_tsv(log)
-    if len(rows) < 2:
+    rows = read_tsv(log) if rows is None else rows
+    if len(rows) < 2 + start:
         return
     head = [h.strip().lower() for h in rows[0]]
-    body = rows[1:]
+    body = rows[1 + start:]
     name = f'{task.name}\\{Path(log).name}'
     when = log_time(log)
     newer = lambda disk, path=None: when > seen.at(disk, path)     # опись диска или частичный скан папки новее
@@ -390,12 +360,14 @@ def apply_log(c, log, jobs, serials, report, seen):
             moved += c.execute(f'update files set path = ? || substr(path, ?), origin = ? where disk=? and {cond}',
                                [dst_base + SEP + f[2], len(old_path) + 1, origin, disk] + args).rowcount
     else:
-        report['skipped'].append(name)
+        if name not in report['skipped']:
+            report['skipped'].append(name)
         return
-    report['logs'].append(f'{name}: добавлено {added}, перемещено {moved}, убрано {removed}'
-                          + (f' (из добавленных без подтверждения содержимого: {weak})' if weak else ''))
+    k = report['logs'].setdefault(name, [0, 0, 0, 0])
+    for i, v in enumerate((added, moved, removed, weak)):
+        k[i] += v
     if old:
-        report['old'].append(f'{name}: {old} строк не применены - запуск был раньше описи диска (или частичного скана папки), опись новее')
+        report['old_logs'][name] = report['old_logs'].get(name, 0) + old
 
 
 def manual_time(date):
@@ -503,95 +475,58 @@ def replace_file(src, dst):
             time.sleep(1.5)
 
 
-def build_snapshot(jobs, quiet=False):
-    """Снимок описей: все файлы всех носителей (с хешем и без). Долго (минуты), но только когда изменились описи."""
-    t0 = time.time()
-    tmp = SNAP.with_name(f'описи.{os.getpid()}.tmp')
-    if tmp.exists():
-        tmp.unlink()
-    c = sqlite3.connect(tmp)
-    c.executescript("""
-        pragma journal_mode=off; pragma synchronous=off; pragma cache_size=-400000;
-        create table files(disk text not null, path text not null, size integer, sha text, origin text,
-                           name_lc text, mtime integer, ev text, sha_exp text, primary key(disk, path)) without rowid;
-        create table meta(key text primary key, value text);
-        create table disks(disk text primary key, label text, hashed integer, total integer, status text, scanned real);
-        create table issues(disk text, path text, kind text, note text);
-    """)
-    n_all = n_hash = n_stale = 0
-    for d, j in jobs.items():
-        hp, ip = j['dir'] / 'hashes.sqlite', j['dir'] / 'inventory.sqlite'
-        hashes = {}
-        if hp.exists():
-            with bp.ro(hp) as h:
-                for p, s, m, x, st in h.execute('select path, size, mtime_ns, lower(sha256), status from hashes'):
-                    if st == 'verified' and x:
-                        hashes[p] = (s, '' if m is None else str(m), x)
-                    else:
-                        c.execute('insert into issues values (?,?,?,?)', (d, p, 'файл не прочитан при подсчёте хеша', st or ''))
-        have_inv = ip.exists()
-        counter = [0, 0]                                  # с хешем, с устаревшим хешем
+def load_disk(c, d, j):
+    """Полная опись одного носителя -> строки files, issues и disks. Возвращает (файлов, с хешем, с устаревшим хешем)."""
+    hp, ip = j['dir'] / 'hashes.sqlite', j['dir'] / 'inventory.sqlite'
+    hashes = {}
+    if hp.exists():
+        with bp.ro(hp) as h:
+            for p, s, m, x, st in h.execute('select path, size, mtime_ns, lower(sha256), status from hashes'):
+                if st == 'verified' and x:
+                    hashes[p] = (s, '' if m is None else str(m), x)
+                else:
+                    c.execute('insert into issues values (?,?,?,?)', (d, p, 'файл не прочитан при подсчёте хеша', st or ''))
+    have_inv = ip.exists()
+    cnt = collections.Counter()
 
-        def rows():
-            if not have_inv:                              # описи нет вовсе: есть только таблица хешей
-                for p, (size, m, x) in hashes.items():
-                    counter[0] += 1
-                    yield d, p, size or 0, x, 'опись', name_key(p), None, EV_SCAN, None
-                return
+    def rows():
+        if not have_inv:                              # описи нет вовсе: есть только таблица хешей
+            for p, (size, m, x) in hashes.items():
+                cnt[EV_SCAN] += 1
+                yield d, p, size or 0, x, 'опись', name_key(p), None, EV_SCAN, None
+            return
+        with bp.ro(ip) as inv:
+            for p, size, mt in inv.execute('select path, size, mtime_ns from files order by path'):
+                r = scan_row(d, p, size, mt, hashes.get(p), 'опись', keep_empty=True)
+                cnt[r[7]] += 1
+                yield r
+        # хеш, для которого в описи нет файла, не переносится: по описи такого файла на диске нет
+
+    before = c.total_changes
+    c.executemany('insert or replace into files values (?,?,?,?,?,?,?,?,?)', rows())
+    total = c.total_changes - before
+    if have_inv:
+        try:
             with bp.ro(ip) as inv:
-                for p, size, mt in inv.execute('select path, size, mtime_ns from files order by path'):
-                    got = hashes.get(p)
-                    mt_s = '' if mt is None else str(mt)
-                    try:
-                        mt_i = int(mt) // 1000000000 if mt else None
-                    except (TypeError, ValueError):
-                        mt_i = None
-                    if not got:
-                        yield d, p, size or 0, None, 'опись', name_key(p), mt_i, EV_NONE, None
-                    elif got[0] == size and (not got[1] or not mt_s or got[1] == mt_s):
-                        counter[0] += 1
-                        yield d, p, size or 0, got[2], 'опись', name_key(p), mt_i, EV_SCAN, None
-                    else:                                 # файл изменился после подсчёта хеша: хеш к нему не относится
-                        counter[1] += 1
-                        yield d, p, size or 0, None, 'опись', name_key(p), mt_i, EV_STALE, got[2]
-            # хеш, для которого в описи нет файла, не переносится: по описи такого файла на диске нет
-
-        before = c.total_changes
-        c.executemany('insert or replace into files values (?,?,?,?,?,?,?,?,?)', rows())
-        total = c.total_changes - before
-        if have_inv:
-            try:
-                with bp.ro(ip) as inv:
-                    for p, op, msg in inv.execute('select path, operation, message from errors'):
-                        c.execute('insert into issues values (?,?,?,?)',
-                                  (d, rel_of(p or '')[1].rstrip(SEP), 'папка или файл не прочитаны при описи', f'{op}: {msg}'[:300]))
-            except sqlite3.Error:
-                pass
-        scanned = os.path.getmtime(ip) if have_inv else j.get('mtime', 0)
-        c.execute('insert into disks values (?,?,?,?,?,?)', (d, j['label'], counter[0], total, j.get('status') or '?', scanned))
-        n_all += total; n_hash += counter[0]; n_stale += counter[1]
-        c.commit()
-    c.execute('create index files_sha on files(sha, disk) where sha is not null')
-    c.execute('create index files_exp on files(sha_exp, disk) where sha_exp is not null')
-    c.execute('create index files_name on files(name_lc, size, disk)')
-    c.execute('create index issues_disk on issues(disk)')
-    c.execute('insert into meta values (?,?)', ('scans', scans_signature(jobs)))
-    c.commit()
-    c.close()
-    replace_file(tmp, SNAP)
-    if not quiet:
-        out(f'Снимок описей собран за {time.time() - t0:.0f} с: {len(jobs)} носителей, {n_all} файлов, '
-            f'из них с хешем {n_hash}, с устаревшим хешем {n_stale}.')
+                for p, op, msg in inv.execute('select path, operation, message from errors'):
+                    c.execute('insert into issues values (?,?,?,?)',
+                              (d, rel_of(p or '')[1].rstrip(SEP), 'папка или файл не прочитаны при описи', f'{op}: {msg}'[:300]))
+        except sqlite3.Error:
+            pass
+    scanned = os.path.getmtime(ip) if have_inv else j.get('mtime', 0)
+    c.execute('insert or replace into disks values (?,?,?,?,?,?)',
+              (d, j['label'], cnt[EV_SCAN], total, j.get('status') or '?', scanned))
+    return total, cnt[EV_SCAN], cnt[EV_STALE]
 
 
-def scan_row(disk, p, size, mt, got, origin):
+def scan_row(disk, p, size, mt, got, origin, keep_empty=False):
     """Строка таблицы files по записи описи и хешу сканера (та же логика, что в снимке описей)."""
     mt_s = '' if mt is None else str(mt)
     try:
         mt_i = int(mt) // 1000000000 if mt else None
     except (TypeError, ValueError):
         mt_i = None
-    if not got or not size:                       # пустому файлу хеш не нужен: терять нечего
+    if not got or (not size and not keep_empty):  # пустому файлу хеш не нужен: терять нечего
         return disk, p, size or 0, None, origin, name_key(p), mt_i, EV_NONE, None
     if got[0] == size and (not got[1] or not mt_s or got[1] == mt_s):
         return disk, p, size or 0, got[2], origin, name_key(p), mt_i, EV_SCAN, None
@@ -643,6 +578,7 @@ def apply_partial(c, pj, seen, excl, report):
         c.execute(f'delete from files where disk=? and {cond}', [disk] + args)
         c.execute(f'delete from issues where disk=? and {cond}', [disk] + args)
         seen.add(disk, f, pj['time'])
+        c.execute('insert or replace into scan_folders values (?,?,?)', (disk, f, pj['time']))
     rows, outside = [], 0
     for p, size, mt in scan:
         f = inside(p, folders)
@@ -717,6 +653,7 @@ def apply_exclusions(c, excl, report):
 def excluded_unique(c, report):
     """Фото и видео из исключённых папок, которых нет больше ни на одном носителе в базе (по SHA-256): их нельзя
     потерять при ручном переносе. Список - в «ответы», в отчёт сборки - одна строка на носитель."""
+    report['unique'] = {}
     by_disk = collections.defaultdict(list)
     q = '''select e.disk, e.path, e.size, e.sha,
                   exists(select 1 from files g where g.name_lc=e.name_lc and g.size=e.size)
@@ -733,22 +670,341 @@ def excluded_unique(c, report):
                     sorted(rr))
         small = sum(1 for r in rr if r[2] == bp.T_SMALL)
         nohash = sum(1 for r in rr if os.path.splitext(r[0])[1].lower() in NOHASH_VIDEO)
-        report['warn'].add(f'в исключённых папках {disk} {len(rr)} фото и видео ({gb(sum(r[1] for r in rr))} ГБ) нет больше '
+        report['unique'][disk] = (f'в исключённых папках {disk} {len(rr)} фото и видео ({gb(sum(r[1] for r in rr))} ГБ) нет больше '
                            f'ни на одном носителе в базе (из них мелких картинок {small}; видео .m2t/.dv, которым на других '
                            f'дисках хеш не считали, {nohash}) - не потерять при ручном переносе: {path}')
 
 
-def snapshot_fresh(jobs):
-    if not SNAP.exists():
-        return False
-    c = sqlite3.connect(SNAP)
+# ---------- сборщик: модули -> одна рабочая база ----------
+# Модуль - неизменяемый первоисточник: полная опись носителя, частичный скан папок, журнал скрипта, строка таблицы
+# ручных операций, строка таблицы исключений. Таблица applied помнит, какие модули учтены. При каждой команде
+# применяются только новые модули (и дописанные строки журналов). Изменился уже учтённый модуль - база
+# собирается заново целиком. Команда rebuild собирает базу с нуля и сверяет её с собранной по шагам.
+
+BUILD_VERSION = 4          # правила сборки и устройство базы; изменились - база пересобирается целиком
+STATE_KINDS = ('журнал', 'ручная операция', 'частичный скан')     # события, упорядоченные по времени
+KIND_ORDER = {'опись': 0, 'исключение': 1, 'журнал': 2, 'частичный скан': 3, 'ручная операция': 4}
+
+SCHEMA = [
+    'create table if not exists files(disk text not null, path text not null, size integer, sha text, origin text, '
+    'name_lc text, mtime integer, ev text, sha_exp text, primary key(disk, path)) without rowid',
+    'create table if not exists meta(key text primary key, value text)',
+    'create table if not exists disks(disk text primary key, label text, hashed integer, total integer, status text, scanned real)',
+    'create table if not exists issues(disk text, path text, kind text, note text)',
+    'create table if not exists applied(module text primary key, kind text, time real, size integer, mtime_ns integer, '
+    'checksum text, rows integer, applied_at text, changed integer)',
+    'create table if not exists scan_folders(disk text not null, folder text not null, time real, primary key(disk, folder))',
+    EXCLUDED_DDL,
+]
+INDEXES = [
+    'create index if not exists files_sha on files(sha, disk) where sha is not null',
+    'create index if not exists files_exp on files(sha_exp, disk) where sha_exp is not null',
+    'create index if not exists files_name on files(name_lc, size, disk)',
+    'create index if not exists issues_disk on issues(disk)',
+]
+DIGEST_TABLES = {          # что сравнивается при самопроверке rebuild (служебные applied и meta - нет)
+    'files': 'disk, path, size, sha, origin, name_lc, mtime, ev, sha_exp',
+    'disks': 'disk, label, hashed, total, status, scanned',
+    'issues': 'disk, path, kind, note',
+    'excluded': 'disk, path, size, sha, name_lc, origin',
+    'scan_folders': 'disk, folder, time',
+}
+
+
+def sha1(b):
+    return hashlib.sha1(b).hexdigest()
+
+
+def stat_sig(p):
+    st = Path(p).stat()
+    return st.st_size, st.st_mtime_ns
+
+
+def complete_lines(data):
+    """Только целые строки: журнал, который скрипт ещё пишет, учитывается до последнего перевода строки."""
+    return data[:data.rfind(b'\n') + 1]
+
+
+def tsv_rows(data):
+    text = data.decode('utf-8-sig', errors='replace')
+    return [r for r in csv.reader(io.StringIO(text, newline=''), delimiter='\t', quoting=csv.QUOTE_NONE)
+            if r and any(x.strip() for x in r)]
+
+
+def discover(jobs):
+    """Все модули - первоисточники базы: ключ -> dict(kind, time, size, mtime_ns, checksum, data)."""
+    mods = {}
+    for d, j in jobs.items():
+        sig = [str(j['dir'])]
+        for fn in ('result.json', 'inventory.sqlite', 'hashes.sqlite'):
+            p = j['dir'] / fn
+            if p.exists():
+                sig.append([fn, *stat_sig(p)])
+        ip = j['dir'] / 'inventory.sqlite'
+        size, mt = stat_sig(ip) if ip.exists() else (0, 0)
+        mods[f'опись: {d}'] = dict(kind='опись', time=os.path.getmtime(ip) if ip.exists() else j.get('mtime', 0),
+                                   size=size, mtime_ns=mt, checksum=sha1(json.dumps(sig, ensure_ascii=False).encode()),
+                                   data=(d, j))
+    for pj in find_partials():
+        sig = [str(pj['dir'])] + [[fn, *stat_sig(pj['dir'] / fn)] for fn in ('result.json', 'inventory.sqlite', 'hashes.sqlite')
+                                  if (pj['dir'] / fn).exists()]
+        mods[f'частичный скан: {pj["dir"].parent.name}\\{pj["name"]}'] = dict(
+            kind='частичный скан', time=pj['time'], size=0, mtime_ns=0,
+            checksum=sha1(json.dumps(sig, ensure_ascii=False).encode()), data=pj)
+    for p in glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv')):
+        size, mt = stat_sig(p)
+        mods[f'журнал: {Path(p).parent.name}\\{Path(p).name}'] = dict(kind='журнал', time=log_time(p), size=size,
+                                                                      mtime_ns=mt, checksum=None, data=p)
+    for n, f in manual_rows():
+        mods[f'ручная операция: строка {n:05d}'] = dict(kind='ручная операция', time=manual_time(f[0]), size=0, mtime_ns=0,
+                                                       checksum=sha1('\t'.join(f).strip().encode()), data=(n, f))
+    for n, f in enumerate(read_tsv(EXCLUSIONS), 1):
+        f = [x.strip() for x in f] + ['', '']
+        if f[0] and f[0].lower() != 'диск' and f[1].strip(SEP):
+            mods[f'исключение: строка {n:05d}'] = dict(kind='исключение', time=0, size=0, mtime_ns=0,
+                                                       checksum=sha1('\t'.join(f).strip().encode()), data=(f[0], f[1].strip(SEP)))
+    return mods
+
+
+def read_log(m, done=None):
+    """Журнал: целые строки, их размер в байтах, контрольная сумма. done=(размер, сумма) уже учтённой части:
+    если журнал только дописан - возвращает и число уже учтённых строк, иначе None (журнал изменён)."""
+    data = complete_lines(Path(m['data']).read_bytes())
+    m.update(size=len(data), checksum=sha1(data))
+    rows = tsv_rows(data)
+    m['rows'] = rows
+    if done is None:
+        return 0
+    size, checksum, n = done
+    if len(data) < size or sha1(data[:size]) != checksum:
+        return None
+    return n
+
+
+def plan(c, mods):
+    """Что применить: (список новых модулей, None) или (None, причина полной пересборки)."""
+    applied = {r[0]: r for r in c.execute('select module, kind, time, size, mtime_ns, checksum, rows from applied')}
+    gone = [k for k in applied if k not in mods]
+    if gone:
+        return None, f'пропал уже учтённый модуль «{gone[0]}»'
+    last = c.execute(f"select max(time) from applied where kind in ({','.join('?' * len(STATE_KINDS))})",
+                     STATE_KINDS).fetchone()[0] or 0
+    todo = []
+    for key, m in mods.items():
+        a = applied.get(key)
+        k = m['kind']
+        if k == 'журнал':
+            if a and (a[3], a[4]) == (m['size'], m['mtime_ns']):
+                continue
+            start = read_log(m, (a[3], a[5], a[6]) if a else None)
+            if start is None:
+                return None, f'изменился уже учтённый журнал «{key}» (не дописан, а исправлен)'
+            m['start'] = start
+            todo.append((key, m))
+        elif a:
+            if a[5] != m['checksum']:
+                if k == 'опись' and m['time'] >= last:
+                    todo.append((key, m))                # новая опись носителя: заменить только его строки
+                    continue
+                return None, f'изменился уже учтённый модуль «{key}»'
+        elif k in ('опись', 'частичный скан') and m['time'] < last:
+            return None, f'новый модуль «{key}» старше уже учтённых поправок'
+        else:
+            todo.append((key, m))
+    return sorted(todo, key=lambda km: (km[1]['time'], KIND_ORDER[km[1]['kind']], km[0])), None
+
+
+def load_report(c):
+    row = c.execute("select value from meta where key='report'").fetchone()
+    rep = json.loads(row[0]) if row else {}
+    for k, v in (('logs', {}), ('old_logs', {}), ('skipped', []), ('manual', []), ('old', []), ('warn', []),
+                 ('partial', []), ('excluded', []), ('unique', {})):
+        rep.setdefault(k, v)
+    rep['warn'] = set(rep['warn'])
+    return rep
+
+
+def save_report(c, rep):
+    rep = dict(rep, warn=sorted(rep['warn']))
+    c.execute('insert or replace into meta values (?,?)', ('report', json.dumps(rep, ensure_ascii=False)))
+    c.execute('insert or replace into meta values (?,?)', ('built', time.strftime('%d.%m.%Y %H:%M')))
+
+
+def load_seen(c):
+    seen = Seen(c.execute('select disk, scanned from disks'))
+    for d, f, t in c.execute('select disk, folder, time from scan_folders'):
+        seen.add(d, f, t)
+    return seen
+
+
+def replace_disk(c, d, j, seen):
+    """Новая полная опись носителя: строки только этого носителя удаляются и вставляются заново."""
+    for t in ('files', 'issues', 'disks', 'scan_folders', 'excluded'):
+        c.execute(f'delete from {t} where disk=?', (d,))
+    load_disk(c, d, j)
+    seen.full[d] = c.execute('select scanned from disks where disk=?', (d,)).fetchone()[0]
+    seen.parts.pop(d, None)
+
+
+def apply_modules(c, todo, jobs, rep, seen, incremental):
+    """Применить модули по порядку и записать их в applied. Исключения действуют всегда: после каждого модуля
+    строки в исключённых папках убираются, откуда бы они ни пришли."""
+    serials = serial_map(jobs)
+    excl = read_exclusions()
+    stamp = time.strftime('%d.%m.%Y %H:%M')
+    for key, m in todo:
+        before = c.total_changes
+        k = m['kind']
+        if k == 'опись':
+            if incremental:
+                replace_disk(c, *m['data'], seen)
+            else:
+                load_disk(c, *m['data'])
+                seen.full[m['data'][0]] = c.execute('select scanned from disks where disk=?', (m['data'][0],)).fetchone()[0]
+        elif k == 'частичный скан':
+            apply_partial(c, m['data'], seen, excl, rep)
+        elif k == 'журнал':
+            if 'rows' not in m:
+                read_log(m)
+                m['start'] = 0
+            apply_log(c, m['data'], jobs, serials, rep, seen, rows=m['rows'], start=m['start'])
+        elif k == 'ручная операция':
+            apply_manual_row(c, m['data'][0], m['data'][1], rep, seen)
+        if k != 'опись' or incremental:
+            apply_exclusions(c, excl, rep)
+        changed = c.total_changes - before
+        c.execute('insert or replace into applied values (?,?,?,?,?,?,?,?,?)',
+                  (key, k, m['time'], m['size'], m['mtime_ns'], m['checksum'],
+                   max(0, len(m['rows']) - 1) if k == 'журнал' else 0, stamp, changed))
+
+
+def rebuild(jobs=None, quiet=False, check=False):
+    """Полная пересборка из всех модулей во временный файл; затем он заменяет рабочую базу.
+    check=True - самопроверка: сравнить с базой, собранной по шагам."""
+    jobs = jobs or bp.find_jobs()
+    ensure_tables()
+    t0 = time.time()
+    tmp = DB.with_name(f'хеши.{os.getpid()}.tmp')
+    if tmp.exists():
+        tmp.unlink()
+    c = sqlite3.connect(tmp)
+    c.executescript('pragma journal_mode=off; pragma synchronous=off; pragma cache_size=-400000;')
+    for q in SCHEMA:
+        c.execute(q)
+    mods = discover(jobs)
+    rep = load_report(c)
+    seen = Seen({})
+    todo = sorted(mods.items(), key=lambda km: (KIND_ORDER[km[1]['kind']] if km[1]['kind'] == 'опись' else 1,
+                                                km[1]['time'], KIND_ORDER[km[1]['kind']], km[0]))
+    disks_first = [km for km in todo if km[1]['kind'] == 'опись']
+    apply_modules(c, disks_first, jobs, rep, seen, incremental=False)
+    c.commit()
+    t_disks = time.time() - t0
+    apply_exclusions(c, read_exclusions(), rep)
+    rest = sorted((km for km in todo if km[1]['kind'] != 'опись'),
+                  key=lambda km: (km[1]['time'], KIND_ORDER[km[1]['kind']], km[0]))
+    apply_modules(c, rest, jobs, rep, seen, incremental=False)
+    for q in INDEXES:
+        c.execute(q)
+    finish(c, rep)
+    c.execute('insert or replace into meta values (?,?)', ('version', str(BUILD_VERSION)))
+    c.commit()
+    result = None
+    if check:
+        result = compare_with_current(c)
+    c.close()
+    replace_file(tmp, DB)          # прежняя рабочая база остаётся на месте до этой строки
+    if not quiet:
+        out(f'База собрана целиком за {time.time() - t0:.0f} с (описи носителей {t_disks:.0f} с): '
+            f'{len(jobs)} носителей, модулей {len(mods)}.')
+    return result
+
+
+def finish(c, rep):
+    """Общий хвост сборки: список единственных экземпляров в исключённых папках."""
+    excluded_unique(c, rep)
+    save_report(c, rep)
+
+
+def digest(c, prefix=''):
+    """Контрольные суммы отсортированного содержимого таблиц: таблица -> (строк, сумма)."""
+    res = {}
+    for t, cols in DIGEST_TABLES.items():
+        h, n = hashlib.sha256(), 0
+        for r in c.execute(f'select {cols} from {prefix}{t} order by {cols}'):
+            h.update(repr(r).encode('utf-8', 'surrogatepass'))
+            n += 1
+        res[t] = (n, h.hexdigest())
+    return res
+
+
+def compare_with_current(c):
+    """Самопроверка: та же ли база получилась с нуля, что и собранная по шагам. (совпало, строки отчёта)."""
+    if not DB.exists():
+        return None, ['прежней базы нет - сравнивать не с чем']
+    c.execute('attach ? as cur', (str(DB),))
     try:
-        row = c.execute("select value from meta where key='scans'").fetchone()
+        ver = c.execute("select value from cur.meta where key='version'").fetchone()
     except sqlite3.Error:
-        row = None
+        ver = None
+    if not ver or ver[0] != str(BUILD_VERSION):
+        c.execute('detach cur')
+        return None, ['прежняя база собрана по другим правилам - сравнивать не с чем']
+    new, old = digest(c), digest(c, 'cur.')
+    c.execute('detach cur')
+    lines = [f'{t}: {"совпала" if new[t] == old[t] else "НЕ СОВПАЛА"} (строк {new[t][0]}'
+             + (f', по шагам было {old[t][0]})' if new[t] != old[t] else ')') for t in DIGEST_TABLES]
+    return all(new[t] == old[t] for t in DIGEST_TABLES), lines
+
+
+def db_version():
+    if not DB.exists():
+        return None
+    c = sqlite3.connect(f'file:{DB.as_posix()}?mode=ro', uri=True)
+    try:
+        row = c.execute("select value from meta where key='version'").fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
     finally:
         c.close()
-    return bool(row) and row[0] == scans_signature(jobs)
+
+
+def update(jobs=None, quiet=False):
+    """Применить к рабочей базе только новые модули. Нужна полная пересборка - сообщить и собрать целиком."""
+    jobs = jobs or bp.find_jobs()
+    ensure_tables()
+    with BuildLock():
+        if db_version() != str(BUILD_VERSION):
+            out('(рабочей базы ещё нет или изменились правила сборки - собираю её целиком из модулей, это несколько минут)')
+            rebuild(jobs, quiet=quiet)
+            return 'rebuild'
+        t0 = time.time()
+        c = sqlite3.connect(DB)
+        try:
+            mods = discover(jobs)
+            todo, why = plan(c, mods)
+            if why:
+                c.close()
+                out(f'({why} - пересобираю рабочую базу целиком, это несколько минут)')
+                rebuild(jobs, quiet=quiet)
+                return 'rebuild'
+            if not todo:
+                return None
+            kinds = collections.Counter(m['kind'] for _, m in todo)
+            out('(есть новые модули: ' + ', '.join(f'{k} - {n}' for k, n in kinds.items())
+                + ' - пересобираю рабочую базу частично: применяю только их)')
+            c.execute('pragma cache_size=-200000')
+            rep = load_report(c)
+            seen = load_seen(c)
+            apply_modules(c, todo, jobs, rep, seen, incremental=True)
+            finish(c, rep)
+            c.commit()
+        finally:
+            c.close()
+    if not quiet:
+        out(f'Новые модули применены за {time.time() - t0:.1f} с.')
+    return 'update'
 
 
 class BuildLock:
@@ -784,45 +1040,19 @@ class BuildLock:
 
 
 def build(jobs=None, quiet=False):
-    """Рабочая база = копия снимка описей + поправки (журналы, ручные операции). Секунды."""
-    jobs = jobs or bp.find_jobs()
-    ensure_tables()
-    with BuildLock():
-        if not snapshot_fresh(jobs):
-            out('(описи изменились или снимка ещё нет - собираю снимок всех описей, это несколько минут и только один раз)')
-            build_snapshot(jobs, quiet)
-        t0 = time.time()
-        tmp = DB.with_name(f'хеши.{os.getpid()}.tmp')
-        if tmp.exists():
-            tmp.unlink()
-        shutil.copyfile(SNAP, tmp)
-        c = sqlite3.connect(tmp)
-        c.executescript('pragma journal_mode=off; pragma synchronous=off; pragma cache_size=-200000;')
-        seen = Seen(c.execute('select disk, scanned from disks'))
-        report = dict(logs=[], skipped=[], manual=[], old=[], warn=set(), partial=[], excluded=[])
-        serials = serial_map(jobs)
-        excl = read_exclusions()
-        c.execute(EXCLUDED_DDL)
-        for ev in event_stream():           # журналы, частичные сканы, ручные операции - строго по времени
-            apply_event(c, ev, jobs, serials, report, seen, excl)
-        apply_exclusions(c, excl, report)
-        excluded_unique(c, report)
-        report['warn'] = sorted(report['warn'])
-        c.execute('insert into meta values (?,?)', ('signature', sources_signature(jobs)))
-        c.execute('insert into meta values (?,?)', ('report', json.dumps(report, ensure_ascii=False)))
-        c.execute('insert into meta values (?,?)', ('built', time.strftime('%d.%m.%Y %H:%M')))
-        c.commit()
+    """Привести рабочую базу в порядок (только новые модули) и вернуть отчёт сборки."""
+    update(jobs, quiet)
+    c = sqlite3.connect(f'file:{DB.as_posix()}?mode=ro', uri=True)
+    try:
+        return load_report(c)
+    finally:
         c.close()
-        replace_file(tmp, DB)          # прежняя рабочая база остаётся на месте до этой строки
-    if not quiet:
-        out(f'Поправки наложены за {time.time() - t0:.0f} с.')
-    return report
 
 
 _last = None      # последнее открытое соединение: закрывается перед пересборкой, иначе Windows не даст заменить файл
 
 
-def connect():
+def close_last():
     global _last
     if _last is not None:
         try:
@@ -830,21 +1060,13 @@ def connect():
         except sqlite3.Error:
             pass
         _last = None
+
+
+def connect():
+    global _last
+    close_last()
     jobs = bp.find_jobs()
-    ensure_tables()
-    fresh = False
-    if DB.exists():
-        c = sqlite3.connect(DB)
-        try:
-            row = c.execute("select value from meta where key='signature'").fetchone()
-        except sqlite3.Error:
-            row = None
-        finally:
-            c.close()          # иначе Windows не даст заменить файл базы
-        fresh = bool(row) and row[0] == sources_signature(jobs)
-    if not fresh:
-        out('(есть новые журналы или поправки - пересобираю рабочую базу)')
-        build(jobs, quiet=True)
+    update(jobs, quiet=True)
     _last = sqlite3.connect(f'file:{DB.as_posix()}?mode=ro', uri=True)
     return _last, jobs
 
@@ -1408,42 +1630,86 @@ def cmd_mklist(a):
     out('Запуск - пользователем: двойной щелчок по «Запустить.cmd». Свою папку на цели можно задать третьей колонкой в тома.tsv.')
 
 
+def report_lines(c, rep):
+    """Полный отчёт сборки - для файла подробностей."""
+    L = []
+    L.append('Учтённые журналы скриптов (добавлено, перемещено, убрано, из добавленных без подтверждения содержимого):')
+    L += [f'  {k}: {v[0]}, {v[1]}, {v[2]}, {v[3]}' for k, v in sorted(rep['logs'].items())]
+    if rep['skipped']:
+        L.append('Журналы, которые программа не умеет читать (не учтены):')
+        L += ['  ' + x for x in rep['skipped']]
+    if rep['old_logs'] or rep['old']:
+        L.append('Не применено, потому что опись диска (или частичный скан папки) новее операции:')
+        L += [f'  {k}: {n} строк' for k, n in sorted(rep['old_logs'].items())] + ['  ' + x for x in rep['old']]
+    if rep['partial']:
+        L.append('Частичные сканы папок:')
+        L += ['  ' + x for x in rep['partial']]
+    L += [f'Исключения ({EXCLUSIONS.name}): {x}' for x in rep['excluded']]
+    L.append(f'Ручные операции ({MANUAL.name}): {len(rep["manual"])}')
+    L += ['  ' + x for x in rep['manual']]
+    L += ['ВНИМАНИЕ: ' + x for x in sorted(rep['warn'])]
+    L += ['ВНИМАНИЕ: ' + x for _, x in sorted(rep['unique'].items())]
+    L.append('Модули (вид, ключ, время, когда применён, строк изменено):')
+    L += [f'  {k}\t{m}\t{time.strftime("%d.%m.%Y %H:%M", time.localtime(t)) if t else "-"}\t{at}\t{n}'
+          for m, k, t, at, n in c.execute('select module, kind, time, applied_at, changed from applied order by kind, time, module')]
+    return L
+
+
 def cmd_stats(a):
     c, jobs = connect()
     n, h = c.execute('select count(*), count(sha) from files').fetchone()
-    out(f'База: {DB}')
-    out(f'Собрана {c.execute("select value from meta where key=?", ("built",)).fetchone()[0]}; файлов {n}, '
-        f'из них с подтверждённым SHA-256 {h}, без него {n - h}; носителей {len(jobs)}')
-    out('Чем подтверждены записи на главных дисках:')
+    rep = load_report(c)
+    out(f'База собрана {c.execute("select value from meta where key=?", ("built",)).fetchone()[0]}: файлов {n}, '
+        f'с подтверждённым SHA-256 {h}; носителей {len(jobs)}')
     for disk in MAIN:
-        for ev, k, b in c.execute('select ev, count(*), sum(size) from files where disk=? group by ev order by 2 desc', (disk,)):
-            out(f'  {disk}: {EV_NAME.get(ev, ev)}: {k} файлов, {gb(b)} ГБ')
+        parts = [f'{ev} {k} ({gb(b)} ГБ)' for ev, k, b in
+                 c.execute('select ev, count(*), sum(size) from files where disk=? group by ev order by 2 desc', (disk,))]
+        out(f'  {disk}: ' + ', '.join(parts))
+    out(f'  степени: S - хеш измерен сканером, C - скопировано скриптом с хешем; Z, U, X - НЕ подтверждено; N - без хеша')
+    kinds = collections.Counter(r[0] for r in c.execute('select kind from applied'))
+    out('Учтено модулей: ' + ', '.join(f'{k} - {v}' for k, v in sorted(kinds.items())))
     bad = c.execute("select count(*) from disks where status not like 'complete'").fetchone()[0]
-    out(f'Описей с замечаниями (не «complete»): {bad} из {len(jobs)}; непрочитанных мест всего: '
-        f'{c.execute("select count(*) from issues").fetchone()[0]}')
-    rep = json.loads(c.execute("select value from meta where key='report'").fetchone()[0])
-    out('Учтённые журналы скриптов:')
-    for x in rep['logs']:
-        out('  ' + x)
-    out('Журналы, которые программа не умеет читать (не учтены):' if rep['skipped'] else 'Все найденные журналы учтены.')
-    for x in rep['skipped']:
-        out('  ' + x)
-    if rep.get('old'):
-        out('Не применено, потому что опись диска новее операции:')
-        for x in rep['old']:
-            out('  ' + x)
-    if rep.get('partial'):
-        out('Частичные сканы папок:')
-        for x in rep['partial']:
-            out('  ' + x)
-    for x in rep.get('excluded', []):
-        out(f'Исключения ({EXCLUSIONS.name}): {x}')
-    out(f'Ручные операции ({MANUAL.name}): {len(rep["manual"])}')
-    for x in rep['manual']:
-        out('  ' + x)
-    for x in rep['warn']:
+    out(f'Описей с замечаниями (не «complete»): {bad}; непрочитанных мест: {c.execute("select count(*) from issues").fetchone()[0]}')
+    out('Все найденные журналы учтены.' if not rep['skipped'] else
+        f'НЕ УЧТЕНЫ журналы, которые программа не умеет читать: {len(rep["skipped"])}')
+    if rep['old_logs'] or rep['old']:
+        out(f'Не применено, потому что опись новее операции: строк журналов {sum(rep["old_logs"].values())}, '
+            f'других операций {len(rep["old"])} (подробно - в файле ниже)')
+    if rep['partial']:
+        tot = collections.Counter()
+        for folders in rep.get('partial_stats', {}).values():
+            for k in folders.values():
+                tot.update(k)
+        conf = sum(v for k, v in tot.items() if k.startswith('было ') and k != 'было S')
+        out(f'Частичные сканы папок: {len(rep["partial"])} папок, файлов {tot["файлов"]}; стало S {conf}, новые {tot["новые"]}, '
+            f'исчезли {tot["исчезли"]}, хеш не совпал {tot["хеш не совпал"]}, пропущено по исключениям {tot["исключено"]}')
+    out(f'Исключённых папок: {sum(len(v) for v in read_exclusions().values())}; ручных операций: {len(rep["manual"])}; '
+        f'решений: {len(read_tsv(DECISIONS)) - 1}')
+    warn = sorted(rep['warn'])
+    for x in warn[:3]:
         out('ВНИМАНИЕ: ' + x)
-    out(f'Решения ({DECISIONS.name}): {len(read_tsv(DECISIONS)) - 1}')
+    if len(warn) > 3:
+        out(f'... и ещё предупреждений: {len(warn) - 3}')
+    for _, x in sorted(rep['unique'].items()):
+        out('ВНИМАНИЕ: ' + x)
+    path = ANSWERS / 'сборка - подробно.txt'
+    path.write_text('\n'.join(report_lines(c, rep)) + '\n', encoding='utf-8-sig')
+    out(f'Подробно (журналы, сканы, модули): {path}')
+
+
+def cmd_rebuild(a):
+    """Полная пересборка с нуля и сверка с базой, собранной по шагам."""
+    close_last()
+    t0 = time.time()
+    with BuildLock():
+        ok, lines = rebuild(check=True)
+    out(f'Пересборка с нуля: {time.time() - t0:.0f} с. Сверка с базой, собранной по шагам:')
+    for x in lines:
+        out('  ' + x)
+    if ok is True:
+        out('ИТОГ: совпала - сборка по шагам работает правильно.')
+    elif ok is False:
+        out('ИТОГ: НЕ СОВПАЛА - сборка по шагам дала другую базу; теперь действует собранная с нуля. Сообщите разработчику.')
 
 
 def cmd_recovery_plan(a):
@@ -1492,7 +1758,9 @@ def main():
     p.add_argument('--dry', action='store_true', help='только посчитать, папку задачи не создавать')
     p.add_argument('--section', help='собрать только файлы с этим решением, например "раздел: Оцифрованные источники"')
     p.add_argument('--all', action='store_true', help='не учитывать разделы и отсрочки (решение «не нужно» учитывается всегда)')
-    sub.add_parser('build'); sub.add_parser('stats')
+    sub.add_parser('build', help='применить новые модули (журналы, сканы, ручные операции) и показать сводку')
+    sub.add_parser('stats', help='что в базе и какие модули учтены')
+    sub.add_parser('rebuild', help='самопроверка: собрать базу с нуля и сверить с собранной по шагам (минуты)')
     p = sub.add_parser('family-plan', help='план семейного копирования и проверки HDD51')
     p.add_argument('disk')
     p.add_argument('--output', type=Path, required=True)
@@ -1513,7 +1781,7 @@ def main():
         cmd_stats(a)
     else:
         {'missing': cmd_missing, 'only': lambda x: cmd_missing(x, True), 'cmp': cmd_cmp, 'where': cmd_where,
-         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'recovery-plan': cmd_recovery_plan,
+         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'rebuild': cmd_rebuild, 'recovery-plan': cmd_recovery_plan,
          'recovery-staging': cmd_recovery_staging, 'family-plan': cmd_family_plan, 'family-check': cmd_family_check}[a.cmd](a)
     out(f'[{time.time() - t0:.1f} с]')
 

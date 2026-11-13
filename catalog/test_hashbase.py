@@ -416,8 +416,8 @@ class PartialGuardTest(Base):
 T2099_06 = time.mktime((2099, 6, 1, 0, 0, 0, 0, 0, -1))
 
 
-class PartialScanTest(Base):
-    """Шаг 2 ТЗ v3: частичный скан папок и исключения."""
+class PartialSetup(Base):
+    """Общие данные для шагов 2 и 3: журналы до и после частичного скана HDD77, исключённая папка."""
 
     def setUp(self):
         super().setUp()
@@ -443,6 +443,11 @@ class PartialScanTest(Base):
 
     def paths(self, disk='HDD77'):
         return {r[0]: r[1] for r in self.db().execute('select path, ev from files where disk=?', (disk,))}
+
+
+
+class PartialScanTest(PartialSetup):
+    """Шаг 2 ТЗ v3: частичный скан папок и исключения."""
 
     def test_partial_scan_changes_only_its_folders(self):
         got = self.paths()
@@ -491,7 +496,78 @@ class PartialScanTest(Base):
         got = self.paths()
         self.assertNotIn('П\\HDD90\\new.jpg', got)
         self.quiet(hb.cmd_stats, NS())
-        self.assertIn('полная опись носителя новее', self.printed)
+        self.assertIn('опись новее', self.printed)
+        self.assertIn('полная опись носителя новее', (hb.ANSWERS / 'сборка - подробно.txt').read_text(encoding='utf-8-sig'))
+
+
+T2102 = time.mktime((2102, 1, 1, 0, 0, 0, 0, 0, -1))
+T2103 = time.mktime((2103, 1, 1, 0, 0, 0, 0, 0, -1))
+
+
+class IncrementalTest(PartialSetup):
+    """Шаг 3 ТЗ v3: сборщик применяет только новые модули; rebuild даёт ту же базу."""
+
+    def rebuild_matches(self):
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+        self.assertIn('ИТОГ: совпала', self.printed, self.printed)
+
+    def append_log(self, task, name, *rows):
+        with open(self.out / task / name, 'a', encoding='utf-8') as f:
+            for r in rows:
+                f.write('\t'.join(r) + '\n')
+
+    def test_steps_equal_full_rebuild(self):
+        self.db()                                                    # первая сборка - целиком
+        self.assertIn('целиком', self.printed)
+        # 1) новый журнал
+        self.task('Ещё', [('HDD90', 'AAAA0090'), ('HDD45', 'AAAA0045')], 'Журнал копирования 2100-02-01 00-00-00.tsv',
+                  LOG_HEAD, [('1', 'HDD45', 'скопирован, размер и SHA-256 совпали', '300', S[3], 'K:\\A\\sub\\3.mp4',
+                              'G:\\П\\HDD90\\A\\sub\\3.mp4')])
+        self.assertEqual(self.row('HDD45', 'П\\HDD90\\A\\sub\\3.mp4')[:2], (S[3], hb.EV_COPY))
+        self.assertIn('частично', self.printed)
+        self.assertNotIn('целиком', self.printed)
+        # 2) журнал дописан, последняя строка ещё не закончена - она не учитывается
+        self.append_log('Ещё', 'Журнал копирования 2100-02-01 00-00-00.tsv',
+                        ('2', 'HDD45', 'скопирован, размер и SHA-256 совпали', '400', S[4], 'K:\\B\\4.jpg', 'G:\\П\\HDD90\\B\\4.jpg'))
+        with open(self.out / 'Ещё' / 'Журнал копирования 2100-02-01 00-00-00.tsv', 'a', encoding='utf-8') as f:
+            f.write('3\tHDD45\tскопирован, размер и SHA-256 совпали\t500\t' + S[5])          # без конца строки
+        self.assertEqual(self.row('HDD45', 'П\\HDD90\\B\\4.jpg')[:2], (S[4], hb.EV_COPY))
+        self.assertNotIn('целиком', self.printed)
+        with open(self.out / 'Ещё' / 'Журнал копирования 2100-02-01 00-00-00.tsv', 'a', encoding='utf-8') as f:
+            f.write('\tK:\\B\\5.jpg\tG:\\П\\HDD90\\B\\5.jpg\n')                                   # строка дописана
+        self.assertEqual(self.row('HDD45', 'П\\HDD90\\B\\5.jpg')[:2], (S[5], hb.EV_COPY))
+        # 3) новая ручная операция и новое исключение
+        self.manual('01.01.2101\tперемещено\tHDD90\tB\tHDD90\tB2\tпосле скана')
+        self.assertIn('B2\\5.jpg', self.paths('HDD90'))
+        with open(hb.EXCLUSIONS, 'a', encoding='utf-8') as f:
+            f.write('HDD45\tП\\HDD90\\B\tпроба\n')
+        self.assertNotIn('П\\HDD90\\B\\4.jpg', self.paths('HDD45'))
+        # 4) новый частичный скан и новая полная опись носителя
+        job = make_partial(self.scans, 'HDD45', 'AAAA0045', ['X'], [('X\\1.jpg', 100, S[1]), ('X\\7.jpg', 700, S[7])], name='p45')
+        os.utime(job / 'inventory.sqlite', (T2102, T2102))
+        self.assertEqual(set(p for p in self.paths('HDD45') if p.startswith('X')), {'X\\1.jpg', 'X\\7.jpg'})
+        self.assertNotIn('целиком', self.printed)
+        with sqlite3.connect(self.job('HDD91') / 'inventory.sqlite') as c:
+            c.execute('insert into files values (?,?,?,?,?,?,?)', ('Z\\new.doc', 5, '0', '0', '', 32, 'other'))
+        c.close()
+        os.utime(self.job('HDD91') / 'inventory.sqlite', (T2103, T2103))
+        self.assertIn('Z\\new.doc', self.paths('HDD91'))
+        self.assertNotIn('целиком', self.printed)
+        kinds = {r[0] for r in self.db().execute('select kind from applied')}
+        self.assertEqual(kinds, {'опись', 'журнал', 'частичный скан', 'ручная операция', 'исключение'})
+        self.rebuild_matches()
+
+    def test_changed_module_forces_full_rebuild(self):
+        self.db()
+        p = self.out / 'После скана' / 'Журнал копирования 2100-01-01 00-00-00.tsv'
+        p.write_text(p.read_text(encoding='utf-8-sig').replace('скопирован, размер и SHA-256 совпали', 'ОШИБКА', 1),
+                     encoding='utf-8-sig')
+        got = self.paths()
+        self.assertIn('изменился уже учтённый журнал', self.printed)
+        self.assertIn('целиком', self.printed)
+        self.assertNotIn('П\\HDD90\\B\\5.jpg', got)                 # исправленная строка больше не действует
+        self.rebuild_matches()
 
 
 if __name__ == '__main__':
