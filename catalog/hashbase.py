@@ -1176,6 +1176,18 @@ def cmd_recovery_staging(a):
     audit.refine_unhashed()
 
 
+def cmd_family_plan(a):
+    import copy_workflow
+    copy_workflow.prepare(sys.modules[__name__], a)
+
+
+def cmd_family_check(a):
+    import copy_workflow
+    result = copy_workflow.verify(a.task, preflight=a.preflight)
+    if not result['ok']:
+        raise SystemExit(2)
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         try:
@@ -1199,6 +1211,14 @@ def main():
     p.add_argument('--section', help='собрать только файлы с этим решением, например "раздел: Оцифрованные источники"')
     p.add_argument('--all', action='store_true', help='не учитывать разделы и отсрочки (решение «не нужно» учитывается всегда)')
     sub.add_parser('build'); sub.add_parser('stats')
+    p = sub.add_parser('family-plan', help='план семейного копирования и проверки HDD51')
+    p.add_argument('disk')
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--snapshot', type=Path, help='сохранённое оглавление; повторного обхода не будет')
+    p.add_argument('--manual-evidence', type=Path, help='конкретные ручные копирования из журнала операций')
+    p = sub.add_parser('family-check', help='журнал и фактические пути/размеры двух копий; без хеширования целей')
+    p.add_argument('--task', type=Path, required=True)
+    p.add_argument('--preflight', action='store_true')
     p = sub.add_parser('recovery-plan', help='разбор оглавления восстановленной папки, без чтения содержимого')
     p.add_argument('disk'); p.add_argument('--root', type=Path, required=True)
     p.add_argument('--cached', action='store_true', help='обновить разметку сохранённого оглавления, без обращения к диску')
@@ -1212,7 +1232,7 @@ def main():
     else:
         {'missing': cmd_missing, 'only': lambda x: cmd_missing(x, True), 'cmp': cmd_cmp, 'where': cmd_where,
          'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'recovery-plan': cmd_recovery_plan,
-         'recovery-staging': cmd_recovery_staging}[a.cmd](a)
+         'recovery-staging': cmd_recovery_staging, 'family-plan': cmd_family_plan, 'family-check': cmd_family_check}[a.cmd](a)
     out(f'[{time.time() - t0:.1f} с]')
 
 
