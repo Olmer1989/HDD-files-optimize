@@ -570,5 +570,53 @@ class IncrementalTest(PartialSetup):
         self.rebuild_matches()
 
 
+LEGACY_PRESENCE = '''select f.path, exists(select 1 from files g where g.sha=f.sha and g.disk='HDD45'),
+       exists(select 1 from files g where g.sha=f.sha and g.disk='HDD77'),
+       (select count(distinct g.disk) from files g where g.sha=f.sha),
+       exists(select 1 from files g where g.sha_exp=f.sha and g.disk='HDD45'),
+       exists(select 1 from files g where g.sha_exp=f.sha and g.disk='HDD77')
+       from files f where f.disk=? and f.sha is not null'''
+
+
+class DerivedTablesTest(PartialSetup):
+    """Шаг 4 ТЗ v3: готовые таблицы presence и folders, команды на них."""
+
+    def check_presence(self):
+        c = self.db()
+        for disk in ('HDD90', 'HDD45', 'HDD77', 'HDD91'):
+            old = {p: (bool(a), bool(b), n, bool(w1) and not a, bool(w2) and not b)
+                   for p, a, b, n, w1, w2 in c.execute(LEGACY_PRESENCE, (disk,))}
+            new = {p: (bool(a), bool(b), n, bool(w1), bool(w2))
+                   for p, size, sha, a, b, n, w1, w2 in hb.presence(c, disk, '', weak=True)}
+            self.assertEqual(old, new, disk)
+
+    def folder(self, disk, folder):
+        return self.db().execute('select files, bytes, n0, n1, n2, n3, n4 from folders where disk=? and folder=?',
+                                 (disk, folder)).fetchone()
+
+    def test_presence_table_matches_direct_query(self):
+        self.check_presence()
+        self.manual('01.01.2101\tскопировано\tHDD90\tB\tHDD45\tКОПИЯ\tсо слов',
+                    '01.01.2101\tудалено\tHDD77\tY\t\t\tпроба')
+        self.check_presence()                                           # после сборки по шагам - тоже
+
+    def test_folder_sums_and_search(self):
+        self.assertEqual(self.folder('HDD90', ''), (6, 1510, 4, 1, 1, 0, 0))
+        self.assertEqual(self.folder('HDD90', 'A'), (4, 610, 2, 1, 1, 0, 0))     # вместе с подпапкой sub
+        self.assertEqual(self.folder('HDD90', 'A\\sub'), (1, 300, 0, 1, 0, 0, 0))
+        self.manual('01.01.2101\tперемещено\tHDD90\tB\tHDD90\tНовая B\tпроба')
+        self.assertIsNone(self.folder('HDD90', 'B'))
+        self.assertEqual(self.folder('HDD90', 'Новая B'), (2, 900, 2, 0, 0, 0, 0))
+        self.assertEqual(self.folder('HDD90', '')[:2], (6, 1510))
+        self.quiet(hb.cmd_find, NS(words=['нОвая'], disk=None))
+        self.assertIn('Новая B', self.printed)
+        self.assertIn('Папки со словами', self.printed)
+        self.quiet(hb.cmd_folders, NS(disk='HDD90', folder='A', depth=1))
+        self.assertIn('sub', self.printed)
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+        self.assertIn('ИТОГ: совпала', self.printed)
+
+
 if __name__ == '__main__':
     unittest.main()

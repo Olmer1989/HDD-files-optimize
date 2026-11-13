@@ -502,9 +502,8 @@ def load_disk(c, d, j):
                 yield r
         # хеш, для которого в описи нет файла, не переносится: по описи такого файла на диске нет
 
-    before = c.total_changes
     c.executemany('insert or replace into files values (?,?,?,?,?,?,?,?,?)', rows())
-    total = c.total_changes - before
+    total = sum(cnt.values())                       # не total_changes: при сборке по шагам его увеличивают триггеры
     if have_inv:
         try:
             with bp.ro(ip) as inv:
@@ -681,7 +680,7 @@ def excluded_unique(c, report):
 # применяются только новые модули (и дописанные строки журналов). Изменился уже учтённый модуль - база
 # собирается заново целиком. Команда rebuild собирает базу с нуля и сверяет её с собранной по шагам.
 
-BUILD_VERSION = 4          # правила сборки и устройство базы; изменились - база пересобирается целиком
+BUILD_VERSION = 5          # правила сборки и устройство базы; изменились - база пересобирается целиком
 STATE_KINDS = ('журнал', 'ручная операция', 'частичный скан')     # события, упорядоченные по времени
 KIND_ORDER = {'опись': 0, 'исключение': 1, 'журнал': 2, 'частичный скан': 3, 'ручная операция': 4}
 
@@ -709,6 +708,148 @@ DIGEST_TABLES = {          # что сравнивается при самопр
     'excluded': 'disk, path, size, sha, name_lc, origin',
     'scan_folders': 'disk, folder, time',
 }
+
+
+# ---------- готовые таблицы для быстрых ответов: presence (по хешу) и folders (по папкам) ----------
+# presence: есть ли хеш на 45 и на 77 и с какой степенью, на скольких носителях подтверждён.
+# folders: суммы по каждой папке каждого носителя (вместе с подпапками) с разбивкой по типам файлов.
+# При сборке по шагам обе таблицы правятся только для затронутых строк (их отмечают временные триггеры).
+
+EV_RANK = "(case ev when 'S' then '1S' when 'C' then '2C' when 'Z' then '3Z' when 'U' then '4U' when 'X' then '5X' else '6' || ev end)"
+FOLDER_TYPES = ('фото', 'видео', 'тексты', 'прочие', 'мусор')
+F_PHOTO, F_VIDEO, F_TEXT, F_OTHER, F_JUNK = range(5)
+DERIVED_SCHEMA = [
+    'create table if not exists presence(sha text primary key, e45 text, e77 text, ndisks integer, ncopies integer) without rowid',
+    'create table if not exists folders(disk text not null, folder text not null, depth integer, folder_lc text, '
+    'files integer, bytes integer, ' + ', '.join(f'n{i} integer, b{i} integer' for i in range(5)) +
+    ', primary key(disk, folder)) without rowid',
+]
+TRIGGERS = [
+    'create temp table if not exists touched(sha text primary key) without rowid',
+    'create temp table if not exists delta(disk text, path text, size integer, name_lc text, sign integer)',
+    '''create temp trigger if not exists t_files_ins after insert on files begin
+         insert or ignore into touched select new.sha where new.sha is not null;
+         insert or ignore into touched select new.sha_exp where new.sha_exp is not null;
+         insert into delta values (new.disk, new.path, new.size, new.name_lc, 1); end''',
+    '''create temp trigger if not exists t_files_del after delete on files begin
+         insert or ignore into touched select old.sha where old.sha is not null;
+         insert or ignore into touched select old.sha_exp where old.sha_exp is not null;
+         insert into delta values (old.disk, old.path, old.size, old.name_lc, -1); end''',
+    '''create temp trigger if not exists t_files_upd after update on files begin
+         insert or ignore into touched select old.sha where old.sha is not null;
+         insert or ignore into touched select old.sha_exp where old.sha_exp is not null;
+         insert or ignore into touched select new.sha where new.sha is not null;
+         insert or ignore into touched select new.sha_exp where new.sha_exp is not null;
+         insert into delta values (old.disk, old.path, old.size, old.name_lc, -1);
+         insert into delta values (new.disk, new.path, new.size, new.name_lc, 1); end''',
+]
+DIGEST_TABLES.update({
+    'presence': 'sha, e45, e77, ndisks, ncopies',
+    'folders': 'disk, folder, depth, folder_lc, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(5)),
+})
+
+
+def presence_sql(where_sha, where_exp):
+    return f'''insert into presence
+        select h, substr(min(case when disk='{MAIN[0]}' then r end), 2), substr(min(case when disk='{MAIN[1]}' then r end), 2),
+               count(distinct case when conf=1 then disk end), sum(conf)
+        from (select sha h, disk, {EV_RANK} r, 1 conf from files where sha is not null {where_sha}
+              union all
+              select sha_exp, disk, {EV_RANK}, 0 from files where sha_exp is not null {where_exp})
+        group by h'''
+
+
+def presence_full(c):
+    c.execute('delete from presence')
+    c.execute(presence_sql('', ''))
+
+
+def presence_touched(c):
+    c.execute('delete from presence where sha in (select sha from temp.touched)')
+    c.execute(presence_sql('and sha in (select sha from temp.touched)', 'and sha_exp in (select sha from temp.touched)'))
+    c.execute('delete from temp.touched')
+
+
+def folder_type(path, name_lc, size):
+    if not size:
+        return F_OTHER
+    if class_of(path, name_lc or '', size) == C_JUNK:
+        return F_JUNK
+    t = bp.EXT_TYPE.get(os.path.splitext(name_lc or '')[1])
+    if t:
+        return F_VIDEO if t == 'Видео' else F_PHOTO
+    return F_TEXT if EXT_CLASS.get(os.path.splitext(name_lc or '')[1]) == C_DOC else F_OTHER
+
+
+def parent_of(path):
+    i = path.rfind(SEP)
+    return path[:i] if i >= 0 else ''
+
+
+def roll_up(agg):
+    """Суммы по папкам (прямо в ней) -> суммы вместе со всеми подпапками, для всех папок-предков до корня ''."""
+    total = {f: list(v) for f, v in agg.items()}
+    for f in list(total):                                   # недостающие промежуточные папки
+        while f:
+            f = parent_of(f)
+            if f in total:
+                break
+            total[f] = [0] * 12
+    for f in sorted(total, key=lambda x: -(x.count(SEP) + 1 if x else 0)):
+        if f:
+            p, v = total[parent_of(f)], total[f]
+            for i in range(12):
+                p[i] += v[i]
+    return total
+
+
+def add_file(agg, path, size, name_lc, sign=1):
+    a = agg.get(parent_of(path))
+    if a is None:
+        a = agg[parent_of(path)] = [0] * 12
+    k = folder_type(path, name_lc, size)
+    size = (size or 0) * sign
+    a[0] += sign; a[1] += size; a[2 + 2 * k] += sign; a[3 + 2 * k] += size
+
+
+def folder_row(d, f, v):
+    return (d, f, f.count(SEP) + 1 if f else 0, f.lower(), *v)
+
+
+def folders_full(c, disks=None):
+    disks = disks or [r[0] for r in c.execute('select distinct disk from files')]
+    for d in disks:
+        c.execute('delete from folders where disk=?', (d,))
+        agg = {}
+        for path, size, nm in c.execute('select path, size, name_lc from files where disk=?', (d,)):
+            add_file(agg, path, size, nm)
+        c.executemany(f'insert into folders values ({",".join("?" * 16)})',
+                      (folder_row(d, f, v) for f, v in roll_up(agg).items()))
+
+
+def folders_delta(c):
+    """Изменения строк files (из триггеров) -> поправки сумм по папкам."""
+    by_disk = collections.defaultdict(dict)
+    for d, path, size, nm, sign in c.execute('select disk, path, size, name_lc, sign from temp.delta'):
+        add_file(by_disk[d], path, size, nm, sign)
+    c.execute('delete from temp.delta')
+    upd = ', '.join(f'{x}={x}+excluded.{x}' for x in ['files', 'bytes'] + [f'{p}{i}' for i in range(5) for p in 'nb'])
+    for d, agg in by_disk.items():
+        rows = [folder_row(d, f, v) for f, v in roll_up(agg).items() if any(v)]
+        c.executemany(f'insert into folders values ({",".join("?" * 16)}) on conflict(disk, folder) do update set {upd}', rows)
+    c.execute('delete from folders where files <= 0')
+
+
+def derived_start(c):
+    """Включить учёт затронутых строк перед сборкой по шагам."""
+    c.execute('pragma recursive_triggers = on')       # «insert or replace» удаляет старую строку - это тоже изменение
+    for q in DERIVED_SCHEMA + TRIGGERS:
+        c.execute(q)
+
+
+def derived_finish(c):
+    presence_touched(c)
+    folders_delta(c)
 
 
 def sha1(b):
@@ -838,10 +979,27 @@ def load_seen(c):
 
 
 def replace_disk(c, d, j, seen):
-    """Новая полная опись носителя: строки только этого носителя удаляются и вставляются заново."""
+    """Новая полная опись носителя: строки только этого носителя удаляются и вставляются заново.
+    Триггеры на сотни тысяч строк медленны, поэтому здесь они выключаются: суммы по папкам этого носителя
+    считаются заново целиком, а в presence пересчитываются только его хеши (старые и новые)."""
+    fast = bool(c.execute("select 1 from sqlite_temp_master where type='trigger' and name='t_files_ins'").fetchone())
+    mark = ('insert or ignore into temp.touched select sha from files where disk=? and sha is not null',
+            'insert or ignore into temp.touched select sha_exp from files where disk=? and sha_exp is not null')
+    if fast:
+        for name in ('t_files_ins', 't_files_del', 't_files_upd'):
+            c.execute(f'drop trigger if exists temp.{name}')
+        for q in mark:
+            c.execute(q, (d,))
+        c.execute('delete from temp.delta where disk=?', (d,))
     for t in ('files', 'issues', 'disks', 'scan_folders', 'excluded'):
         c.execute(f'delete from {t} where disk=?', (d,))
     load_disk(c, d, j)
+    if fast:
+        for q in mark:
+            c.execute(q, (d,))
+        folders_full(c, [d])
+        for q in TRIGGERS:
+            c.execute(q)
     seen.full[d] = c.execute('select scanned from disks where disk=?', (d,)).fetchone()[0]
     seen.parts.pop(d, None)
 
@@ -852,8 +1010,10 @@ def apply_modules(c, todo, jobs, rep, seen, incremental):
     serials = serial_map(jobs)
     excl = read_exclusions()
     stamp = time.strftime('%d.%m.%Y %H:%M')
+    count = ((lambda: c.execute('select count(*) from temp.delta').fetchone()[0]) if incremental   # без строк триггеров
+             else (lambda: c.total_changes))
     for key, m in todo:
-        before = c.total_changes
+        before = count()
         k = m['kind']
         if k == 'опись':
             if incremental:
@@ -872,7 +1032,7 @@ def apply_modules(c, todo, jobs, rep, seen, incremental):
             apply_manual_row(c, m['data'][0], m['data'][1], rep, seen)
         if k != 'опись' or incremental:
             apply_exclusions(c, excl, rep)
-        changed = c.total_changes - before
+        changed = max(0, count() - before)
         c.execute('insert or replace into applied values (?,?,?,?,?,?,?,?,?)',
                   (key, k, m['time'], m['size'], m['mtime_ns'], m['checksum'],
                    max(0, len(m['rows']) - 1) if k == 'журнал' else 0, stamp, changed))
@@ -904,8 +1064,12 @@ def rebuild(jobs=None, quiet=False, check=False):
     rest = sorted((km for km in todo if km[1]['kind'] != 'опись'),
                   key=lambda km: (km[1]['time'], KIND_ORDER[km[1]['kind']], km[0]))
     apply_modules(c, rest, jobs, rep, seen, incremental=False)
-    for q in INDEXES:
+    for q in INDEXES + DERIVED_SCHEMA:
         c.execute(q)
+    t1 = time.time()
+    presence_full(c)
+    folders_full(c)
+    t_derived = time.time() - t1
     finish(c, rep)
     c.execute('insert or replace into meta values (?,?)', ('version', str(BUILD_VERSION)))
     c.commit()
@@ -915,7 +1079,8 @@ def rebuild(jobs=None, quiet=False, check=False):
     c.close()
     replace_file(tmp, DB)          # прежняя рабочая база остаётся на месте до этой строки
     if not quiet:
-        out(f'База собрана целиком за {time.time() - t0:.0f} с (описи носителей {t_disks:.0f} с): '
+        out(f'База собрана целиком за {time.time() - t0:.0f} с (описи носителей {t_disks:.0f} с, '
+            f'таблицы presence и folders {t_derived:.0f} с): '
             f'{len(jobs)} носителей, модулей {len(mods)}.')
     return result
 
@@ -997,7 +1162,9 @@ def update(jobs=None, quiet=False):
             c.execute('pragma cache_size=-200000')
             rep = load_report(c)
             seen = load_seen(c)
+            derived_start(c)
             apply_modules(c, todo, jobs, rep, seen, incremental=True)
+            derived_finish(c)
             finish(c, rep)
             c.commit()
         finally:
@@ -1136,6 +1303,12 @@ def presence(c, disk, prefix, exclude=None, weak=False):
     exclude=(диск, папка) - не считать копиями то, что само собираются удалить.
     weak=True - добавить признаки «на диске лежит неподтверждённая копия» (только размер или со слов)."""
     cond, args = prefix_cond('f.path', prefix)
+    if not exclude:                       # обычный вопрос - по готовой таблице presence (быстро)
+        conf, weak_ev = "('S','C')", "('Z','U','X')"
+        extra = f', coalesce(p.e45 in {weak_ev}, 0), coalesce(p.e77 in {weak_ev}, 0)' if weak else ''
+        q = f"""select f.path, f.size, f.sha, coalesce(p.e45 in {conf}, 0), coalesce(p.e77 in {conf}, 0), p.ndisks{extra}
+                from files f join presence p on p.sha=f.sha where f.disk=? and f.sha is not null and {cond}"""
+        return c.execute(q, [disk] + args).fetchall()
     ex_sql, ex_args = '', []
     if exclude:
         ec, ea = prefix_cond('g.path', exclude[1])
@@ -1655,6 +1828,71 @@ def report_lines(c, rep):
     return L
 
 
+def type_cols(r, k=0):
+    """ГБ по типам из строки folders, начиная с колонки n0 (k - её номер)."""
+    return [gb(r[k + 1 + 2 * i]) for i in range(5)]
+
+
+def cmd_folders(a):
+    """Сколько занимает папка и её подпапки, по типам файлов: по готовой таблице folders, диски не читаются."""
+    c, _ = connect()
+    check_disk(c, a.disk)
+    base = (a.folder or '').strip(SEP)
+    depth = (base.count(SEP) + 1 if base else 0) + a.depth
+    cols = 'folder, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(5))
+    me = c.execute(f'select {cols} from folders where disk=? and folder=?', (a.disk, base)).fetchone()
+    if not me:
+        out(f'В базе нет файлов в {a.disk}\\{base} (проверьте написание пути).')
+        return
+    out(f'{a.disk}\\{base}: файлов {me[1]}, {gb(me[2])} ГБ; по типам, ГБ: '
+        + ', '.join(f'{t} {v}' for t, v in zip(FOLDER_TYPES, type_cols(me, 3))))
+    cond, args = prefix_cond('folder', base)
+    rows = c.execute(f'select {cols} from folders where disk=? and depth=? and {cond} order by bytes desc',
+                     [a.disk, depth] + args).fetchall()
+    head = ('папка', 'файлов', 'ГБ') + FOLDER_TYPES
+    body = [(r[0][len(base):].lstrip(SEP)[-60:], r[1], gb(r[2]), *type_cols(r, 3)) for r in rows]
+    if body:
+        table(head, body, limit=12)
+    path = save(f'папки - {a.disk} {base}'.replace(SEP, ' - ').strip(), head, body)
+    out(f'Все подпапки ({len(body)}): {path}')
+
+
+def cmd_find(a):
+    """Папки, в пути которых есть все слова: по таблице folders, а не по 11 млн файлов."""
+    c, _ = connect()
+    words = [w.lower() for w in a.words if w.strip()]
+    q = ('select disk, folder, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(5)) + ' from folders where '
+         + ' and '.join(['instr(folder_lc, ?) > 0'] * len(words)))
+    args = list(words)
+    if a.disk:
+        check_disk(c, a.disk)
+        q += ' and disk=?'
+        args.append(a.disk)
+    rows = c.execute(q, args).fetchall()
+    hits = {(r[0], r[1]) for r in rows}
+    top = [r for r in rows if (r[0], parent_of(r[1])) not in hits or not r[1]]   # только верхние совпадения
+    top.sort(key=lambda r: -r[3])
+    by_disk = collections.defaultdict(lambda: [0, 0, 0])
+    for r in top:
+        k = by_disk[r[0]]
+        k[0] += 1; k[1] += r[2]; k[2] += r[3]
+    what = ' '.join(f'«{w}»' for w in a.words)
+    if not top:
+        out(f'Папок со словами {what} нет' + (f' на {a.disk}.' if a.disk else '.'))
+        return
+    out(f'Папки со словами {what}: {len(top)} (вложенные совпадения не считаются), файлов {sum(r[2] for r in top)}, '
+        f'{gb(sum(r[3] for r in top))} ГБ')
+    if not a.disk:
+        out('По носителям: ' + '; '.join(f'{d} - {k[0]} папок, {gb(k[2])} ГБ'
+                                         for d, k in sorted(by_disk.items(), key=lambda kv: -kv[1][2])[:8])
+            + ('; …' if len(by_disk) > 8 else ''))
+    head = ('диск', 'папка', 'файлов', 'ГБ') + FOLDER_TYPES
+    body = [(r[0], r[1][-70:], r[2], gb(r[3]), *type_cols(r, 4)) for r in top]
+    table(head[:4], [b[:4] for b in body], limit=10)
+    path = save(f'поиск папок - {" ".join(a.words)}', head, [(r[0], r[1], r[2], gb(r[3]), *type_cols(r, 4)) for r in top])
+    out(f'Все найденные папки с разбивкой по типам: {path}')
+
+
 def cmd_stats(a):
     c, jobs = connect()
     n, h = c.execute('select count(*), count(sha) from files').fetchone()
@@ -1760,6 +1998,11 @@ def main():
     p.add_argument('--all', action='store_true', help='не учитывать разделы и отсрочки (решение «не нужно» учитывается всегда)')
     sub.add_parser('build', help='применить новые модули (журналы, сканы, ручные операции) и показать сводку')
     sub.add_parser('stats', help='что в базе и какие модули учтены')
+    p = sub.add_parser('folders', help='сколько занимают папка и её подпапки, по типам файлов')
+    p.add_argument('disk'); p.add_argument('folder', nargs='?', default='')
+    p.add_argument('--depth', type=int, default=1)
+    p = sub.add_parser('find', help='папки, в пути которых есть слова (например «Сафари»)')
+    p.add_argument('words', nargs='+'); p.add_argument('--disk')
     sub.add_parser('rebuild', help='самопроверка: собрать базу с нуля и сверить с собранной по шагам (минуты)')
     p = sub.add_parser('family-plan', help='план семейного копирования и проверки HDD51')
     p.add_argument('disk')
@@ -1781,7 +2024,7 @@ def main():
         cmd_stats(a)
     else:
         {'missing': cmd_missing, 'only': lambda x: cmd_missing(x, True), 'cmp': cmd_cmp, 'where': cmd_where,
-         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'rebuild': cmd_rebuild, 'recovery-plan': cmd_recovery_plan,
+         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'rebuild': cmd_rebuild, 'folders': cmd_folders, 'find': cmd_find, 'recovery-plan': cmd_recovery_plan,
          'recovery-staging': cmd_recovery_staging, 'family-plan': cmd_family_plan, 'family-check': cmd_family_check}[a.cmd](a)
     out(f'[{time.time() - t0:.1f} с]')
 
