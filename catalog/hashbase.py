@@ -884,6 +884,7 @@ def main():
     sub.add_parser('build'); sub.add_parser('stats')
     p = sub.add_parser('recovery-plan', help='разбор оглавления восстановленной папки, без чтения содержимого')
     p.add_argument('disk'); p.add_argument('--root', type=Path, required=True)
+    p.add_argument('--cached', action='store_true', help='обновить разметку сохранённого оглавления, без обращения к диску')
     a = ap.parse_args()
     t0 = time.time()
     if a.cmd == 'build':

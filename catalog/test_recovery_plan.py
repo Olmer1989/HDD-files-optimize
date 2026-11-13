@@ -15,6 +15,8 @@ class RecoveryPlanTests(unittest.TestCase):
 
     def test_short_digitized_piece_keeps_group(self):
         self.assertEqual(section('Рим\\кусок.avi',100,{'Рим'})[0],'Оцифрованные источники')
+        self.assertEqual(section('Эквадор\\Исходники\\Тренировки.avi',100,{'Эквадор\\Исходники'})[0],'Оцифрованные источники')
+        self.assertEqual(section('Туризм\\GPS - навигация\\карта.jpg',100)[0],'Другое')
 
     def test_variant_name_is_not_content_proof(self):
         key,note=original_candidate('Фото\\a.Id1234.jpg',{'фото\\a.jpg':None})
