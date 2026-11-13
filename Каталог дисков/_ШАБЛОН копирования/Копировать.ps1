@@ -1,4 +1,4 @@
-﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.1 от 12.11.2026)
+﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.2 от 12.11.2026)
 #
 # Что делает: копирует файлы по списку с диска-источника на один или несколько дисков-целей.
 #   Куда: <цель>:\ПЕРЕНОС с других дисков\<имя источника>\<тот же путь, что на источнике>
@@ -64,13 +64,16 @@ function Get-InnerMessage($err) {
 
 # --- 1. Диски: буквы определяются по серийному номеру тома ---
 $BySerial = @{}
-foreach ($d in Get-CimInstance Win32_LogicalDisk) {
+$LogicalDisks = if ($TestRoots) { @() } else { @(Get-CimInstance Win32_LogicalDisk) }
+foreach ($d in $LogicalDisks) {
     if ($d.VolumeSerialNumber) {
         $key = $d.VolumeSerialNumber.ToUpper()
         if (-not $BySerial.ContainsKey($key)) { $BySerial[$key] = @() }
         $BySerial[$key] += $d.DeviceID
     }
 }
+# v2.2: third column of source row is a source subfolder, not a destination prefix.
+$SourceSubfolder = ''
 $Override = @{}
 if ($TestRoots) {
     foreach ($pair in $TestRoots.Split(';')) {
@@ -92,6 +95,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($VolFile, $U8)) {
         $Dest[$name] = $f[2].Trim().Trim('\')
         if ($Dest[$name].Contains(':') -or $Dest[$name].Contains('/') -or ('\' + $Dest[$name] + '\').Contains('\..\')) { Stop-Script "тома.tsv: недопустимая папка «$($Dest[$name])» у $name. Ничего не сделано." 1 }
     }
+    if ($Names.Count -eq 1 -and $f.Count -ge 3 -and $f[2].Trim()) { $SourceSubfolder = $f[2].Trim('\') }
     if ($Override.ContainsKey($name)) { $Root[$name] = $Override[$name] }
     elseif ($TestRoots) { $Root[$name] = $null }
     elseif ($BySerial.ContainsKey($serial)) {
@@ -102,6 +106,9 @@ foreach ($line in [System.IO.File]::ReadAllLines($VolFile, $U8)) {
 }
 if ($Names.Count -lt 2) { Stop-Script 'В тома.tsv нужны минимум две строки: источник и хотя бы одна цель. Ничего не сделано.' 1 }
 $SrcName = $Names[0]
+if ($SourceSubfolder -and $Root[$SrcName]) {
+    $Root[$SrcName] = $Root[$SrcName].TrimEnd('\') + '\' + $SourceSubfolder
+}
 $Targets = @($Names | Select-Object -Skip 1)
 
 Write-Host ''
