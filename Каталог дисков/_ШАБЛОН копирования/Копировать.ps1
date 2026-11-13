@@ -1,10 +1,19 @@
-﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.2 от 12.11.2026)
+﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.3 от 13.11.2026)
 #
 # Что делает: копирует файлы по списку с диска-источника на один или несколько дисков-целей.
 #   Куда: <цель>:\ПЕРЕНОС с других дисков\<имя источника>\<тот же путь, что на источнике>
 #   (папку на цели можно задать свою - третьей колонкой в тома.tsv)
 # Чего НЕ делает: не удаляет, не перемещает и не перезаписывает ничего. На источник не пишет вообще.
-#   Единственное, что скрипт стирает, - собственный недописанный временный файл «.part».
+#   Единственное, что скрипт стирает, - собственные недописанные временные файлы. Они лежат только в его
+#   папке «_ВРЕМЕННО - копирование (можно удалить)» в корне диска-цели и названы именем запуска (run…​.part).
+#   Чужие файлы, даже с окончанием «.part», скрипт не трогает (версия 2.3).
+# Что означают слова в журнале - это разные степени проверки, они не равны друг другу:
+#   «скопирован, размер и SHA-256 совпали» - байты, прочитанные с источника, совпали с описью, и записано столько же
+#        байт. Записанный файл обратно НЕ читался.
+#   «скопирован, размер совпал» - то же, но хеша в описи не было: сверять было не с чем, в журнале хеш прочитанного.
+#   «уже есть» - в цели лежит файл с тем же размером. Его содержимое НЕ читалось: это не доказательство копии.
+# Пять ошибок подряд считаются признаком сбоя диска: копирование прекращается (версия 2.3).
+# Подпапка источника не меняет того, какой это диск: цель на том же диске, что источник, отвергается (версия 2.3).
 #
 # Рядом со скриптом лежат два файла (UTF-8, поля через TAB):
 #   тома.tsv   - <имя диска> TAB <серийный номер тома> [TAB <папка на этом диске>]. ПЕРВАЯ строка - источник,
@@ -20,7 +29,7 @@
 # Если диск не отвечает дольше $TimeoutSec секунд, копирование прекращается с сообщением, какой диск завис.
 #   Ограничение: предел ожидания действует на чтение и запись данных. Открытие файла, создание папки и
 #   завершение записи (Flush) Windows может держать дольше. Если окно не меняется больше 5 минут -
-#   закройте его и проверьте диск; недописанный «.part» уберёт следующий запуск.
+#   закройте его и проверьте диск; недописанный временный файл уберёт следующий запуск.
 # Файл, который уже лежит в цели с тем же размером, считается скопированным и повторно не читается
 #   (правило проекта). Копии, сделанные старыми скриптами, сверяются по SHA-256 отдельно.
 #
@@ -106,6 +115,9 @@ foreach ($line in [System.IO.File]::ReadAllLines($VolFile, $U8)) {
 }
 if ($Names.Count -lt 2) { Stop-Script 'В тома.tsv нужны минимум две строки: источник и хотя бы одна цель. Ничего не сделано.' 1 }
 $SrcName = $Names[0]
+# Том (диск) каждого имени - ДО добавления подпапки источника: подпапка не меняет того, какой это диск.
+$Vol = @{}
+foreach ($n in $Names) { $Vol[$n] = if ($Root[$n]) { $Root[$n].TrimEnd('\').ToUpper() } else { $null } }
 if ($SourceSubfolder -and $Root[$SrcName]) {
     $Root[$SrcName] = $Root[$SrcName].TrimEnd('\') + '\' + $SourceSubfolder
 }
@@ -121,7 +133,7 @@ foreach ($n in $Names) {
 }
 if (-not $Root[$SrcName]) { Stop-Script "Источник $SrcName не подключён. Ничего не сделано." 1 }
 foreach ($t in $Targets) {
-    if ($Root[$t] -and $Root[$t] -eq $Root[$SrcName]) { Stop-Script "Цель $t и источник $SrcName - один и тот же диск. Ничего не сделано." 1 }
+    if ($Vol[$t] -and $Vol[$t] -eq $Vol[$SrcName]) { Stop-Script "Цель $t и источник $SrcName - один и тот же диск. Ничего не сделано." 1 }
 }
 
 # --- 2. Список ---
@@ -178,6 +190,22 @@ try { [void][Console]::KeyAvailable } catch { $CanKey = $false; Write-Host 'Не
 [double]$Done = 0          # пройдено по списку, байт (для процента)
 [double]$CopiedBytes = 0   # реально скопировано, байт (для скорости)
 $Copied = 0; $Skipped = 0; $Errors = 0; $Stopped = $false; $Hung = ''
+$ErrorsInRow = 0; $MaxErrorsInRow = 5; $Failing = $false
+# Временные файлы пишутся только в собственную папку программы на диске-цели и носят имя этого запуска.
+# Поэтому скрипт никогда не трогает чужие файлы, даже если они называются «….part».
+$TmpName = '_ВРЕМЕННО - копирование (можно удалить)'
+$RunId = 'run' + (Get-Date -Format 'yyyyMMddHHmmss') + '_' + $PID
+$TmpDir = @{}
+foreach ($t in $Targets) {
+    if (-not $Root[$t]) { continue }
+    $TmpDir[$t] = $Root[$t] + '\' + $TmpName
+    try {
+        if ([System.IO.Directory]::Exists($LongPrefix + $TmpDir[$t])) {
+            # остатки прошлых прерванных запусков: в этой папке лежат только наши файлы
+            foreach ($old in [System.IO.Directory]::GetFiles($LongPrefix + $TmpDir[$t], 'run*.part')) { [System.IO.File]::Delete($old) }
+        }
+    } catch { }
+}
 $Start = Get-Date
 $LastUi = $Start.AddSeconds(-10)
 $bytes = New-Object byte[] $BufSize
@@ -197,9 +225,8 @@ foreach ($it in $Todo) {
         elseif ($dInfo.Exists) { $result = "КОНФЛИКТ: в цели другой размер ($($dInfo.Length)), не трогал" }
         else {
             [void][System.IO.Directory]::CreateDirectory($LongPrefix + $dstPath.Substring(0, $dstPath.LastIndexOf('\')))
-            $part = $LongPrefix + $dstPath + '.part'
-            # .part - только наш временный файл от прерванного запуска: начинаем его заново
-            if ([System.IO.File]::Exists($part)) { [System.IO.File]::Delete($part) }
+            [void][System.IO.Directory]::CreateDirectory($LongPrefix + $TmpDir[$it.Target])
+            $part = $LongPrefix + $TmpDir[$it.Target] + '\' + $RunId + '_' + $i + '.part'
             $in = [System.IO.FileStream]::new($LongPrefix + $srcPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, $BufSize)
             $out = [System.IO.FileStream]::new($part, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, $BufSize)
             $sha = [System.Security.Cryptography.SHA256CryptoServiceProvider]::new()
@@ -268,6 +295,12 @@ foreach ($it in $Todo) {
         }
     }
     if ($sha) { try { $sha.Dispose() } catch { } }
+    # Несколько ошибок подряд - признак сбоя диска: дальше не идём, чтобы не усугублять.
+    if ($result -like 'ОШИБКА*') { $ErrorsInRow++ } elseif ($result -like 'скопирован*' -or $result -eq 'уже есть') { $ErrorsInRow = 0 }
+    if ($ErrorsInRow -ge $MaxErrorsInRow -and -not $Stopped) {
+        $Stopped = $true; $Failing = $true
+        $result += " | $MaxErrorsInRow ошибок подряд - копирование прекращено, проверьте диски"
+    }
     if ($result -eq 'уже есть' -or $result -eq 'нет источника' -or $result -like 'КОНФЛИКТ*' -or $result -like 'размер источника*') { $Skipped++ }
     $Done += $it.Size
     $Log.WriteLine(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f (Get-Date -Format 'HH:mm:ss'), $it.Target, $result, $it.Size, $readHash, $srcPath, $dstPath))
@@ -280,7 +313,11 @@ Write-Progress -Id 2 -Activity ' ' -Completed
 Write-Progress -Id 1 -Activity ' ' -Completed
 $mins = ((Get-Date) - $Start).TotalMinutes
 Write-Host ''
-$tail = if ($Hung) { ', ПРЕКРАЩЕНО: диск не отвечает' } elseif ($Stopped) { ', ОСТАНОВЛЕНО по Q' } else { '' }
+$tail = if ($Hung) { ', ПРЕКРАЩЕНО: диск не отвечает' } elseif ($Failing) { ", ПРЕКРАЩЕНО: $MaxErrorsInRow ошибок подряд, проверьте диски" } elseif ($Stopped) { ', ОСТАНОВЛЕНО по Q' } else { '' }
+# пустую папку временных файлов убираем за собой; непустую (остаток зависшего файла) оставляем следующему запуску
+foreach ($t in $TmpDir.Keys) {
+    try { if ([System.IO.Directory]::Exists($LongPrefix + $TmpDir[$t]) -and -not [System.IO.Directory]::EnumerateFileSystemEntries($LongPrefix + $TmpDir[$t]).GetEnumerator().MoveNext()) { [System.IO.Directory]::Delete($LongPrefix + $TmpDir[$t]) } } catch { }
+}
 $sumColor = if ($Errors -gt 0 -or $Hung) { 'Red' } else { 'Cyan' }
 Write-Host ("Итог: скопировано {0}, пропущено {1}, ошибок {2}{3}. Время {4:N1} мин." -f $Copied, $Skipped, $Errors, $tail, $mins) -ForegroundColor $sumColor
 if ($Errors -gt 0) { Write-Host 'Есть ошибки: строки со словом ОШИБКА в журнале.' -ForegroundColor Red }

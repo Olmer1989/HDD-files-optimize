@@ -17,9 +17,19 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
+try:                                   # Excel нужен только самому build_pilot; hashbase и тесты обходятся без него
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+except ImportError:                    # без openpyxl модуль импортируется, но таблицы Excel построить нельзя
+    def Workbook(*a, **k):
+        raise ImportError('Для таблиц Excel нужен пакет openpyxl: py -m pip install openpyxl')
+    get_column_letter = Workbook
+
+    class _Style:                      # заглушка: константы оформления ниже создаются при импорте
+        def __init__(self, *a, **k):
+            pass
+    Alignment = Font = PatternFill = _Style
 
 PROJECT = Path(__file__).resolve().parent.parent
 # Все задания собираются сюда скриптом catalog\consolidate.py.

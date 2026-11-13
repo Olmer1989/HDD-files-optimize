@@ -8,6 +8,10 @@
 (все 11,3 млн файлов) собирается один раз и заново только при изменении самих описей.
 Фото и видео сравниваются по SHA-256 - точно. Остальные файлы (без хеша) - по имени и размеру:
 «копия не найдена» / «вероятная копия»; для ответа «можно удалять» вероятная копия не засчитывается.
+Копией считается только ПОДТВЕРЖДЁННАЯ запись: хеш измерен сканером по самому файлу или посчитан скриптом
+при копировании. Копия, у которой сверен только размер («уже есть»), и копия со слов пользователя
+копией не считаются. Ответ «можно удалять» учитывает все файлы, полноту описи и не считает
+сохраняемой копией то, что само удаляется.
 Диски программа не читает вообще.
 
 Команды (диск - номер HDDxx / Flashxx; папка - путь от корня диска, можно не указывать):
@@ -71,7 +75,17 @@ FOLDER_MOVES = {
 }
 MANUAL_HEAD = 'дата\tдействие\tдиск\tпуть\tдиск2\tпуть2\tкомментарий'
 DECISION_HEAD = 'диск\tпуть\tрешение\tкомментарий'
-SNAPSHOT_VERSION = 2          # менять при изменении структуры снимка
+SNAPSHOT_VERSION = 3          # менять при изменении структуры снимка
+
+# Степень подтверждения записи «файл лежит на носителе». Колонка sha заполнена ТОЛЬКО у подтверждённых (S и C):
+# поэтому всё, что сравнивается по sha, сравнивается по измеренным хешам. У остальных ожидаемый хеш лежит в sha_exp.
+EV_SCAN, EV_COPY, EV_SIZE, EV_USER, EV_STALE, EV_NONE = 'S', 'C', 'Z', 'U', 'X', 'N'
+EV_NAME = {EV_SCAN: 'хеш измерен сканером по самому файлу',
+           EV_COPY: 'скопировано скриптом, хеш прочитанных байтов посчитан',
+           EV_SIZE: 'НЕ подтверждено: скрипт сверил только размер или увидел «уже есть»',
+           EV_USER: 'НЕ подтверждено: со слов пользователя (Проводник)',
+           EV_STALE: 'НЕ подтверждено: файл изменился после подсчёта хеша',
+           EV_NONE: 'хеш не считался'}
 
 # Классы файлов без хеша (по расширению). «Значимые» участвуют в поиске уникальных папок.
 C_DOC, C_PROJ, C_ARCH, C_MUSIC, C_OTHER = 'документы', 'проекты монтажа и графики', 'архивы и образы', 'музыка и звук', 'прочее'
@@ -183,7 +197,25 @@ def serial_map(jobs):
     return m
 
 
-def apply_log(c, log, jobs, serials, report):
+def log_time(log):
+    """Когда шёл запуск: время из имени журнала (его ставит скрипт при старте), иначе время файла."""
+    m = re.search(r'(\d{4})-(\d\d)-(\d\d) (\d\d)-(\d\d)(?:-(\d\d))?', Path(log).name)
+    if m:
+        try:
+            return time.mktime(tuple(int(x or 0) for x in m.groups()) + (0, 0, -1))
+        except (ValueError, OverflowError):
+            pass
+    return os.path.getmtime(log)
+
+
+def put_row(c, disk, path, size, sha, mtime, ev, sha_exp, origin):
+    c.execute('insert or replace into files(disk, path, size, sha, origin, name_lc, mtime, ev, sha_exp) '
+              'values (?,?,?,?,?,?,?,?,?)', (disk, path, size, sha, origin, name_key(path), mtime, ev, sha_exp))
+
+
+def apply_log(c, log, jobs, serials, report, scanned):
+    """Журнал скрипта -> поправки. Строка действует на диск, только если запуск был ПОЗЖЕ описи этого диска:
+    иначе опись уже отражает результат (или его отсутствие), и старый журнал вернул бы исчезнувший файл."""
     task = Path(log).parent
     rows = read_tsv(log)
     if len(rows) < 2:
@@ -191,12 +223,12 @@ def apply_log(c, log, jobs, serials, report):
     head = [h.strip().lower() for h in rows[0]]
     body = rows[1:]
     name = f'{task.name}\\{Path(log).name}'
-    added = removed = moved = nosha = 0
-    lookup = lambda disk, rel: c.execute('select sha, size, mtime from files where disk=? and path=?', (disk, rel)).fetchone()
-
-    def put(disk, path, size, sha, mtime=None):
-        c.execute('insert or replace into files(disk, path, size, sha, origin, name_lc, mtime) values (?,?,?,?,?,?,?)',
-                  (disk, path, size, sha, 'журнал: ' + name, name_key(path), mtime))
+    when = log_time(log)
+    newer = lambda disk: when > scanned.get(disk, 0)
+    added = removed = moved = weak = old = 0
+    origin = 'журнал: ' + name
+    lookup = lambda disk, rel: c.execute('select sha, size, mtime, sha_exp, ev from files where disk=? and path=?',
+                                         (disk, rel)).fetchone()
 
     if 'цель' in head and 'куда' in head:                      # единый шаблон и ночные скрипты 12.11
         names = {}
@@ -215,14 +247,20 @@ def apply_log(c, log, jobs, serials, report):
             if not disk:
                 report['warn'].add(f'{name}: цель «{f[i_t]}» не опознана по тома.tsv - строки пропущены')
                 continue
-            dst = rel_of(f[i_dst])[1]
-            sha = (f[i_h].strip().lower() if i_h is not None and len(f) > i_h else '') or None
+            if not newer(disk):
+                old += 1
+                continue
+            log_sha = (f[i_h].strip().lower() if i_h is not None and len(f) > i_h else '') or None
             got = lookup(src_disk, rel_of(f[i_src])[1]) if src_disk else None
-            if not sha and got:
-                sha = got[0]
-            if not sha:
-                nosha += 1                 # файл без хеша: в базе будет числиться по имени и размеру
-            put(disk, dst, int(f[i_s]), sha, got[2] if got else None)
+            src_sha = (got[0] or got[3]) if got else None
+            if f[i_r].startswith('скопирован') and log_sha:
+                # скрипт сам прочитал и записал эти байты и посчитал их хеш
+                put_row(c, disk, rel_of(f[i_dst])[1], int(f[i_s]), log_sha, got[2] if got else None, EV_COPY, None, origin)
+            else:
+                # «уже есть» или копия, сверенная только по размеру: содержимое приёмника никто не читал
+                put_row(c, disk, rel_of(f[i_dst])[1], int(f[i_s]), None, got[2] if got else None, EV_SIZE,
+                        log_sha or src_sha, origin)
+                weak += 1
             added += 1
     elif task.name in OLD_LOGS and 'откуда' in head and 'куда' in head:
         letters = OLD_LOGS[task.name]
@@ -236,13 +274,21 @@ def apply_log(c, log, jobs, serials, report):
                 continue
             got = lookup(da, ra)
             if f[i_r].startswith('скопирован'):
-                put(db_, rb, int(f[i_s]), got[0] if got else None, got[2] if got else None); added += 1
-                if not (got and got[0]):
-                    nosha += 1
+                if not newer(db_):
+                    old += 1
+                    continue
+                put_row(c, db_, rb, int(f[i_s]), None, got[2] if got else None, EV_SIZE,
+                        (got[0] or got[3]) if got else None, origin)      # File.Copy + сверка размера
+                added += 1; weak += 1
             elif f[i_r].startswith('перемещ'):
-                if got:
+                if not newer(da):
+                    old += 1
+                    continue
+                if got:                                                   # тот же файл на том же диске
                     c.execute('delete from files where disk=? and path=?', (da, ra))
-                    put(db_, rb, got[1], got[0], got[2]); moved += 1
+                    put_row(c, db_, rb, got[1], got[0] if da == db_ else None, got[2],
+                            got[4] if da == db_ else EV_SIZE, got[3] if da == db_ else (got[0] or got[3]), origin)
+                    moved += 1
     elif task.name in OLD_LOGS and 'в корзину' in head:
         letters = OLD_LOGS[task.name]
         i_r, i_a = head.index('результат'), head.index('в корзину')
@@ -250,48 +296,79 @@ def apply_log(c, log, jobs, serials, report):
             if len(f) > i_a and f[i_r].startswith('в корзин'):
                 l, r = rel_of(f[i_a])
                 if l in letters:
+                    if not newer(letters[l]):
+                        old += 1
+                        continue
                     removed += c.execute('delete from files where disk=? and path=?', (letters[l], r)).rowcount
     elif task.name in FOLDER_MOVES and head[:3] == ['время', 'результат', 'папка']:
         disk, src_base, dst_base = FOLDER_MOVES[task.name]
         for f in body:
             if len(f) < 3 or not f[1].startswith('перемещ'):
                 continue
-            old = src_base + SEP + f[2]
-            cond, args = prefix_cond('path', old)
+            if not newer(disk):
+                old += 1
+                continue
+            old_path = src_base + SEP + f[2]
+            cond, args = prefix_cond('path', old_path)
             moved += c.execute(f'update files set path = ? || substr(path, ?), origin = ? where disk=? and {cond}',
-                               [dst_base + SEP + f[2], len(old) + 1, 'журнал: ' + name, disk] + args).rowcount
+                               [dst_base + SEP + f[2], len(old_path) + 1, origin, disk] + args).rowcount
     else:
         report['skipped'].append(name)
         return
     report['logs'].append(f'{name}: добавлено {added}, перемещено {moved}, убрано {removed}'
-                          + (f' (из добавленных без хеша: {nosha})' if nosha else ''))
+                          + (f' (из добавленных без подтверждения содержимого: {weak})' if weak else ''))
+    if old:
+        report['old'].append(f'{name}: {old} строк не применены - запуск был раньше описи диска, опись новее')
 
 
-def apply_manual(c, report):
+def manual_time(date):
+    """'12.11.2026' -> конец этого дня; непонятная дата -> сейчас (операция считается свежей)."""
+    try:
+        d, m, y = (int(x) for x in date.split('.')[:3])
+        return time.mktime((y, m, d, 23, 59, 59, 0, 0, -1))
+    except (ValueError, OverflowError):
+        return time.time()
+
+
+def apply_manual(c, report, scanned):
+    """То, что пользователь сделал в Проводнике. Копия «со слов» никогда не становится подтверждённой."""
     n = 0
-    for f in read_tsv(MANUAL)[1:]:
+    for line_no, f in enumerate(read_tsv(MANUAL)[1:], 2):
         f = [x.strip() for x in f] + [''] * 7
         date, act, disk, path, disk2, path2 = f[:6]
         act = act.lower()
+        when = manual_time(date)
+        origin = f'вручную {date}, строка {line_no}'
         cond, args = prefix_cond('path', path)
+        label = f'{date} {act} {disk}:{path}' + (f' -> {disk2}:{path2}' if disk2 else '')
         if act.startswith('удал'):
+            if when < scanned.get(disk, 0):
+                report['old'].append(label + ' - не применено: опись диска новее')
+                continue
             k = c.execute(f'delete from files where disk=? and {cond}', [disk] + args).rowcount
         elif act.startswith(('скопир', 'перемещ')):
-            rows = c.execute(f'select path, size, sha, name_lc, mtime from files where disk=? and {cond}', [disk] + args).fetchall()
+            move = act.startswith('перемещ')
+            if when < scanned.get(disk2, 0) or (move and when < scanned.get(disk, 0)):
+                report['old'].append(label + ' - не применено: опись диска новее')
+                continue
+            rows = c.execute(f'select path, size, sha, mtime, ev, sha_exp from files where disk=? and {cond}',
+                             [disk] + args).fetchall()
             base = path.rstrip(SEP)
-            for p, size, sha, nm, mt in rows:
+            if move:                                  # сначала убрать ровно эти записи, потом создать новые
+                c.executemany('delete from files where disk=? and path=?', ((disk, r[0]) for r in rows))
+            for p, size, sha, mt, ev, exp in rows:
                 tail = p[len(base):].lstrip(SEP)
                 newp = (path2.rstrip(SEP) + (SEP + tail if tail else '')) if tail or path2 else p
-                c.execute('insert or replace into files(disk, path, size, sha, origin, name_lc, mtime) values (?,?,?,?,?,?,?)',
-                          (disk2, newp, size, sha, f'вручную {date}', nm if tail else name_key(newp), mt))
-            if act.startswith('перемещ'):
-                c.execute(f'delete from files where disk=? and {cond} and origin not like ?', [disk] + args + [f'вручную {date}'])
+                if move and disk2 == disk:            # тот же файл на том же диске: подтверждение не меняется
+                    put_row(c, disk2, newp, size, sha, mt, ev, exp, origin)
+                else:                                 # содержимое копии никто не проверял
+                    put_row(c, disk2, newp, size, None, mt, EV_USER, sha or exp, origin)
             k = len(rows)
         else:
             report['warn'].add(f'ручные операции: непонятное действие «{act}»')
             continue
         n += 1
-        report['manual'].append(f'{date} {act} {disk}:{path}' + (f' -> {disk2}:{path2}' if disk2 else '') + f' - {k} файлов')
+        report['manual'].append(label + f' - {k} файлов')
     return n
 
 
@@ -310,57 +387,82 @@ def replace_file(src, dst):
 def build_snapshot(jobs, quiet=False):
     """Снимок описей: все файлы всех носителей (с хешем и без). Долго (минуты), но только когда изменились описи."""
     t0 = time.time()
-    tmp = SNAP.with_suffix('.tmp')
+    tmp = SNAP.with_name(f'описи.{os.getpid()}.tmp')
     if tmp.exists():
         tmp.unlink()
     c = sqlite3.connect(tmp)
-    c.executescript('''
+    c.executescript("""
         pragma journal_mode=off; pragma synchronous=off; pragma cache_size=-400000;
         create table files(disk text not null, path text not null, size integer, sha text, origin text,
-                           name_lc text, mtime integer, primary key(disk, path)) without rowid;
+                           name_lc text, mtime integer, ev text, sha_exp text, primary key(disk, path)) without rowid;
         create table meta(key text primary key, value text);
-        create table disks(disk text primary key, label text, hashed integer, total integer);
-    ''')
-    n_all = n_hash = 0
+        create table disks(disk text primary key, label text, hashed integer, total integer, status text, scanned real);
+        create table issues(disk text, path text, kind text, note text);
+    """)
+    n_all = n_hash = n_stale = 0
     for d, j in jobs.items():
         hp, ip = j['dir'] / 'hashes.sqlite', j['dir'] / 'inventory.sqlite'
         hashes = {}
         if hp.exists():
             with bp.ro(hp) as h:
-                hashes = {p: (s, x) for p, s, x in h.execute(
-                    "select path, size, lower(sha256) from hashes where status='verified' and sha256 is not null and sha256<>''")}
+                for p, s, m, x, st in h.execute('select path, size, mtime_ns, lower(sha256), status from hashes'):
+                    if st == 'verified' and x:
+                        hashes[p] = (s, '' if m is None else str(m), x)
+                    else:
+                        c.execute('insert into issues values (?,?,?,?)', (d, p, 'файл не прочитан при подсчёте хеша', st or ''))
+        have_inv = ip.exists()
+        counter = [0, 0]                                  # с хешем, с устаревшим хешем
 
         def rows():
-            seen = set()
-            if ip.exists():
-                with bp.ro(ip) as inv:
-                    for p, size, mt in inv.execute('select path, size, mtime_ns from files order by path'):
-                        got = hashes.get(p)
-                        if got:
-                            seen.add(p)
-                        try:
-                            mt = int(mt) // 1000000000 if mt else None
-                        except (TypeError, ValueError):
-                            mt = None
-                        yield d, p, (got[0] if got else size) or 0, got[1] if got else None, 'опись', name_key(p), mt
-            for p, (size, x) in hashes.items():           # хеш есть, а в описи файла нет - не терять
-                if p not in seen:
-                    yield d, p, size or 0, x, 'опись', name_key(p), None
+            if not have_inv:                              # описи нет вовсе: есть только таблица хешей
+                for p, (size, m, x) in hashes.items():
+                    counter[0] += 1
+                    yield d, p, size or 0, x, 'опись', name_key(p), None, EV_SCAN, None
+                return
+            with bp.ro(ip) as inv:
+                for p, size, mt in inv.execute('select path, size, mtime_ns from files order by path'):
+                    got = hashes.get(p)
+                    mt_s = '' if mt is None else str(mt)
+                    try:
+                        mt_i = int(mt) // 1000000000 if mt else None
+                    except (TypeError, ValueError):
+                        mt_i = None
+                    if not got:
+                        yield d, p, size or 0, None, 'опись', name_key(p), mt_i, EV_NONE, None
+                    elif got[0] == size and (not got[1] or not mt_s or got[1] == mt_s):
+                        counter[0] += 1
+                        yield d, p, size or 0, got[2], 'опись', name_key(p), mt_i, EV_SCAN, None
+                    else:                                 # файл изменился после подсчёта хеша: хеш к нему не относится
+                        counter[1] += 1
+                        yield d, p, size or 0, None, 'опись', name_key(p), mt_i, EV_STALE, got[2]
+            # хеш, для которого в описи нет файла, не переносится: по описи такого файла на диске нет
 
         before = c.total_changes
-        c.executemany('insert or replace into files values (?,?,?,?,?,?,?)', rows())
-        c.execute('insert into disks values (?,?,?,?)', (d, j['label'], len(hashes), c.total_changes - before))
-        n_all += c.total_changes - before - 1
-        n_hash += len(hashes)
+        c.executemany('insert or replace into files values (?,?,?,?,?,?,?,?,?)', rows())
+        total = c.total_changes - before
+        if have_inv:
+            try:
+                with bp.ro(ip) as inv:
+                    for p, op, msg in inv.execute('select path, operation, message from errors'):
+                        c.execute('insert into issues values (?,?,?,?)',
+                                  (d, rel_of(p or '')[1].rstrip(SEP), 'папка или файл не прочитаны при описи', f'{op}: {msg}'[:300]))
+            except sqlite3.Error:
+                pass
+        scanned = os.path.getmtime(ip) if have_inv else j.get('mtime', 0)
+        c.execute('insert into disks values (?,?,?,?,?,?)', (d, j['label'], counter[0], total, j.get('status') or '?', scanned))
+        n_all += total; n_hash += counter[0]; n_stale += counter[1]
         c.commit()
     c.execute('create index files_sha on files(sha, disk) where sha is not null')
+    c.execute('create index files_exp on files(sha_exp, disk) where sha_exp is not null')
     c.execute('create index files_name on files(name_lc, size, disk)')
+    c.execute('create index issues_disk on issues(disk)')
     c.execute('insert into meta values (?,?)', ('scans', scans_signature(jobs)))
     c.commit()
     c.close()
     replace_file(tmp, SNAP)
     if not quiet:
-        out(f'Снимок описей собран за {time.time() - t0:.0f} с: {len(jobs)} носителей, {n_all} файлов, из них с хешем {n_hash}.')
+        out(f'Снимок описей собран за {time.time() - t0:.0f} с: {len(jobs)} носителей, {n_all} файлов, '
+            f'из них с хешем {n_hash}, с устаревшим хешем {n_stale}.')
 
 
 def snapshot_fresh(jobs):
@@ -376,32 +478,66 @@ def snapshot_fresh(jobs):
     return bool(row) and row[0] == scans_signature(jobs)
 
 
+class BuildLock:
+    """Одна сборка базы за раз: вторая копия программы ждёт, а не портит временные файлы первой."""
+
+    def __enter__(self):
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
+        self.f = open(BASE_DIR / 'сборка.lock', 'a+b')
+        try:
+            import msvcrt
+        except ImportError:
+            return self
+        for _ in range(900):
+            try:
+                self.f.seek(0)
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                self.locked = True
+                return self
+            except OSError:
+                time.sleep(1)
+        self.f.close()
+        sys.exit('Другая копия программы уже 15 минут пересобирает базу. Дождитесь её и повторите команду.')
+
+    def __exit__(self, *exc):
+        try:
+            if getattr(self, 'locked', False):
+                import msvcrt
+                self.f.seek(0)
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        self.f.close()
+
+
 def build(jobs=None, quiet=False):
     """Рабочая база = копия снимка описей + поправки (журналы, ручные операции). Секунды."""
     jobs = jobs or bp.find_jobs()
     ensure_tables()
-    if not snapshot_fresh(jobs):
-        out('(описи изменились или снимка ещё нет - собираю снимок всех описей, это несколько минут и только один раз)')
-        build_snapshot(jobs, quiet)
-    t0 = time.time()
-    tmp = DB.with_suffix('.tmp')
-    if tmp.exists():
-        tmp.unlink()
-    shutil.copyfile(SNAP, tmp)
-    c = sqlite3.connect(tmp)
-    c.executescript('pragma journal_mode=off; pragma synchronous=off; pragma cache_size=-200000;')
-    report = dict(logs=[], skipped=[], manual=[], warn=set())
-    serials = serial_map(jobs)
-    for log in sorted(glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv')), key=os.path.getmtime):
-        apply_log(c, log, jobs, serials, report)
-    apply_manual(c, report)
-    report['warn'] = sorted(report['warn'])
-    c.execute('insert into meta values (?,?)', ('signature', sources_signature(jobs)))
-    c.execute('insert into meta values (?,?)', ('report', json.dumps(report, ensure_ascii=False)))
-    c.execute('insert into meta values (?,?)', ('built', time.strftime('%d.%m.%Y %H:%M')))
-    c.commit()
-    c.close()
-    replace_file(tmp, DB)          # прежняя рабочая база остаётся на месте до этой строки
+    with BuildLock():
+        if not snapshot_fresh(jobs):
+            out('(описи изменились или снимка ещё нет - собираю снимок всех описей, это несколько минут и только один раз)')
+            build_snapshot(jobs, quiet)
+        t0 = time.time()
+        tmp = DB.with_name(f'хеши.{os.getpid()}.tmp')
+        if tmp.exists():
+            tmp.unlink()
+        shutil.copyfile(SNAP, tmp)
+        c = sqlite3.connect(tmp)
+        c.executescript('pragma journal_mode=off; pragma synchronous=off; pragma cache_size=-200000;')
+        scanned = dict(c.execute('select disk, scanned from disks'))
+        report = dict(logs=[], skipped=[], manual=[], old=[], warn=set())
+        serials = serial_map(jobs)
+        for log in sorted(glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv')), key=log_time):
+            apply_log(c, log, jobs, serials, report, scanned)
+        apply_manual(c, report, scanned)
+        report['warn'] = sorted(report['warn'])
+        c.execute('insert into meta values (?,?)', ('signature', sources_signature(jobs)))
+        c.execute('insert into meta values (?,?)', ('report', json.dumps(report, ensure_ascii=False)))
+        c.execute('insert into meta values (?,?)', ('built', time.strftime('%d.%m.%Y %H:%M')))
+        c.commit()
+        c.close()
+        replace_file(tmp, DB)          # прежняя рабочая база остаётся на месте до этой строки
     if not quiet:
         out(f'Поправки наложены за {time.time() - t0:.0f} с.')
     return report
@@ -437,12 +573,28 @@ def connect():
     return _last, jobs
 
 
+def is_drop(verdict):
+    """Единственное решение, которое разрешает не сохранять файл. Раздел и отсрочка этого не разрешают."""
+    return bool(verdict) and verdict.strip().lower().startswith('не нужно')
+
+
 def decisions_for(disk):
+    """Решения по путям для диска (строки с диском «*» действуют на все диски)."""
     res = []
     for f in read_tsv(DECISIONS)[1:]:
         f = [x.strip() for x in f] + [''] * 4
-        if f[0] == disk and f[2]:
+        if f[0] in (disk, '*') and f[2] and not f[1].lower().startswith('класс:'):
             res.append((f[1].rstrip(SEP), f[2]))
+    return res
+
+
+def class_rules(disk):
+    """Решения владельца по целому классу файлов: путь вида «класс: служебные и временные»."""
+    res = {}
+    for f in read_tsv(DECISIONS)[1:]:
+        f = [x.strip() for x in f] + [''] * 4
+        if f[0] in (disk, '*') and f[2] and f[1].lower().startswith('класс:'):
+            res[f[1].split(':', 1)[1].strip().lower()] = f[2]
     return res
 
 
@@ -480,15 +632,45 @@ def table(head, rows, limit=25):
         out(f'... ещё {len(rows) - limit} строк - см. файл')
 
 
-def presence(c, disk, prefix):
-    """Каждый файл диска с хешем: (path, size, sha, на45, на77, сколько дисков всего)."""
+def presence(c, disk, prefix, exclude=None, weak=False):
+    """Каждый файл диска с подтверждённым хешем: (path, size, sha, на45, на77, сколько дисков всего[, слабая45, слабая77]).
+    Копией считается только запись с подтверждённым хешем (измерен сканером или сверен скриптом при копировании).
+    exclude=(диск, папка) - не считать копиями то, что само собираются удалить.
+    weak=True - добавить признаки «на диске лежит неподтверждённая копия» (только размер или со слов)."""
     cond, args = prefix_cond('f.path', prefix)
-    q = f'''select f.path, f.size, f.sha,
-                   exists(select 1 from files g where g.sha=f.sha and g.disk=?),
-                   exists(select 1 from files g where g.sha=f.sha and g.disk=?),
-                   (select count(distinct g.disk) from files g where g.sha=f.sha)
-            from files f where f.disk=? and f.sha is not null and {cond}'''
-    return c.execute(q, [MAIN[0], MAIN[1], disk] + args).fetchall()
+    ex_sql, ex_args = '', []
+    if exclude:
+        ec, ea = prefix_cond('g.path', exclude[1])
+        ex_sql, ex_args = f' and not (g.disk=? and {ec})', [exclude[0]] + ea
+    cols = [f'exists(select 1 from files g where g.sha=f.sha and g.disk=?{ex_sql})'] * 2
+    params = [MAIN[0]] + ex_args + [MAIN[1]] + ex_args
+    extra = ''
+    if weak:
+        extra = (', exists(select 1 from files g where g.sha_exp=f.sha and g.disk=?)'
+                 ', exists(select 1 from files g where g.sha_exp=f.sha and g.disk=?)')
+    q = f"""select f.path, f.size, f.sha, {cols[0]}, {cols[1]},
+                   (select count(distinct g.disk) from files g where g.sha=f.sha){extra}
+            from files f where f.disk=? and f.sha is not null and {cond}"""
+    return c.execute(q, params + ([MAIN[0], MAIN[1]] if weak else []) + [disk] + args).fetchall()
+
+
+def issues_for(c, disk, folder):
+    """Места, которые сканер не смог прочитать и которые задевают папку (внутри неё или выше неё)."""
+    base = (folder or '').rstrip(SEP)
+    res = []
+    for p, kind, note in c.execute('select path, kind, note from issues where disk=?', (disk,)):
+        p = p or ''
+        if not base or not p or p == base or p.startswith(base + SEP) or base.startswith(p + SEP):
+            res.append((p, kind, note))
+    return res
+
+
+def evidence_notes(c):
+    """Предупреждения сборки, которые обязаны попадать в ответ об удалении."""
+    rep = json.loads(c.execute("select value from meta where key='report'").fetchone()[0])
+    notes = [f'журнал не прочитан программой: {x}' for x in rep.get('skipped', [])]
+    notes += list(rep.get('warn', []))
+    return notes
 
 
 def folder_key(path, prefix, depth):
@@ -610,14 +792,22 @@ def cmd_missing(a, only=False):
     c, jobs = connect()
     check_disk(c, a.disk)
     prefix = (a.folder or '').rstrip(SEP)
-    rows = presence(c, a.disk, prefix)
+    rows = presence(c, a.disk, prefix, weak=True)
     decs = decisions_for(a.disk)
     agg = collections.defaultdict(lambda: [0, 0, 0, 0, 0, 0])   # файлов, байт, нет45, нет77, нет обоих, только тут
-    detail, decided = [], collections.Counter()
-    for path, size, sha, on45, on77, ndisks in rows:
+    detail, dropped = [], [0, 0]
+    sections = collections.defaultdict(lambda: [0, 0, 0, 0])    # решение: файлов, байт, без копий где-либо: файлов, байт
+    weak45 = weak77 = 0
+    for path, size, sha, on45, on77, ndisks, w45, w77 in rows:
         v = decision_of(path, decs)
-        if v:
-            decided[v] += size
+        if is_drop(v):
+            dropped[0] += 1; dropped[1] += size
+            continue
+        if v:                                    # раздел или отсрочка: сохранять НУЖНО, но не на 45 и 77
+            s = sections[v]
+            s[0] += 1; s[1] += size
+            if ndisks == 1:
+                s[2] += 1; s[3] += size
             continue
         if only and ndisks > 1:
             continue
@@ -627,25 +817,39 @@ def cmd_missing(a, only=False):
         if not on77: k[3] += size
         if not on45 and not on77: k[4] += size
         if ndisks == 1: k[5] += size
+        weak45 += (not on45) and bool(w45); weak77 += (not on77) and bool(w77)
         if only or not (on45 and on77):
-            detail.append((path, size, 'да' if on45 else 'нет', 'да' if on77 else 'нет', ndisks - 1, sha))
+            detail.append((path, size, 'да' if on45 else ('не подтверждено' if w45 else 'нет'),
+                           'да' if on77 else ('не подтверждено' if w77 else 'нет'), ndisks - 1, sha))
     title = f'{a.disk}' + (f'\\{prefix}' if prefix else '')
     what = 'только на этом диске' if only else f'чего нет на {MAIN[0]} и {MAIN[1]}'
     out(f'{title}: {what} (ГБ, только файлы с SHA-256; всего таких {len(rows)})')
+    out('Копией считается только подтверждённая: хеш измерен сканером или сверен скриптом при копировании.')
     tot = [sum(v[i] for v in agg.values()) for i in range(6)]
     head = ('папка', 'файлов', 'всего', f'нет на {MAIN[0]}', f'нет на {MAIN[1]}', 'нет на обоих', 'больше нигде')
     order = sorted(agg.items(), key=lambda kv: -(kv[1][1] if only else max(kv[1][2], kv[1][3])))
     body = [(k[:60], v[0], gb(v[1]), gb(v[2]), gb(v[3]), gb(v[4]), gb(v[5])) for k, v in order
             if only or v[2] or v[3]]
     table(head, body + [('ИТОГО', tot[0], gb(tot[1]), gb(tot[2]), gb(tot[3]), gb(tot[4]), gb(tot[5]))])
-    for v, size in decided.items():
-        out(f'Не показано по решению «{v}»: {gb(size)} ГБ')
+    if weak45 or weak77:
+        out(f'Из «нет»: на {MAIN[0]} у {weak45} файлов и на {MAIN[1]} у {weak77} лежит НЕПОДТВЕРЖДЁННАЯ копия '
+            f'(сверен только размер или со слов пользователя). Копией она не считается, пока файл не прочитан.')
+    if sections:
+        out('')
+        out('По решениям пользователя (в таблицу выше не входят; сохранять их НУЖНО, место - по решению):')
+        table(('решение', 'файлов', 'ГБ', 'без подтверждённой копии где-либо ещё: файлов', 'ГБ'),
+              [(k[:50], v[0], gb(v[1]), v[2], gb(v[3])) for k, v in sorted(sections.items(), key=lambda kv: -kv[1][1])])
+    if dropped[0]:
+        out(f'По решению «не нужно» не показано: {dropped[0]} файлов, {gb(dropped[1])} ГБ')
+    iss = issues_for(c, a.disk, prefix)
+    if iss:
+        out(f'ВНИМАНИЕ: опись неполная - сканер не прочитал {len(iss)} мест в этой области; файлы оттуда программе неизвестны.')
     tag = f'{a.disk} {prefix.replace(SEP, " - ")}'.strip()
     p = save(f'{"только" if only else "нет на 45 и 77"} - {tag}',
              ('путь', 'размер', f'на {MAIN[0]}', f'на {MAIN[1]}', 'на скольких других дисках', 'SHA-256'), sorted(detail))
     out(f'По файлам ({len(detail)}): {p}')
     if only:
-        unhashed_report(c, a.disk, prefix, decs, f'только, без хеша - {tag}')
+        unhashed_report(c, a.disk, prefix, [d for d in decs if is_drop(d[1])], f'только, без хеша - {tag}')
     else:
         unhashed_note(c, a.disk, prefix)
 
@@ -676,18 +880,35 @@ def cmd_cmp(a):
     A, B = sha_sizes(c, a.disk_a, a.folder_a), sha_sizes(c, a.disk_b, a.folder_b)
     both, oa, ob = A.keys() & B.keys(), A.keys() - B.keys(), B.keys() - A.keys()
     s = lambda keys, d: sum(d[k][1] for k in keys)
-    out(f'A = {a.disk_a}\\{a.folder_a}    B = {a.disk_b}\\{a.folder_b}    (разных файлов с SHA-256: A {len(A)}, B {len(B)})')
+    NA, NB = name_sizes(c, a.disk_a, a.folder_a), name_sizes(c, a.disk_b, a.folder_b)
+    nb, na_, nb_ = NA.keys() & NB.keys(), NA.keys() - NB.keys(), NB.keys() - NA.keys()
+    out(f'A = {a.disk_a}\\{a.folder_a}    B = {a.disk_b}\\{a.folder_b}')
+    out(f'Файлы с подтверждённым SHA-256 (разных): A {len(A)}, B {len(B)}')
     table(('', 'файлов', 'ГБ'), [('есть в обеих', len(both), gb(s(both, A))), ('только в A', len(oa), gb(s(oa, A))),
                                   ('только в B', len(ob), gb(s(ob, B)))])
-    out('Вывод: ' + ('папки одинаковы по содержимому.' if not oa and not ob else
-                     'в B есть всё из A.' if not oa else 'в A есть всё из B.' if not ob else 'папки различаются.'))
-    detail = [('только в A', *A[k], k) for k in oa] + [('только в B', *B[k], k) for k in ob]
-    NA, NB = name_sizes(c, a.disk_a, a.folder_a), name_sizes(c, a.disk_b, a.folder_b)
     if NA or NB:
-        nb, na_, nb_ = NA.keys() & NB.keys(), NA.keys() - NB.keys(), NB.keys() - NA.keys()
-        out(f'Файлы без SHA-256 (по имени и размеру, не доказательство): в обеих {len(nb)}, только в A {len(na_)}, '
-            f'только в B {len(nb_)}')
-        detail += [('только в A, без хеша', NA[k], k[1], '') for k in na_] + [('только в B, без хеша', NB[k], k[1], '') for k in nb_]
+        out(f'Файлы без подтверждённого хеша (по имени и размеру, не доказательство): в обеих {len(nb)}, '
+            f'только в A {len(na_)}, только в B {len(nb_)}')
+    # общий вывод - только после обеих частей
+    if not A and not B and not NA and not NB:
+        verdict = 'в базе нет файлов по этим путям - сравнивать нечего.'
+    elif oa or ob:
+        verdict = ('в B есть все файлы с хешем из A.' if not oa else 'в A есть все файлы с хешем из B.' if not ob
+                   else 'папки различаются.')
+        if na_ or nb_:
+            verdict += ' Различаются и файлы без хеша.'
+    elif na_ or nb_:
+        verdict = ('файлы с хешем совпадают, но РАЗЛИЧАЮТСЯ файлы без хеша: '
+                   f'только в A {len(na_)}, только в B {len(nb_)}. Папки не одинаковы.')
+    elif NA or NB:
+        verdict = ('файлы с хешем совпадают точно; остальные совпали по имени и размеру - это не доказательство. '
+                   'Одинаковость папок НЕ подтверждена полностью.')
+    else:
+        verdict = 'наборы файлов одинаковы по содержимому (SHA-256).'
+    out('Вывод: ' + verdict)
+    out('Сравнивается набор файлов, а не расположение по подпапкам: структура папок не проверяется.')
+    detail = [('только в A', *A[k], k) for k in oa] + [('только в B', *B[k], k) for k in ob]
+    detail += [('только в A, без хеша', NA[k], k[1], '') for k in na_] + [('только в B, без хеша', NB[k], k[1], '') for k in nb_]
     p = save(f'сравнение - {a.disk_a} {a.folder_a} и {a.disk_b} {a.folder_b}'.replace(SEP, ' - '),
              ('где', 'путь', 'размер', 'SHA-256'), sorted(detail, key=lambda r: (r[0], r[1])))
     out(f'Различия по файлам ({len(detail)}): {p}')
@@ -746,41 +967,86 @@ def cmd_where(a):
     rows = [(d + (' (тот же диск, другое место)' if d == a.disk else ''), cnt[d], gb(size[d]), f'{100 * cnt[d] // len(mine)}%',
              sample[d][:70]) for d in sorted(cnt, key=lambda d: -size[d])]
     table(('диск', 'файлов', 'ГБ', 'доля', 'пример пути'), rows or [('нигде больше', 0, '0.00', '0%', '')])
+    weak = collections.Counter()
+    for disk, sha in c.execute('select f.disk, f.sha_exp from files f join q on q.sha=f.sha_exp'):
+        weak[disk] += 1
+    if weak:
+        out('НЕПОДТВЕРЖДЁННЫЕ копии (сверен только размер, со слов пользователя или файл менялся) - копиями не считаются: '
+            + ', '.join(f'{d} - {n}' for d, n in weak.most_common()))
 
 
 def cmd_candel(a):
+    """Можно ли удалять. «ДА» - только когда у КАЖДОГО файла есть подтверждённые копии на обоих главных дисках,
+    не считая удаляемого, опись полна и ничего не исключено по умолчанию. Иначе «НЕТ» или «НЕДОСТАТОЧНО»."""
     c, jobs = connect()
     check_disk(c, a.disk)
-    rows = presence(c, a.disk, a.folder)
-    nohash = [r for r in unhashed(c, a.disk, a.folder) if r[3] in SIGNIFICANT]
-    lost = [(p, s, k) for p, s, nm, k, others, dup in nohash if others == 0]
-    if not rows and not nohash:
+    folder = (a.folder or '').rstrip(SEP)
+    decs, crules = decisions_for(a.disk), class_rules(a.disk)
+    rows = presence(c, a.disk, folder, exclude=(a.disk, folder), weak=True)
+    rest = unhashed(c, a.disk, folder)
+    if not rows and not rest:
         out('В базе нет файлов по этому пути (проверьте написание пути и номер диска).')
         return
-    lack = [(p, s, 'да' if o45 else 'нет', 'да' if o77 else 'нет', sha) for p, s, sha, o45, o77, n in rows if not (o45 and o77)]
-    out(f'{a.disk}\\{a.folder}: файлов с SHA-256 {len(rows)}, {gb(sum(r[1] for r in rows))} ГБ')
-    out(f'  есть и на {MAIN[0]}, и на {MAIN[1]}: {len(rows) - len(lack)}')
-    out(f'  нет хотя бы на одном: {len(lack)}, {gb(sum(r[1] for r in lack))} ГБ')
-    out(f'Значимых файлов без SHA-256 (документы, проекты, архивы, музыка, прочее): {len(nohash)}')
-    if nohash:
-        out(f'  копия по имени и размеру НЕ найдена ни на одном другом диске: {len(lost)}, {gb(sum(x[1] for x in lost))} ГБ')
+    reasons = []
+    status = (c.execute('select status from disks where disk=?', (a.disk,)).fetchone() or ['?'])[0] or '?'
+    if not status.startswith('complete'):
+        reasons.append(f'опись диска не завершена (состояние «{status}»)')
+    iss = issues_for(c, a.disk, folder)
+    if iss:
+        reasons.append(f'опись неполная: сканер не прочитал {len(iss)} мест в этой области (первое: «{iss[0][0] or "корень диска"}»)')
+    reasons += evidence_notes(c)
+
+    dropped, lack, weak_only = 0, [], 0
+    for p, s, sha, o45, o77, n, w45, w77 in rows:
+        if is_drop(decision_of(p, decs)):
+            dropped += 1
+            continue
+        if not (o45 and o77):
+            lack.append((p, s, 'да' if o45 else ('не подтверждено' if w45 else 'нет'),
+                         'да' if o77 else ('не подтверждено' if w77 else 'нет'), sha))
+            weak_only += bool((o45 or w45) and (o77 or w77))
+    unconf = collections.defaultdict(lambda: [0, 0, 0])            # класс: файлов, байт, из них копия не найдена нигде
+    unconf_rows = []
+    for p, s, nm, k, others, dup in rest:
+        if k == C_EMPTY:
+            continue                                               # пустой файл: терять нечего
+        if is_drop(decision_of(p, decs)) or is_drop(crules.get(k.lower())):
+            dropped += 1
+            continue
+        u = unconf[k]
+        u[0] += 1; u[1] += s; u[2] += others == 0
+        unconf_rows.append((p, s, k, 'копия не найдена нигде' if others == 0 else 'есть вероятная копия (имя и размер)'))
+    confirmed = len(rows) - len(lack)
+
+    out(f'{a.disk}\\{folder}: проверка перед удалением')
+    out(f'Файлов с подтверждённым SHA-256: {len(rows)}, {gb(sum(r[1] for r in rows))} ГБ')
+    out(f'  подтверждённые копии есть и на {MAIN[0]}, и на {MAIN[1]} (не считая удаляемого): {confirmed}')
+    out(f'  нет хотя бы на одном: {len(lack)}, {gb(sum(r[1] for r in lack))} ГБ'
+        + (f' (у {weak_only} из них копии лежат, но не подтверждены: сверен только размер или со слов)' if weak_only else ''))
+    n_unconf = sum(v[0] for v in unconf.values())
+    if n_unconf:
+        out(f'Файлов БЕЗ подтверждённого хеша: {n_unconf}, {gb(sum(v[1] for v in unconf.values()))} ГБ - их сохранность доказать нечем:')
+        table(('класс', 'файлов', 'ГБ', 'копия не найдена нигде'),
+              [(k, unconf[k][0], gb(unconf[k][1]), unconf[k][2]) for k in CLASS_ORDER if k in unconf])
+    if dropped:
+        out(f'Исключено решениями «не нужно»: {dropped} файлов.')
+    for r in reasons:
+        out('ВНИМАНИЕ: ' + r)
     if lack:
-        out('ОТВЕТ: НЕТ - сначала докопировать фото и видео.')
-    elif lost:
-        out('ОТВЕТ: НЕТ - фото и видео есть на обоих дисках, но у части остальных файлов копия не найдена нигде.')
-    elif nohash:
-        out('ОТВЕТ: ДА по фото и видео (всё с хешем есть на обоих дисках). Остальные файлы имеют вероятные копии '
-            'по имени и размеру - это не доказательство, решает пользователь.')
+        out(f'ОТВЕТ: НЕТ - у {len(lack)} файлов нет подтверждённой копии на обоих дисках. Удалять нельзя.')
+    elif reasons or n_unconf:
+        out('ОТВЕТ: НЕДОСТАТОЧНО ПОДТВЕРЖДЕНИЙ - удалять по этому ответу нельзя.')
+        if n_unconf:
+            out('  Что можно сделать: посчитать этим файлам хеши; либо владелец записывает решение «не нужно» '
+                'для папки или для класса (строка «класс: <название>» в решения.tsv).')
     else:
-        out('ОТВЕТ: ДА - все файлы с хешем есть на обоих дисках.')
-    if lost:
-        p = save(f'нельзя удалять, без хеша - {a.disk} {a.folder}'.replace(SEP, ' - '), ('путь', 'размер', 'класс'), sorted(lost))
-        out(f'Файлы без найденной копии: {p}')
+        out(f'ОТВЕТ: ДА - у каждого файла есть подтверждённые копии на {MAIN[0]} и {MAIN[1]}, не считая удаляемого.')
+    tag = f'{a.disk} {folder}'.replace(SEP, ' - ')
     if lack:
-        p = save(f'нельзя удалять - {a.disk} {a.folder}'.replace(SEP, ' - '),
-                 ('путь', 'размер', f'на {MAIN[0]}', f'на {MAIN[1]}', 'SHA-256'), sorted(lack))
-        out(f'Чего не хватает: {p}')
-    out('Учтены описи, журналы скриптов и таблица ручных операций. Удаляет только пользователь.')
+        out(f'Чего не хватает: {save(f"нельзя удалять - {tag}", ("путь", "размер", "на " + MAIN[0], "на " + MAIN[1], "SHA-256"), sorted(lack))}')
+    if unconf_rows:
+        out(f'Файлы без подтверждения: {save(f"нельзя удалять, без подтверждения - {tag}", ("путь", "размер", "класс", "что известно"), sorted(unconf_rows))}')
+    out('Основание: описи, журналы скриптов, таблицы ручных операций и решений; диски не читались. Удаляет только пользователь.')
 
 
 def cmd_mklist(a):
@@ -792,30 +1058,62 @@ def cmd_mklist(a):
     if not a.dry and task.exists() and any(task.iterdir()):
         sys.exit(f'Папка задачи уже есть и не пуста: {task}. Выберите другое имя (--name).')
     decs = decisions_for(a.disk)
+    want = (getattr(a, 'section', None) or '').strip().lower()
+    take_all = getattr(a, 'all', False)
     lines, stat = [], collections.defaultdict(lambda: [0, 0])
-    skipped = collections.Counter()
+    waiting = collections.defaultdict(lambda: [0, 0])      # раздел/отсрочка: файлов, байт - не идут в этот список
+    dropped, weak_there = [0, 0], collections.Counter()
+    waiting_seen = set()
     for prefix in (a.folder or ['']):
         cond, args = prefix_cond('f.path', prefix.rstrip(SEP))
         for t in a.to:
-            q = f'''select f.path, f.size, f.sha from files f where f.disk=? and f.sha is not null and {cond}
-                    and not exists(select 1 from files g where g.sha=f.sha and g.disk=?)'''
-            for path, size, sha in c.execute(q, [a.disk] + args + [t]):
+            q = f"""select f.path, f.size, f.sha,
+                           exists(select 1 from files g where g.sha_exp=f.sha and g.disk=?)
+                    from files f where f.disk=? and f.sha is not null and {cond}
+                    and not exists(select 1 from files g where g.sha=f.sha and g.disk=?)"""
+            for path, size, sha, weak in c.execute(q, [t, a.disk] + args + [t]):
                 v = decision_of(path, decs)
-                if v:
-                    skipped[v] += size
+                if is_drop(v):
+                    dropped[0] += 1; dropped[1] += size
+                    continue
+                if want:
+                    if not v or v.strip().lower() != want:
+                        continue
+                elif v and not take_all:                   # раздел или отсрочка: НЕ на эти диски, но и не «не нужно»
+                    if path not in waiting_seen:           # один файл считается один раз, а не по разу на каждую цель
+                        waiting_seen.add(path)
+                        w = waiting[v]
+                        w[0] += 1; w[1] += size
+                    continue
+                if weak:
+                    weak_there[t] += 1                     # файл там уже лежит, но не подтверждён: копирование его пропустит
                     continue
                 lines.append((t, path, size, 'фото/видео', sha.upper()))
                 stat[t][0] += 1; stat[t][1] += size
     lines = sorted(set(lines))
+
+    def notes():
+        for v, w in sorted(waiting.items(), key=lambda kv: -kv[1][1]):
+            out(f'  ЖДУТ СВОЕГО ДИСКА, решение «{v}»: {w[0]} файлов, {gb(w[1])} ГБ - в этот список не вошли. '
+                f'Собрать их: --section "{v}" --to <диск раздела>')
+        for t, n in weak_there.items():
+            out(f'  на {t} уже лежит неподтверждённая копия у {n} файлов (сверен только размер или со слов) - '
+                f'в список не включены: скрипт их пропустит как «уже есть». Подтвердить можно только чтением.')
+        if dropped[0]:
+            out(f'  по решению «не нужно» пропущено: {dropped[0]} файлов, {gb(dropped[1])} ГБ')
+
     if not lines:
-        out('Копировать нечего: всё с хешем уже есть на указанных дисках (или отложено решениями).')
+        if waiting or weak_there:
+            out('В список для указанных дисков ничего не вошло, но это НЕ значит, что всё сохранено:')
+        else:
+            out('Копировать нечего: у всех файлов с хешем есть подтверждённая копия на указанных дисках.')
+        notes()
         return
     if a.dry:
         out('Пробный расчёт (--dry): папка задачи не создаётся.')
         for t in a.to:
             out(f'  на {t}: {stat[t][0]} файлов, {gb(stat[t][1])} ГБ')
-        for v, size in skipped.items():
-            out(f'  не включено по решению «{v}»: {gb(size)} ГБ')
+        notes()
         return
     serials = {v: k for k, v in serial_map(jobs).items()}
     task.mkdir(parents=True, exist_ok=True)
@@ -830,8 +1128,7 @@ def cmd_mklist(a):
     out(f'Папка задачи: {task}')
     for t in a.to:
         out(f'  на {t}: {stat[t][0]} файлов, {gb(stat[t][1])} ГБ -> ПЕРЕНОС с других дисков\\{a.disk}\\<тот же путь>')
-    for v, size in skipped.items():
-        out(f'  не включено по решению «{v}»: {gb(size)} ГБ')
+    notes()
     out('Запуск - пользователем: двойной щелчок по «Запустить.cmd». Свою папку на цели можно задать третьей колонкой в тома.tsv.')
 
 
@@ -840,7 +1137,14 @@ def cmd_stats(a):
     n, h = c.execute('select count(*), count(sha) from files').fetchone()
     out(f'База: {DB}')
     out(f'Собрана {c.execute("select value from meta where key=?", ("built",)).fetchone()[0]}; файлов {n}, '
-        f'из них с SHA-256 {h}, без хеша {n - h}; носителей {len(jobs)}')
+        f'из них с подтверждённым SHA-256 {h}, без него {n - h}; носителей {len(jobs)}')
+    out('Чем подтверждены записи на главных дисках:')
+    for disk in MAIN:
+        for ev, k, b in c.execute('select ev, count(*), sum(size) from files where disk=? group by ev order by 2 desc', (disk,)):
+            out(f'  {disk}: {EV_NAME.get(ev, ev)}: {k} файлов, {gb(b)} ГБ')
+    bad = c.execute("select count(*) from disks where status not like 'complete'").fetchone()[0]
+    out(f'Описей с замечаниями (не «complete»): {bad} из {len(jobs)}; непрочитанных мест всего: '
+        f'{c.execute("select count(*) from issues").fetchone()[0]}')
     rep = json.loads(c.execute("select value from meta where key='report'").fetchone()[0])
     out('Учтённые журналы скриптов:')
     for x in rep['logs']:
@@ -848,6 +1152,10 @@ def cmd_stats(a):
     out('Журналы, которые программа не умеет читать (не учтены):' if rep['skipped'] else 'Все найденные журналы учтены.')
     for x in rep['skipped']:
         out('  ' + x)
+    if rep.get('old'):
+        out('Не применено, потому что опись диска новее операции:')
+        for x in rep['old']:
+            out('  ' + x)
     out(f'Ручные операции ({MANUAL.name}): {len(rep["manual"])}')
     for x in rep['manual']:
         out('  ' + x)
@@ -859,6 +1167,13 @@ def cmd_stats(a):
 def cmd_recovery_plan(a):
     import recovery_plan
     recovery_plan.cmd_recovery_plan(a, sys.modules[__name__])
+
+
+def cmd_recovery_staging(a):
+    import recovery_staging_audit as audit
+    if not a.cached:
+        audit.main()
+    audit.refine_unhashed()
 
 
 def main():
@@ -881,10 +1196,14 @@ def main():
     p.add_argument('disk'); p.add_argument('--to', nargs='+', default=list(MAIN)); p.add_argument('--name', required=True)
     p.add_argument('--folder', action='append')
     p.add_argument('--dry', action='store_true', help='только посчитать, папку задачи не создавать')
+    p.add_argument('--section', help='собрать только файлы с этим решением, например "раздел: Оцифрованные источники"')
+    p.add_argument('--all', action='store_true', help='не учитывать разделы и отсрочки (решение «не нужно» учитывается всегда)')
     sub.add_parser('build'); sub.add_parser('stats')
     p = sub.add_parser('recovery-plan', help='разбор оглавления восстановленной папки, без чтения содержимого')
     p.add_argument('disk'); p.add_argument('--root', type=Path, required=True)
     p.add_argument('--cached', action='store_true', help='обновить разметку сохранённого оглавления, без обращения к диску')
+    p = sub.add_parser('recovery-staging', help='остаток восстановлений К/Н вне F, 45 и 77; только метаданные')
+    p.add_argument('--cached', action='store_true', help='работать только с сохранёнными оглавлениями')
     a = ap.parse_args()
     t0 = time.time()
     if a.cmd == 'build':
@@ -892,7 +1211,8 @@ def main():
         cmd_stats(a)
     else:
         {'missing': cmd_missing, 'only': lambda x: cmd_missing(x, True), 'cmp': cmd_cmp, 'where': cmd_where,
-         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'recovery-plan': cmd_recovery_plan}[a.cmd](a)
+         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'recovery-plan': cmd_recovery_plan,
+         'recovery-staging': cmd_recovery_staging}[a.cmd](a)
     out(f'[{time.time() - t0:.1f} с]')
 
 
