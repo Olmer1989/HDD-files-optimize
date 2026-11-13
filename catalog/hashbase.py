@@ -2163,15 +2163,23 @@ class ShortAnswer(io.TextIOBase):
             line, self.buf = self.buf.split('\n', 1)
             self.lines.append(line)
             if self.shown < self.head:
-                self.stream.write(line + '\n')
-                self.stream.flush()
+                self.emit(line + '\n')
                 self.shown += 1
             else:
                 self.last.append(line)
         return len(s)
 
+    def emit(self, text=''):
+        """На экран; если вывод оборван (окно закрыто, канал закрыт читателем) - молча дальше, полный ответ в файле."""
+        try:
+            if text:
+                self.stream.write(text)
+            self.stream.flush()
+        except (OSError, ValueError):
+            pass
+
     def flush(self):
-        self.stream.flush()
+        self.emit()
 
     def close_answer(self):
         if self.buf:
@@ -2184,10 +2192,10 @@ class ShortAnswer(io.TextIOBase):
                 where = f'полный ответ: {self.path}'
             except OSError:
                 where = 'полный ответ сохранить не удалось'
-            self.stream.write(f'... ещё {hidden} строк не показано - {where}\n')
+            self.emit(f'... ещё {hidden} строк не показано - {where}\n')
         for line in self.last:
-            self.stream.write(line + '\n')
-        self.stream.flush()
+            self.emit(line + '\n')
+        self.emit()
 
 
 def main():
