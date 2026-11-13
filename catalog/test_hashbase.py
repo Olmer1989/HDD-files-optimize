@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -658,6 +659,84 @@ class ShortAnswerTest(PartialSetup):
             lines = self.run_main(*argv)
             self.assertLessEqual(len(lines), 20, f'{argv}: {len(lines)} строк\n' + '\n'.join(lines))
             self.assertTrue(lines, argv)
+
+
+class MoveOnSourceTest(Base):
+    """Шаблон «Переместить на источнике» и учёт его журнала (логика v2, раздел 5)."""
+
+    def setUp(self):
+        super().setUp()
+        for job in self.scans.glob('*/*'):                     # описи - 2020 год, журналы копирования - 2025
+            for fn in ('inventory.sqlite', 'hashes.sqlite'):
+                os.utime(job / fn, (1580000000, 1580000000))
+        tpl = self.out / '_ШАБЛОН перемещения'
+        tpl.mkdir()
+        real = Path(__file__).resolve().parents[1] / 'Каталог дисков' / '_ШАБЛОН перемещения'
+        for name in ('Переместить.ps1', 'Запустить.cmd'):
+            shutil.copy2(real / name, tpl / name)
+        ok = 'скопирован, размер и SHA-256 совпали'
+        self.task('Копия HDD90', [('HDD90', 'AAAA0090'), ('HDD45', 'AAAA0045'), ('HDD77', 'AAAA0077')],
+                  'Журнал копирования 2025-01-01 00-00-00.tsv', LOG_HEAD,
+                  [('1', 'HDD77', ok, '200', S[2], 'K:\\A\\2.jpg', 'S:\\П\\HDD90\\A\\2.jpg'),
+                   ('2', 'HDD45', ok, '300', S[3], 'K:\\A\\sub\\3.mp4', 'G:\\П\\HDD90\\A\\sub\\3.mp4'),
+                   ('3', 'HDD77', ok, '300', S[3], 'K:\\A\\sub\\3.mp4', 'S:\\П\\HDD90\\A\\sub\\3.mp4'),
+                   ('4', 'HDD45', ok, '400', S[4], 'K:\\B\\4.jpg', 'G:\\П\\HDD90\\B\\4.jpg'),
+                   ('5', 'HDD77', 'уже есть', '400', '', 'K:\\B\\4.jpg', 'S:\\П\\HDD90\\B\\4.jpg')])
+
+    def run_move(self, task, root):
+        proc = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                               str(task / 'Переместить.ps1'), '-TestRoots', f'HDD90={root}'],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout.decode('utf-8', errors='replace'))
+
+    def test_move_after_confirmed_copy(self):
+        self.quiet(hb.cmd_mvlist, NS(disk='HDD90', name='Переложить HDD90', folder=None, dry=False))
+        self.assertIn('Ждут: копия ещё не подтверждена - 1 файлов', self.printed)       # B\4.jpg: на 77 только «уже есть»
+        self.assertIn('Остаются на месте (на 45 и 77 уже были): 1 файлов', self.printed)  # A\1.jpg
+        task = self.out / 'Переложить HDD90'
+        rows = [x.split('\t') for x in (task / 'перемещение.tsv').read_text(encoding='utf-8').splitlines()]
+        self.assertEqual({(r[0], r[3]) for r in rows}, {('A\\2.jpg', 'ПЕРЕНЕСЕНО → только 77'),
+                                                        ('A\\sub\\3.mp4', 'ПЕРЕНЕСЕНО → 45 и 77')})
+        # настоящий шаблон на временной папке вместо диска
+        disk = self.tmp / 'диск HDD90'
+        for rel, size in (('A\\2.jpg', 200), ('A\\sub\\3.mp4', 300), ('A\\1.jpg', 100)):
+            p = disk / rel.replace('\\', '/')
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b'x' * size)
+            os.utime(p, (0, 0))
+        self.run_move(task, disk)
+        self.assertTrue((disk / 'ПЕРЕНЕСЕНО → только 77' / 'A' / '2.jpg').exists())
+        self.assertTrue((disk / 'ПЕРЕНЕСЕНО → 45 и 77' / 'A' / 'sub' / '3.mp4').exists())
+        self.assertFalse((disk / 'A' / '2.jpg').exists())
+        self.assertTrue((disk / 'A' / '1.jpg').exists())                                 # не в списке - на месте
+        self.run_move(task, disk)                                                        # повтор: «уже перемещён»
+        # база приняла журнал: новый путь, тот же хеш и степень; решение по старому пути действует
+        paths = {r[0]: r[1] for r in self.db().execute("select path, ev from files where disk='HDD90'")}
+        self.assertEqual(paths.get('ПЕРЕНЕСЕНО → только 77\\A\\2.jpg'), hb.EV_SCAN)
+        self.assertNotIn('A\\2.jpg', paths)
+        self.decide('HDD90\tA\tраздел: Проба\tрешение по исходному пути')
+        self.assertEqual(hb.decision_of('ПЕРЕНЕСЕНО → только 77\\A\\2.jpg', hb.decisions_for('HDD90')), 'раздел: Проба')
+        self.quiet(hb.cmd_mvlist, NS(disk='HDD90', name='Ещё раз', folder=None, dry=True))
+        self.assertIn('перемещать нечего', self.printed)
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+        self.assertIn('ИТОГ: совпала', self.printed)
+
+    def test_template_refuses_foreign_destination(self):
+        task = self.out / 'Плохой список'
+        task.mkdir()
+        for name in ('Переместить.ps1', 'Запустить.cmd'):
+            shutil.copy2(self.out / '_ШАБЛОН перемещения' / name, task / name)
+        (task / 'тома.tsv').write_text('HDD90\tAAAA0090\n', encoding='utf-8')
+        (task / 'перемещение.tsv').write_text('A\\1.jpg\t100\t\tДругая папка\t\tпроба\n', encoding='utf-8')
+        disk = self.tmp / 'диск'
+        (disk / 'A').mkdir(parents=True)
+        (disk / 'A' / '1.jpg').write_bytes(b'x' * 100)
+        proc = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                               str(task / 'Переместить.ps1'), '-TestRoots', f'HDD90={disk}'],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue((disk / 'A' / '1.jpg').exists())                                 # ничего не тронуто
 
 
 if __name__ == '__main__':

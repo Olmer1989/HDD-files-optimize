@@ -2,6 +2,7 @@
 /Каталог дисков/*
 # the single copy template is code, not private data — keep it in Git
 !/Каталог дисков/_ШАБЛОН копирования/
+!/Каталог дисков/_ШАБЛОН перемещения/
 /Анализ/
 /scanner/disks.json
 /scanner/finalize_initial.py

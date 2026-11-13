@@ -57,7 +57,7 @@ MAIN = ('HDD45', 'HDD77')
 
 def set_root(out_dir):
     """Где лежат база и таблицы поправок (в тестах - временная папка)."""
-    global BASE_DIR, DB, SNAP, MANUAL, DECISIONS, EXCLUSIONS, ANSWERS, TEMPLATE
+    global BASE_DIR, DB, SNAP, MANUAL, DECISIONS, EXCLUSIONS, ANSWERS, TEMPLATE, MOVE_TEMPLATE, TASKS
     BASE_DIR = Path(out_dir) / '_БАЗА'
     DB = BASE_DIR / 'хеши.sqlite'          # рабочая база: снимок описей + поправки
     SNAP = BASE_DIR / 'описи.sqlite'       # снимок описей; пересобирается, только если изменились сами описи
@@ -66,6 +66,16 @@ def set_root(out_dir):
     EXCLUSIONS = BASE_DIR / 'исключения.tsv'   # папки, которые база не учитывает (временные копии владельца)
     ANSWERS = BASE_DIR / 'ответы'
     TEMPLATE = Path(out_dir) / '_ШАБЛОН копирования'
+    MOVE_TEMPLATE = Path(out_dir) / '_ШАБЛОН перемещения'
+    TASKS = Path(out_dir).parent / 'Запускаемые скрипты'   # готовые задания владельца (правило 13.11.2026)
+
+
+def journal_paths():
+    """Журналы скриптов: в папках задач «Каталог дисков\\<задача>» и «Запускаемые скрипты\\<задание>»."""
+    res = []
+    for root in (bp.OUT_DIR, TASKS):
+        res += glob.glob(str(Path(root) / '*' / 'Журнал*.tsv'))
+    return res
 
 
 set_root(bp.OUT_DIR)
@@ -352,6 +362,27 @@ def apply_log(c, log, jobs, serials, report, seen, rows=None, start=0):
                         old += 1
                         continue
                     removed += c.execute('delete from files where disk=? and path=?', (letters[l], r)).rowcount
+    elif head[:6] == ['время', 'результат', 'размер', 'sha-256', 'откуда', 'куда']:    # шаблон «Переместить на источнике»
+        vols = read_tsv(task / 'тома.tsv') if (task / 'тома.tsv').exists() else []
+        disk = serials.get(vols[0][1].strip().upper()) if vols and len(vols[0]) >= 2 else None
+        if not disk:
+            report['warn'].add(f'{name}: диск-источник не опознан по тома.tsv - журнал перемещения не учтён')
+            return
+        for f in body:
+            if len(f) < 6 or f[1] not in ('перемещён', 'уже перемещён'):
+                continue
+            ra, rb = moved_rel(f[4], f[5])
+            if ra is None:
+                continue
+            if not newer(disk, ra) or not newer(disk, rb):
+                old += 1
+                continue
+            got = lookup(disk, ra)
+            if not got:
+                continue                                # уже учтено (повторный запуск) или файла нет в базе
+            c.execute('delete from files where disk=? and path=?', (disk, ra))
+            put_row(c, disk, rb, got[1], got[0], got[2], got[4], got[3], origin)     # тот же файл на том же диске
+            moved += 1
     elif task.name in FOLDER_MOVES and head[:3] == ['время', 'результат', 'папка']:
         disk, src_base, dst_base = FOLDER_MOVES[task.name]
         for f in body:
@@ -452,7 +483,7 @@ def apply_manual(c, report, seen):
 def event_stream():
     """Все поправки к описям одним потоком по времени: (время, порядок, имя, вид, данные).
     Журнал скрипта - время запуска; частичный скан - время его описи; ручная операция - конец её дня."""
-    ev = [(log_time(p), 0, p, 'log', p) for p in glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv'))]
+    ev = [(log_time(p), 0, p, 'log', p) for p in journal_paths()]
     ev += [(pj['time'], 1, str(pj['dir']), 'partial', pj) for pj in find_partials()]
     ev += [(manual_time(f[0]), 2, f'{n:09d}', 'manual', (n, f)) for n, f in manual_rows()]
     return sorted(ev, key=lambda e: e[:3])
@@ -897,7 +928,7 @@ def discover(jobs):
         mods[f'частичный скан: {pj["dir"].parent.name}\\{pj["name"]}'] = dict(
             kind='частичный скан', time=pj['time'], size=0, mtime_ns=0,
             checksum=sha1(json.dumps(sig, ensure_ascii=False).encode()), data=pj)
-    for p in glob.glob(str(bp.OUT_DIR / '*' / 'Журнал*.tsv')):
+    for p in journal_paths():
         size, mt = stat_sig(p)
         mods[f'журнал: {Path(p).parent.name}\\{Path(p).name}'] = dict(kind='журнал', time=log_time(p), size=size,
                                                                       mtime_ns=mt, checksum=None, data=p)
@@ -1268,7 +1299,37 @@ def class_rules(disk):
     return res
 
 
+MOVED_PREFIX = 'ПЕРЕНЕСЕНО → '        # папки на источнике после копирования (логика v2, раздел 5)
+TRASH_DIR = 'МУСОР'
+MOVED_FOLDER = {frozenset(MAIN): MOVED_PREFIX + '45 и 77', frozenset([MAIN[0]]): MOVED_PREFIX + 'только 45',
+                frozenset([MAIN[1]]): MOVED_PREFIX + 'только 77'}
+
+
+def is_moved_dir(part):
+    return part.startswith(MOVED_PREFIX) or part == TRASH_DIR
+
+
+def original_path(path):
+    """Путь файла до перемещения на источнике: «ПЕРЕНЕСЕНО → только 77\\A\\1.jpg» -> «A\\1.jpg»."""
+    head, _, tail = path.partition(SEP)
+    return tail if tail and is_moved_dir(head) else path
+
+
+def moved_rel(src, dst):
+    """Строка журнала перемещения -> (путь от корня до, путь от корня после). Корень находится по папке
+    «ПЕРЕНЕСЕНО → …» или «МУСОР» в пути назначения, поэтому годится любая буква диска и тестовая папка."""
+    parts = dst.split(SEP)
+    for i, part in enumerate(parts):
+        if is_moved_dir(part):
+            root = SEP.join(parts[:i])
+            rel = SEP.join(parts[i + 1:])
+            if rel and src == root + SEP + rel:
+                return rel, part + SEP + rel
+    return None, None
+
+
 def decision_of(path, decs):
+    path = original_path(path)                # решения привязаны к исходному пути и действуют после перемещения
     for p, verdict in decs:
         if not p or path == p or path.startswith(p + SEP):
             return verdict
@@ -1734,7 +1795,7 @@ def cmd_mklist(a):
     check_disk(c, a.disk)
     for t in a.to:
         check_disk(c, t)
-    task = bp.OUT_DIR / a.name
+    task = (TASKS if getattr(a, 'task_root', None) == 'scripts' else bp.OUT_DIR) / a.name
     if not a.dry and task.exists() and any(task.iterdir()):
         sys.exit(f'Папка задачи уже есть и не пуста: {task}. Выберите другое имя (--name).')
     decs = decisions_for(a.disk)
@@ -1902,6 +1963,105 @@ def cmd_find(a):
     out(f'Все найденные папки с разбивкой по типам: {path}')
 
 
+def copied_from(disk, jobs):
+    """Что журналы единого шаблона скопировали С этого диска: путь источника -> {диск-цель: путь назначения}.
+    Учитываются строки «скопирован…» и «уже есть»; подтверждена ли копия, решает база (степень S или C)."""
+    serials = serial_map(jobs)
+    res = collections.defaultdict(dict)
+    for log in sorted(journal_paths(), key=log_time):
+        task = Path(log).parent
+        if not (task / 'тома.tsv').exists():
+            continue
+        vols = [f for f in read_tsv(task / 'тома.tsv') if len(f) >= 2]
+        names = {f[0].strip(): serials.get(f[1].strip().upper()) for f in vols}
+        if not vols or names.get(vols[0][0].strip()) != disk:
+            continue
+        rows = read_tsv(log)
+        head = [h.strip().lower() for h in rows[0]] if rows else []
+        if not ('цель' in head and 'куда' in head):
+            continue
+        i_t, i_r, i_src, i_dst = (head.index(x) for x in ('цель', 'результат', 'источник', 'куда'))
+        for f in rows[1:]:
+            if len(f) <= i_dst or not (f[i_r].startswith('скопирован') or f[i_r] == 'уже есть'):
+                continue
+            t = names.get(f[i_t]) or (f[i_t] if f[i_t] in jobs else None)
+            if t:
+                res[rel_of(f[i_src])[1]][t] = rel_of(f[i_dst])[1]
+    return res
+
+
+def cmd_mvlist(a):
+    """Задание «Переместить на источнике»: файлы, у которых журнал копирования подтвердил копии, перекладываются
+    внутри своего диска в «ПЕРЕНЕСЕНО → 45 и 77 / только 45 / только 77» (логика v2, разделы 4-5)."""
+    c, jobs = connect()
+    check_disk(c, a.disk)
+    copies = copied_from(a.disk, jobs)
+    decs = decisions_for(a.disk)
+    lines, stat = [], collections.defaultdict(lambda: [0, 0])
+    wait, stay, notyet, other = [0, 0], [0, 0], [0, 0], [0, 0]
+    for prefix in (a.folder or ['']):
+        cond, args = prefix_cond('f.path', prefix.rstrip(SEP))
+        q = f"""select f.path, f.size, f.sha, f.mtime, coalesce(p.e45 in ('S','C'), 0), coalesce(p.e77 in ('S','C'), 0)
+                from files f join presence p on p.sha=f.sha where f.disk=? and f.sha is not null and {cond}"""
+        for path, size, sha, mt, on45, on77 in c.execute(q, [a.disk] + args):
+            if is_moved_dir(path.split(SEP, 1)[0]) or decision_of(path, decs):
+                continue                                  # уже перемещён; раздел, отсрочка или «не нужно» - не здесь
+            done = copies.get(path, {})
+            to_main = {t for t in done if t in MAIN}
+            if not done:
+                k = stay if (on45 and on77) else notyet   # на 45 и 77 уже было - остаётся на месте; иначе ещё не копировали
+            elif not to_main:
+                k = other                                 # копировали только на другие диски - их проход позже
+            else:
+                ok = all(c.execute("select 1 from files where disk=? and path=? and sha=? and ev in ('S','C')",
+                                   (t, done[t], sha)).fetchone() for t in to_main)
+                if not (ok and on45 and on77):
+                    k = wait                              # копия не подтверждена (размер, «уже есть») или нет второй
+                else:
+                    folder = MOVED_FOLDER[frozenset(to_main)]
+                    lines.append((path, size, mt if mt is not None else '', folder, sha.upper(),
+                                  'копия подтверждена: ' + ', '.join(sorted(to_main))))
+                    stat[folder][0] += 1; stat[folder][1] += size
+                    continue
+            k[0] += 1; k[1] += size
+    lines.sort()
+    out(f'{a.disk}: что переложить внутри диска после копирования (только фото и видео с SHA-256)')
+    for folder, (n, b) in sorted(stat.items()):
+        out(f'  -> {folder}: {n} файлов, {gb(b)} ГБ')
+    if not lines:
+        out('  перемещать нечего')
+    out(f'Ждут: копия ещё не подтверждена - {wait[0]} файлов ({gb(wait[1])} ГБ); ещё не копировались - {notyet[0]} '
+        f'({gb(notyet[1])} ГБ); копировались только на другие диски - {other[0]}.')
+    out(f'Остаются на месте (на 45 и 77 уже были): {stay[0]} файлов, {gb(stay[1])} ГБ.')
+    if not lines or a.dry:
+        if a.dry and lines:
+            out('Пробный расчёт (--dry): папка задания не создаётся.')
+        return
+    task = (TASKS if getattr(a, 'task_root', None) == 'scripts' else bp.OUT_DIR) / a.name
+    if task.exists() and any(task.iterdir()):
+        sys.exit(f'Папка задания уже есть и не пуста: {task}. Выберите другое имя (--name).')
+    task.mkdir(parents=True, exist_ok=True)
+    serial = {v: k for k, v in serial_map(jobs).items()}.get(a.disk, 'НЕТ_СЕРИЙНОГО_НОМЕРА')
+    with io.open(task / 'тома.tsv', 'w', encoding='utf-8', newline='\n') as f:
+        f.write(f'{a.disk}\t{serial}\n')
+    with io.open(task / 'перемещение.tsv', 'w', encoding='utf-8', newline='\n') as f:
+        for r in lines:
+            f.write('\t'.join(map(str, r)) + '\n')
+    for name in ('Переместить.ps1', 'Запустить.cmd'):
+        shutil.copy2(MOVE_TEMPLATE / name, task / name)
+    (task / 'Как запустить.txt').write_text(
+        f'Задание: переложить внутри диска {a.disk} файлы, копии которых подтверждены журналами копирования.\n'
+        f'Файлов: {len(lines)}, {gb(sum(r[1] for r in lines))} ГБ. Куда: ' +
+        '; '.join(f'{k} - {v[0]} файлов' for k, v in sorted(stat.items())) + '.\n'
+        'Ничего не удаляется и не перезаписывается: это переименование внутри того же диска.\n\n'
+        f'1. Подключите диск {a.disk} (букву скрипт найдёт сам по серийному номеру).\n'
+        '2. Двойной щелчок по «Запустить.cmd», проверьте сводку, введите «да».\n'
+        '3. Q - остановиться после текущего файла; повторный запуск продолжит.\n'
+        '4. Журнал «Журнал перемещения <дата>.tsv» появится здесь; программа учтёт его сама.\n', encoding='utf-8-sig')
+    out(f'Папка задания: {task}')
+    out('Запускает владелец: «Запустить.cmd» в этой папке. Перед запуском список можно пересобрать - он всегда по свежей базе.')
+
+
 def cmd_stats(a):
     c, jobs = connect()
     n, h = c.execute('select count(*), count(sha) from files').fetchone()
@@ -2052,6 +2212,12 @@ def main():
     p.add_argument('--dry', action='store_true', help='только посчитать, папку задачи не создавать')
     p.add_argument('--section', help='собрать только файлы с этим решением, например "раздел: Оцифрованные источники"')
     p.add_argument('--all', action='store_true', help='не учитывать разделы и отсрочки (решение «не нужно» учитывается всегда)')
+    p.set_defaults(task_root='scripts')
+    p = sub.add_parser('mvlist', help='задание «Переместить на источнике» по подтверждённым копиям на 45 и 77')
+    p.add_argument('disk'); p.add_argument('--name', required=True)
+    p.add_argument('--folder', action='append')
+    p.add_argument('--dry', action='store_true', help='только посчитать, папку задания не создавать')
+    p.set_defaults(task_root='scripts')
     sub.add_parser('build', help='применить новые модули (журналы, сканы, ручные операции) и показать сводку')
     sub.add_parser('stats', help='что в базе и какие модули учтены')
     p = sub.add_parser('folders', help='сколько занимают папка и её подпапки, по типам файлов')
@@ -2091,7 +2257,7 @@ def run_command(a):
         cmd_stats(a)
     else:
         {'missing': cmd_missing, 'only': lambda x: cmd_missing(x, True), 'cmp': cmd_cmp, 'where': cmd_where,
-         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'rebuild': cmd_rebuild, 'folders': cmd_folders, 'find': cmd_find, 'recovery-plan': cmd_recovery_plan,
+         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'rebuild': cmd_rebuild, 'folders': cmd_folders, 'find': cmd_find, 'mvlist': cmd_mvlist, 'recovery-plan': cmd_recovery_plan,
          'recovery-staging': cmd_recovery_staging, 'family-plan': cmd_family_plan, 'family-check': cmd_family_check}[a.cmd](a)
 
 
