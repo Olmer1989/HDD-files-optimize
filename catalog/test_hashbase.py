@@ -735,6 +735,25 @@ class MoveOnSourceTest(Base):
             '\tG:\\X\\2.jpg\tZ:\\ПЕРЕНОС с других дисков\\HDD90\\2.jpg\n', encoding='utf-8-sig')
         self.assertEqual(self.row('HDD91', 'ПЕРЕНОС с других дисков\\HDD90\\2.jpg')[:2], (S[2], hb.EV_COPY))
 
+    def test_whole_folder_takes_all_files(self):
+        # «папка целиком»: и фото/видео, и файлы без хеша; решения владельца не применяются
+        self.decide('HDD90\tA\\sub\tне нужно\tпроба')
+        with self.assertRaises(SystemExit):                          # без --folder - отказ
+            self.quiet(hb.cmd_mklist, NS(disk='HDD90', to=['HDD91'], name='Целиком0', folder=None, dry=True, whole=True))
+        with self.assertRaises(SystemExit):                          # опечатка в папке - отказ
+            self.quiet(hb.cmd_mklist, NS(disk='HDD90', to=['HDD91'], name='Целиком0', folder=['Нет такой'], dry=True, whole=True))
+        self.quiet(hb.cmd_mklist, NS(disk='HDD90', to=['HDD91'], name='Целиком', folder=['A'], dry=False, whole=True))
+        self.assertIn('под решениями владельца', self.printed)
+        rows = [x.split('\t') for x in (self.out / 'Целиком' / 'список.tsv').read_text(encoding='utf-8').splitlines()]
+        want = {r[0] for r in self.db().execute(
+            "select path from files f where disk='HDD90' and path like 'A\\%' "
+            "and (sha is null or not exists(select 1 from files g where g.sha=f.sha and g.disk='HDD91'))")}
+        self.assertEqual({r[1] for r in rows}, want)
+        self.assertIn('A\\заметки.doc', want)                        # файл без хеша вошёл
+        self.assertTrue(any(p.startswith('A\\sub\\') for p in want))  # «не нужно» при --whole не отбрасывает
+        self.assertTrue(all(len(r) == 5 for r in rows))
+        self.assertTrue(all((r[3] == 'без хеша') == (r[4] == '') for r in rows))
+
     def test_template_refuses_foreign_destination(self):
         task = self.out / 'Плохой список'
         task.mkdir()

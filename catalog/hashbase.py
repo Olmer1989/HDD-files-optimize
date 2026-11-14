@@ -1819,8 +1819,26 @@ def cmd_mklist(a):
     src_folder = (getattr(a, 'source_folder', None) or '').strip(SEP)
     src_name = getattr(a, 'as_name', None) or a.disk
     cut = len(src_folder) + 1 if src_folder else 0
+    whole = getattr(a, 'whole', False)
+    if whole and not (a.folder or src_folder):
+        sys.exit('--whole копирует папки целиком: укажите их через --folder "папка" (можно несколько раз).')
+    decided = [0, 0]                                       # --whole: файлов под решениями владельца (всё равно идут)
     for prefix in ([src_folder] if src_folder else (a.folder or [''])):
         cond, args = prefix_cond('f.path', prefix.rstrip(SEP))
+        if whole:
+            # Папка целиком: все файлы из описи, с хешем и без. Решения не применяются - владелец сам назвал папки.
+            # Пропускается только фото/видео, у которого на цели уже есть подтверждённая копия (S/C) по SHA-256.
+            if not c.execute(f'select 1 from files f where f.disk=? and {cond} limit 1', [a.disk] + args).fetchone():
+                sys.exit(f'В базе нет файлов в {a.disk}\\{prefix} (проверьте написание пути).')
+            for t in a.to:
+                q = f"""select f.path, f.size, f.sha from files f where f.disk=? and {cond}
+                        and (f.sha is null or not exists(select 1 from files g where g.sha=f.sha and g.disk=?))"""
+                for path, size, sha in c.execute(q, [a.disk] + args + [t]):
+                    if t == a.to[0] and decision_of(path, decs):
+                        decided[0] += 1; decided[1] += size
+                    lines.append((t, path[cut:], size, 'фото/видео' if sha else 'без хеша', (sha or '').upper()))
+                    stat[t][0] += 1; stat[t][1] += size
+            continue
         for t in a.to:
             q = f"""select f.path, f.size, f.sha,
                            exists(select 1 from files g where g.sha_exp=f.sha and g.disk=?)
@@ -1856,6 +1874,12 @@ def cmd_mklist(a):
                 f'в список не включены: скрипт их пропустит как «уже есть». Подтвердить можно только чтением.')
         if dropped[0]:
             out(f'  по решению «не нужно» пропущено: {dropped[0]} файлов, {gb(dropped[1])} ГБ')
+        if decided[0]:
+            out(f'  папки целиком (--whole): {decided[0]} файлов, {gb(decided[1])} ГБ под решениями владельца - '
+                f'включены, решения при этом режиме не применяются')
+        if whole:
+            out('  файлы, появившиеся на диске после описи, в список не попали; изменённые после описи скрипт '
+                'отметит ошибкой и не скопирует. Ключи (*.pem, secret.key) сканер не описывает - их в списке нет.')
 
     if not lines:
         if waiting or weak_there:
@@ -2302,6 +2326,8 @@ def main():
     p.add_argument('--all', action='store_true', help='не учитывать разделы и отсрочки (решение «не нужно» учитывается всегда)')
     p.add_argument('--source-folder', help='копировать из этой папки диска; путь в списке - от неё (шаблон 2.2)')
     p.add_argument('--as', dest='as_name', help='имя источника в тома.tsv и в папке на цели (по умолчанию - номер диска)')
+    p.add_argument('--whole', action='store_true',
+                   help='папки (--folder) целиком: все файлы из описи, с хешем и без; решения не применяются')
     p.set_defaults(task_root='scripts')
     p = sub.add_parser('mvlist', help='задание «Переместить на источнике» по подтверждённым копиям на 45 и 77')
     p.add_argument('disk'); p.add_argument('--name', required=True)
