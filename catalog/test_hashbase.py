@@ -96,8 +96,7 @@ class Base(unittest.TestCase):
         (tpl / 'Запустить.cmd').write_text('rem', encoding='utf-8')
 
     def tearDown(self):
-        if hb._last is not None:
-            hb._last.close(); hb._last = None
+        hb.close_last()
         bp.SCAN_ROOTS, bp.OUT_DIR = self.saved
         hb.set_root(bp.OUT_DIR)
         shutil.rmtree(self.tmp, ignore_errors=True)

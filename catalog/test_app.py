@@ -3,6 +3,7 @@
 Запуск из корня проекта:  py -m unittest catalog\\test_app.py
 """
 import os
+import sqlite3
 import sys
 import time
 import unittest
@@ -86,7 +87,16 @@ class WindowTest(Base):
                   ('время', 'цель', 'результат', 'размер', 'SHA-256 прочитанного', 'источник', 'куда'),
                   [('1', 'HDD77', 'скопирован, размер и SHA-256 совпали', '200', '0' * 63 + '2', 'K:\\A\\2.jpg', 'S:\\П\\2.jpg')])
         self.w.check_sources()
-        self.assertTrue(wait(lambda: self.row('HDD77', 'П\\2.jpg') is not None and not self.w.updating))
+        # строку читаем только на чтение: connect() сам применил бы журнал, и окну было бы нечего применять
+        def applied():
+            if self.w.updating or not hb.DB.exists():
+                return False
+            c = sqlite3.connect(f'file:{hb.DB.as_posix()}?mode=ro', uri=True)
+            try:
+                return c.execute('select 1 from files where disk=? and path=?', ('HDD77', 'П\\2.jpg')).fetchone() is not None
+            finally:
+                c.close()
+        self.assertTrue(wait(applied))
         self.assertIn('Применены новые модули', self.w.statusBar().currentMessage())
 
 

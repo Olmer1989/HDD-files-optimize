@@ -50,6 +50,24 @@ class ServiceTest(Base):
             sv.manual_preview('01.01.2099', 'удалено', 'HDD92', 'Фото')   # файлов уже нет - и строка уже есть
         self.assertEqual(self.manual_count(), 1)
 
+    def test_backup_is_made_before_write(self):
+        self.db()
+        before = hb.MANUAL.read_bytes()
+        self.quiet(sv.add_manual, '01.01.2099', 'удалено', 'HDD92', 'Фото')
+        copies = list((hb.BASE_DIR / 'архив таблиц').glob('*'))
+        self.assertTrue(copies)
+        self.assertIn(before, [p.read_bytes() for p in copies])          # в архиве - таблица до записи
+
+    def test_refusal_leaves_table_byte_for_byte(self):
+        self.db()
+        before = hb.MANUAL.read_bytes()
+        for bad in (('2099-01-01', 'удалено', 'HDD92', 'Фото'),          # дата не в виде ДД.ММ.ГГГГ
+                    ('01.01.2099', 'удалено', 'HDD92', 'Нет такой папки'),  # пустой путь
+                    ('01.01.2099', 'удалено', 'HDD00', 'Фото')):         # нет диска
+            with self.assertRaises(sv.Refused):
+                sv.add_manual(*bad)
+        self.assertEqual(hb.MANUAL.read_bytes(), before)
+
     def test_saved_but_not_applied_is_applied_once_later(self):
         self.db()
         with sv.TableLock():                                             # «сбой» после записи, до применения
