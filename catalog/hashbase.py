@@ -206,7 +206,7 @@ def ensure_tables():
 def read_exclusions():
     """Папки, которые база не учитывает: диск -> [папка]. Строка заголовка необязательна."""
     res = collections.defaultdict(list)
-    for f in read_tsv(EXCLUSIONS):
+    for f in read_table(EXCLUSIONS):
         f = [x.strip() for x in f] + ['', '']
         if not f[0] or f[0].lower() == 'диск' or not f[1].strip(SEP):
             continue
@@ -245,6 +245,17 @@ class Seen:
 def read_tsv(path):
     with io.open(path, encoding='utf-8-sig', newline='') as f:
         return [r for r in csv.reader(f, delimiter='\t', quoting=csv.QUOTE_NONE) if r and any(x.strip() for x in r)]
+
+
+def read_table(path):
+    """Таблица владельца (ручные операции, решения, исключения): только ЦЕЛЫЕ строки. Строка, которую
+    кто-то ещё дописывает (нет перевода строки), не читается: обрезанный путь «Фото» вместо «Фотоархив»
+    задел бы чужую ветку."""
+    try:
+        data = Path(path).read_bytes()
+    except FileNotFoundError:
+        return []
+    return tsv_rows(data[:data.rfind(b'\n') + 1])
 
 
 def serial_map(jobs):
@@ -417,7 +428,7 @@ def manual_time(date):
 
 def manual_rows():
     """Строки таблицы ручных операций: (номер строки в файле, поля)."""
-    return [(line_no, [x.strip() for x in f] + [''] * 7) for line_no, f in enumerate(read_tsv(MANUAL)[1:], 2)]
+    return [(line_no, [x.strip() for x in f] + [''] * 7) for line_no, f in enumerate(read_table(MANUAL)[1:], 2)]
 
 
 def apply_manual_row(c, line_no, f, report, seen):
@@ -935,7 +946,7 @@ def discover(jobs):
     for n, f in manual_rows():
         mods[f'ручная операция: строка {n:05d}'] = dict(kind='ручная операция', time=manual_time(f[0]), size=0, mtime_ns=0,
                                                        checksum=sha1('\t'.join(f).strip().encode()), data=(n, f))
-    for n, f in enumerate(read_tsv(EXCLUSIONS), 1):
+    for n, f in enumerate(read_table(EXCLUSIONS), 1):
         f = [x.strip() for x in f] + ['', '']
         if f[0] and f[0].lower() != 'диск' and f[1].strip(SEP):
             mods[f'исключение: строка {n:05d}'] = dict(kind='исключение', time=0, size=0, mtime_ns=0,
@@ -1282,7 +1293,7 @@ def is_drop(verdict):
 def decisions_for(disk):
     """Решения по путям для диска (строки с диском «*» действуют на все диски)."""
     res = []
-    for f in read_tsv(DECISIONS)[1:]:
+    for f in read_table(DECISIONS)[1:]:
         f = [x.strip() for x in f] + [''] * 4
         if f[0] in (disk, '*') and f[2] and not f[1].lower().startswith('класс:'):
             res.append((f[1].rstrip(SEP), f[2]))
@@ -1292,7 +1303,7 @@ def decisions_for(disk):
 def class_rules(disk):
     """Решения владельца по целому классу файлов: путь вида «класс: служебные и временные»."""
     res = {}
-    for f in read_tsv(DECISIONS)[1:]:
+    for f in read_table(DECISIONS)[1:]:
         f = [x.strip() for x in f] + [''] * 4
         if f[0] in (disk, '*') and f[2] and f[1].lower().startswith('класс:'):
             res[f[1].split(':', 1)[1].strip().lower()] = f[2]
@@ -2067,6 +2078,70 @@ def cmd_mvlist(a):
     out('Запускает владелец: «Запустить.cmd» в этой папке. Перед запуском список можно пересобрать - он всегда по свежей базе.')
 
 
+def owner_write(preview, write, a):
+    """Предпросмотр по умолчанию; запись - только с --yes. Всё - через service (единый путь записи)."""
+    import service as sv
+    try:
+        pv = write() if a.yes else preview()
+    except sv.Refused as e:
+        out('НЕ ЗАПИСАНО: ' + str(e))
+        raise SystemExit(1)
+    for x in pv['lines']:
+        out(x)
+    if a.yes:
+        out(f'Записано: строка {pv["line"]}. Копия таблицы до записи - в «_БАЗА\\архив таблиц».')
+    else:
+        out('Это предпросмотр, ничего не записано. Записать: та же команда с --yes')
+
+
+def cmd_manual(a):
+    import service as sv
+    args = (a.date, a.action, a.disk, a.path, a.disk2 or '', a.path2 or '')
+    owner_write(lambda: sv.manual_preview(*args), lambda: sv.add_manual(*args, note=a.note or ''), a)
+
+
+def cmd_decide(a):
+    import service as sv
+    owner_write(lambda: sv.decision_preview(a.disk, a.path, a.verdict),
+                lambda: sv.add_decision(a.disk, a.path, a.verdict, a.note or ''), a)
+
+
+def cmd_exclude(a):
+    import service as sv
+    owner_write(lambda: sv.exclusion_preview(a.disk, a.path), lambda: sv.add_exclusion(a.disk, a.path, a.note or ''), a)
+
+
+def cmd_fix_manual(a):
+    import service as sv
+    rows = dict(manual_rows())
+    if a.line not in rows:
+        out(f'Строки {a.line} в «{MANUAL.name}» нет.')
+        raise SystemExit(1)
+    old = rows[a.line]
+    out('Было: ' + ' | '.join(x for x in old[:6] if x))
+    new = [a.date, a.action, a.disk, a.path, a.disk2 or '', a.path2 or '', old[6]]
+    out('Станет: ' + ' | '.join(x for x in new[:6] if x))
+    if not a.yes:
+        out('Это предпросмотр. Исправить: та же команда с --yes (база соберётся заново, несколько минут).')
+        return
+    try:
+        sv.fix_manual(a.line, new, a.reason)
+    except sv.Refused as e:
+        out('НЕ ИСПРАВЛЕНО: ' + str(e))
+        raise SystemExit(1)
+    out('Исправлено, причина записана в комментарий строки; база собрана заново.')
+
+
+def cmd_tasks(a):
+    import service as sv
+    rows = sv.tasks()
+    if not rows:
+        out(f'Заданий нет в {TASKS}')
+        return
+    table(('задание', 'вид', 'состояние', 'строк', 'обработано', 'ошибок'),
+          [(r['task'][:50], r['kind'], r['state'], r['total'], r['done'], r['errors']) for r in rows], limit=15)
+
+
 def cmd_stats(a):
     c, jobs = connect()
     n, h = c.execute('select count(*), count(sha) from files').fetchone()
@@ -2096,7 +2171,7 @@ def cmd_stats(a):
         out(f'Частичные сканы папок: {len(rep["partial"])} папок, файлов {tot["файлов"]}; стало S {conf}, новые {tot["новые"]}, '
             f'исчезли {tot["исчезли"]}, хеш не совпал {tot["хеш не совпал"]}, пропущено по исключениям {tot["исключено"]}')
     out(f'Исключённых папок: {sum(len(v) for v in read_exclusions().values())}; ручных операций: {len(rep["manual"])}; '
-        f'решений: {len(read_tsv(DECISIONS)) - 1}')
+        f'решений: {len(read_table(DECISIONS)) - 1}')
     warn = sorted(rep['warn'])
     for x in warn[:3]:
         out('ВНИМАНИЕ: ' + x)
@@ -2233,6 +2308,19 @@ def main():
     p.add_argument('--folder', action='append')
     p.add_argument('--dry', action='store_true', help='только посчитать, папку задания не создавать')
     p.set_defaults(task_root='scripts')
+    for name, hlp in (('manual', 'записать, что владелец сделал в Проводнике'), ('fix-manual', 'исправить ошибочную строку ручных операций')):
+        p = sub.add_parser(name, help=hlp)
+        if name == 'fix-manual':
+            p.add_argument('line', type=int); p.add_argument('--reason', required=True)
+        p.add_argument('date'); p.add_argument('action', choices=['удалено', 'скопировано', 'перемещено'])
+        p.add_argument('disk'); p.add_argument('path'); p.add_argument('disk2', nargs='?'); p.add_argument('path2', nargs='?')
+        p.add_argument('--note'); p.add_argument('--yes', action='store_true', help='записать (без него - только предпросмотр)')
+    p = sub.add_parser('decide', help='записать решение владельца по папке')
+    p.add_argument('disk'); p.add_argument('path'); p.add_argument('verdict'); p.add_argument('--note')
+    p.add_argument('--yes', action='store_true')
+    p = sub.add_parser('exclude', help='папка, которую база не учитывает (временная копия)')
+    p.add_argument('disk'); p.add_argument('path'); p.add_argument('--note'); p.add_argument('--yes', action='store_true')
+    sub.add_parser('tasks', help='задания в «Запускаемые скрипты» и их состояние')
     sub.add_parser('build', help='применить новые модули (журналы, сканы, ручные операции) и показать сводку')
     sub.add_parser('stats', help='что в базе и какие модули учтены')
     p = sub.add_parser('folders', help='сколько занимают папка и её подпапки, по типам файлов')
@@ -2272,7 +2360,7 @@ def run_command(a):
         cmd_stats(a)
     else:
         {'missing': cmd_missing, 'only': lambda x: cmd_missing(x, True), 'cmp': cmd_cmp, 'where': cmd_where,
-         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'rebuild': cmd_rebuild, 'folders': cmd_folders, 'find': cmd_find, 'mvlist': cmd_mvlist, 'recovery-plan': cmd_recovery_plan,
+         'candel': cmd_candel, 'mklist': cmd_mklist, 'stats': cmd_stats, 'rebuild': cmd_rebuild, 'folders': cmd_folders, 'find': cmd_find, 'mvlist': cmd_mvlist, 'manual': cmd_manual, 'fix-manual': cmd_fix_manual, 'decide': cmd_decide, 'exclude': cmd_exclude, 'tasks': cmd_tasks, 'recovery-plan': cmd_recovery_plan,
          'recovery-staging': cmd_recovery_staging, 'family-plan': cmd_family_plan, 'family-check': cmd_family_check}[a.cmd](a)
 
 
