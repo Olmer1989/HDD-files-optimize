@@ -1805,7 +1805,10 @@ def cmd_mklist(a):
     waiting = collections.defaultdict(lambda: [0, 0])      # раздел/отсрочка: файлов, байт - не идут в этот список
     dropped, weak_there = [0, 0], collections.Counter()
     waiting_seen = set()
-    for prefix in (a.folder or ['']):
+    src_folder = (getattr(a, 'source_folder', None) or '').strip(SEP)
+    src_name = getattr(a, 'as_name', None) or a.disk
+    cut = len(src_folder) + 1 if src_folder else 0
+    for prefix in ([src_folder] if src_folder else (a.folder or [''])):
         cond, args = prefix_cond('f.path', prefix.rstrip(SEP))
         for t in a.to:
             q = f"""select f.path, f.size, f.sha,
@@ -1829,7 +1832,7 @@ def cmd_mklist(a):
                 if weak:
                     weak_there[t] += 1                     # файл там уже лежит, но не подтверждён: копирование его пропустит
                     continue
-                lines.append((t, path, size, 'фото/видео', sha.upper()))
+                lines.append((t, path[cut:], size, 'фото/видео', sha.upper()))
                 stat[t][0] += 1; stat[t][1] += size
     lines = sorted(set(lines))
 
@@ -1862,13 +1865,15 @@ def cmd_mklist(a):
         for r in lines:
             f.write('\t'.join(map(str, r)) + '\n')
     with io.open(task / 'тома.tsv', 'w', encoding='utf-8', newline='\n') as f:
-        for d in [a.disk] + list(a.to):
+        f.write(f'{src_name}\t{serials.get(a.disk, "НЕТ_СЕРИЙНОГО_НОМЕРА")}' + (f'\t{src_folder}' if src_folder else '') + '\n')
+        for d in a.to:
             f.write(f'{d}\t{serials.get(d, "НЕТ_СЕРИЙНОГО_НОМЕРА")}\n')
     for name in ('Копировать.ps1', 'Запустить.cmd'):
         shutil.copy2(TEMPLATE / name, task / name)
     out(f'Папка задачи: {task}')
     for t in a.to:
-        out(f'  на {t}: {stat[t][0]} файлов, {gb(stat[t][1])} ГБ -> ПЕРЕНОС с других дисков\\{a.disk}\\<тот же путь>')
+        out(f'  на {t}: {stat[t][0]} файлов, {gb(stat[t][1])} ГБ -> ПЕРЕНОС с других дисков\\{src_name}\\<тот же путь>'
+            + (f' (источник - папка {a.disk}\\{src_folder})' if src_folder else ''))
     notes()
     out('Запуск - пользователем: двойной щелчок по «Запустить.cmd». Свою папку на цели можно задать третьей колонкой в тома.tsv.')
 
@@ -2220,6 +2225,8 @@ def main():
     p.add_argument('--dry', action='store_true', help='только посчитать, папку задачи не создавать')
     p.add_argument('--section', help='собрать только файлы с этим решением, например "раздел: Оцифрованные источники"')
     p.add_argument('--all', action='store_true', help='не учитывать разделы и отсрочки (решение «не нужно» учитывается всегда)')
+    p.add_argument('--source-folder', help='копировать из этой папки диска; путь в списке - от неё (шаблон 2.2)')
+    p.add_argument('--as', dest='as_name', help='имя источника в тома.tsv и в папке на цели (по умолчанию - номер диска)')
     p.set_defaults(task_root='scripts')
     p = sub.add_parser('mvlist', help='задание «Переместить на источнике» по подтверждённым копиям на 45 и 77')
     p.add_argument('disk'); p.add_argument('--name', required=True)

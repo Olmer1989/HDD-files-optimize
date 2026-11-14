@@ -722,6 +722,19 @@ class MoveOnSourceTest(Base):
         self.quiet(hb.cmd_rebuild, NS())
         self.assertIn('ИТОГ: совпала', self.printed)
 
+    def test_copy_from_folder_of_another_disk(self):
+        # исходный носитель уже очищен; его копия лежит на HDD45 в папке X - копируем оттуда под именем HDD90
+        self.quiet(hb.cmd_mklist, NS(disk='HDD45', to=['HDD91'], name='Из копии', folder=None, dry=False,
+                                     source_folder='X', as_name='HDD90'))
+        task = self.out / 'Из копии'
+        self.assertEqual((task / 'тома.tsv').read_text(encoding='utf-8').splitlines(), ['HDD90\tAAAA0045\tX', 'HDD91\tAAAA0091'])
+        self.assertEqual({x.split('\t')[1] for x in (task / 'список.tsv').read_text(encoding='utf-8').splitlines()},
+                         {'1.jpg', '2.jpg'})
+        (task / 'Журнал копирования 2025-02-01 00-00-00.tsv').write_text(
+            '\t'.join(LOG_HEAD) + '\n1\tHDD91\tскопирован, размер и SHA-256 совпали\t200\t' + S[2] +
+            '\tG:\\X\\2.jpg\tZ:\\ПЕРЕНОС с других дисков\\HDD90\\2.jpg\n', encoding='utf-8-sig')
+        self.assertEqual(self.row('HDD91', 'ПЕРЕНОС с других дисков\\HDD90\\2.jpg')[:2], (S[2], hb.EV_COPY))
+
     def test_template_refuses_foreign_destination(self):
         task = self.out / 'Плохой список'
         task.mkdir()
