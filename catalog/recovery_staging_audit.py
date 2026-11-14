@@ -14,7 +14,7 @@ import stat
 import sys
 import re
 
-import hashbase as hb
+from hb_core import api as hb                 # ядро; hashbase.py - только обёртка командной строки
 from recovery_plan import SYSTEM, CACHE
 
 PROJECT = Path(__file__).resolve().parent.parent

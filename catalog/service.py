@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 import build_pilot as bp
-import hashbase as hb
+from hb_core import api as hb                 # ядро; hashbase.py - только обёртка командной строки
 
 SEP = '\\'
 ACTIONS = ('удалено', 'скопировано', 'перемещено')

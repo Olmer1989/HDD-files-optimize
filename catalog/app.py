@@ -13,7 +13,7 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import hashbase as hb          # noqa: E402
+from hb_core import api as hb  # noqa: E402  (ядро; hashbase.py - только обёртка командной строки)
 import service as sv           # noqa: E402
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal   # noqa: E402
