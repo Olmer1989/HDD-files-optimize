@@ -251,6 +251,178 @@ def add_exclusion(disk, path, note=''):
     return pv
 
 
+# ---------- чтение для окна: каждое обращение - своё соединение только для чтения ----------
+
+def ro():
+    """Соединение только для чтения на один запрос. Окно не держит базу открытой: пересборке ничто не мешает."""
+    if not hb.DB.exists():
+        raise Refused('База ещё собирается - подождите.')
+    return sqlite3.connect(f'file:{hb.DB.as_posix()}?mode=ro', uri=True, timeout=30)
+
+
+def generation():
+    """Поколение базы - время её сборки; меняется после каждого применения модулей."""
+    if not hb.DB.exists():
+        return None
+    c = ro()
+    try:
+        r = c.execute("select value from meta where key='built'").fetchone()
+        return r[0] if r else None
+    finally:
+        c.close()
+
+
+def volumes():
+    """Подключённые сейчас тома: серийный номер -> буква. Сетевые диски пропускаются, диски не читаются."""
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    res = {}
+    mask = k32.GetLogicalDrives()
+    for i in range(26):
+        if not mask & (1 << i):
+            continue
+        root = f'{chr(65 + i)}:\\'
+        if k32.GetDriveTypeW(root) in (0, 1, 4):          # неизвестный, нет корня, сетевой
+            continue
+        ser = ctypes.c_ulong()
+        if k32.GetVolumeInformationW(root, None, 0, ctypes.byref(ser), None, None, None, 0):
+            res[f'{ser.value:08X}'] = root[:2]
+    return res
+
+
+def disks():
+    """Таблица носителей: номер, метка, подключён ли (буква), файлов, ГБ, опись от, состояние, частичных сканов."""
+    jobs = bp.find_jobs()
+    serial_of = {v: k for k, v in hb.serial_map(jobs).items()}
+    try:
+        vols = volumes()
+    except (OSError, AttributeError):
+        vols = {}
+    c = ro()
+    try:
+        rows = []
+        size = dict(c.execute("select disk, bytes from folders where folder=''"))
+        parts = collections.Counter(r[0] for r in c.execute('select disk from scan_folders'))
+        for d, label, total, status, scanned in c.execute('select disk, label, total, status, scanned from disks order by disk'):
+            rows.append(dict(disk=d, label=label.split(' - ', 1)[-1] if label else '', letter=vols.get(serial_of.get(d, '?'), ''),
+                             files=total, gib=(size.get(d) or 0) / hb.GIB, status=status,
+                             scanned=time.strftime('%d.%m.%Y', time.localtime(scanned)) if scanned else '',
+                             partial=parts.get(d, 0)))
+        return rows
+    finally:
+        c.close()
+
+
+def overview():
+    """Сводка для экрана «Обзор»: поколение базы, 45 и 77, предупреждения, задания."""
+    c = ro()
+    try:
+        rep = hb.load_report(c)
+        res = dict(built=c.execute("select value from meta where key='built'").fetchone()[0],
+                   files=c.execute("select sum(total) from disks").fetchone()[0], disks=c.execute('select count(*) from disks').fetchone()[0],
+                   main={}, warn=sorted(rep['warn']) + [x for _, x in sorted(rep['unique'].items())],
+                   skipped=list(rep['skipped']))
+        for d in hb.MAIN:
+            ev = dict(c.execute("select ev, count(*) from files where disk=? group by ev", (d,)).fetchall())
+            res['main'][d] = dict(ev=ev, gib=(c.execute("select bytes from folders where disk=? and folder=''", (d,)).fetchone() or [0])[0] / hb.GIB)
+    finally:
+        c.close()
+    jobs = bp.find_jobs()
+    serial_of = {v: k for k, v in hb.serial_map(jobs).items()}
+    try:
+        vols = volumes()
+    except (OSError, AttributeError):
+        vols = {}
+    for d in hb.MAIN:
+        letter = vols.get(serial_of.get(d, '?'))
+        res['main'][d]['letter'] = letter or ''
+        if letter:
+            try:
+                res['main'][d]['free_gib'] = shutil.disk_usage(letter + '\\').free / hb.GIB
+            except OSError:
+                pass
+    res['checked'] = time.strftime('%H:%M:%S')
+    return res
+
+
+def folder_children(disk, folder=''):
+    """Подпапки папки (по готовой таблице folders): имя, путь, файлов, ГБ, ГБ по типам, решение владельца."""
+    folder = (folder or '').strip(SEP)
+    depth = (folder.count(SEP) + 1 if folder else 0) + 1
+    cond, args = hb.prefix_cond('folder', folder)
+    decs = hb.decisions_for(disk)
+    c = ro()
+    try:
+        q = (f'select folder, files, bytes, ' + ', '.join(f'b{i}' for i in range(5)) +
+             f' from folders where disk=? and depth=? and {cond} order by bytes desc')
+        res = []
+        for r in c.execute(q, [disk, depth] + args):
+            res.append(dict(path=r[0], name=r[0].rsplit(SEP, 1)[-1], files=r[1], gib=r[2] / hb.GIB,
+                            types=[x / hb.GIB for x in r[3:8]], decision=hb.decision_of(r[0], decs) or ''))
+        return res
+    finally:
+        c.close()
+
+
+def folder_presence(disk, folder):
+    """Чего из папки нет на 45 и 77 (фото и видео с SHA-256, по таблице presence; решения не учитываются)."""
+    cond, args = hb.prefix_cond('f.path', (folder or '').strip(SEP))
+    c = ro()
+    try:
+        q = f"""select count(*), coalesce(sum(f.size),0),
+                       coalesce(sum(case when not coalesce(p.e45 in ('S','C'),0) then f.size end),0),
+                       coalesce(sum(case when not coalesce(p.e77 in ('S','C'),0) then f.size end),0),
+                       coalesce(sum(case when p.ndisks=1 then f.size end),0)
+                from files f join presence p on p.sha=f.sha where f.disk=? and f.sha is not null and {cond}"""
+        n, b, no45, no77, only = c.execute(q, [disk] + args).fetchone()
+        nohash = c.execute(f"select count(*) from files f where f.disk=? and f.sha is null and {cond}", [disk] + args).fetchone()[0]
+        return dict(files=n, gib=b / hb.GIB, no45=no45 / hb.GIB, no77=no77 / hb.GIB, only=only / hb.GIB, nohash=nohash)
+    finally:
+        c.close()
+
+
+def find_folders(words, disk=None, limit=300):
+    """Папки, в пути которых есть все слова (только верхние совпадения), по таблице folders."""
+    words = [w.lower() for w in words if w.strip()]
+    if not words:
+        return []
+    q = 'select disk, folder, files, bytes from folders where ' + ' and '.join(['instr(folder_lc, ?) > 0'] * len(words))
+    args = list(words)
+    if disk:
+        q += ' and disk=?'
+        args.append(disk)
+    c = ro()
+    try:
+        rows = c.execute(q, args).fetchall()
+    finally:
+        c.close()
+    hits = {(r[0], r[1]) for r in rows}
+    top = [r for r in rows if r[1] and (r[0], hb.parent_of(r[1])) not in hits]
+    top.sort(key=lambda r: -r[3])
+    return [dict(disk=d, path=f, files=n, gib=b / hb.GIB) for d, f, n, b in top[:limit]]
+
+
+def sources_signature():
+    """Быстрая подпись первоисточников (размеры и время таблиц, журналов, описей) - чтобы окно знало,
+    что пора применить новые модули. Диски не читаются."""
+    sig = []
+    for p in [hb.MANUAL, hb.DECISIONS, hb.EXCLUSIONS] + [Path(x) for x in hb.journal_paths()]:
+        try:
+            st = Path(p).stat()
+            sig.append((str(p), st.st_size, st.st_mtime_ns))
+        except OSError:
+            pass
+    for j in bp.find_jobs().values():
+        try:
+            st = (j['dir'] / 'inventory.sqlite').stat()
+            sig.append((str(j['dir']), st.st_size, st.st_mtime_ns))
+        except OSError:
+            pass
+    for pj in hb.find_partials():
+        sig.append((str(pj['dir']), pj['time']))
+    return hash(tuple(sorted(sig)))
+
+
 # ---------- задания: честное состояние ----------
 
 def running_scripts():
