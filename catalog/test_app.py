@@ -59,12 +59,12 @@ class WindowTest(Base):
         self.assertTrue(wait(lambda: 'База собрана' in ov.text.toPlainText()))
         self.assertIn('HDD45', ov.text.toPlainText())
         self.assertIn('Задание 1', ov.text.toPlainText())                      # ждёт запуска
-        self.w.nav.setCurrentRow(1)
-        tasks = self.w.pages[1][1]
+        self.w.open_page('Задания')
+        tasks = self.w.page('Задания')
         self.assertTrue(wait(lambda: tasks.t.rowCount() == 1))
         self.assertEqual(tasks.t.item(0, 2).text(), 'не запускалось')
-        self.w.nav.setCurrentRow(2)
-        dp = self.w.pages[2][1]
+        self.w.open_page('Диски и папки')
+        dp = self.w.page('Диски и папки')
         self.assertTrue(wait(lambda: dp.t.rowCount() == 4))
         row = [dp.t.item(i, 0).text() for i in range(4)].index('HDD90')
         dp.t.selectRow(row)
@@ -103,7 +103,8 @@ class WindowTest(Base):
         self.assertIn('Применены новые модули', self.w.statusBar().currentMessage())
 
 
-HIDDEN = {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist', 'manual', 'fix-manual'}
+HIDDEN = {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist', 'manual', 'fix-manual',
+          'mklist', 'decide', 'exclude', 'rescan-plan'}    # последние 4 заменил «Разбор носителя» (логика v3, этап 2)
 
 
 def hidden_form(cp, name):
@@ -114,6 +115,19 @@ def hidden_form(cp, name):
     f = cpg.CommandForm(cp, n, h, prs)
     f.set_disks(cp.disks)
     return f
+
+
+def show_hidden(cp, name):
+    """Скрытая в окне команда (mklist, decide - их заменила страница «Разбор носителя»; в командной строке есть) -
+    та же форма и тот же запуск страницы «Команды»: механизм форм, предпросмотра и создания задания проверяется
+    по-прежнему."""
+    if name not in cp.forms:
+        cp.forms[name] = hidden_form(cp, name)
+        cp.stack.addWidget(cp.forms[name])
+    cp.current = name
+    cp.stack.setCurrentWidget(cp.forms[name])
+    cp.form_changed()
+    return cp.forms[name]
 
 
 def put(f, **values):
@@ -179,7 +193,7 @@ class CommandsTest(WindowTest):
         f = hidden_form(self.cp, 'manual')
         self.assertEqual(f.fields['date'].text(), time.strftime('%d.%m.%Y'))
         self.assertEqual(f.fields['action'].kind, 'choice')
-        self.assertEqual(self.cp.select('mklist').fields['to'].text(), ['HDD45', 'HDD77'])
+        self.assertEqual(show_hidden(self.cp, 'mklist').fields['to'].text(), ['HDD45', 'HDD77'])
         combo = self.cp.select('where').fields['disk'].combo
         self.assertIn('HDD90', [combo.itemData(i) for i in range(combo.count())])
         dlg = cpg.FolderDialog(self.w, 'HDD90')                             # «Выбрать…»: дерево папок по базе
@@ -191,11 +205,11 @@ class CommandsTest(WindowTest):
         self.assertEqual(dlg.chosen, 'A')
 
     def test_required_fields_and_argv(self):
-        self.cp.select('decide')
+        show_hidden(self.cp, 'decide')
         self.cp.execute()
         self.assertIsNone(self.cp.run)
         self.assertIn('Заполните', self.asked[-1])
-        f = self.cp.select('mklist')
+        f = show_hidden(self.cp, 'mklist')
         put(f, disk='HDD90', name='Моё задание', folder='A\nB\\x', dry=True)
         f.fields['to'].boxes['HDD77'].setCheckState(Qt.Unchecked)
         args, err = f.argv()
@@ -219,7 +233,7 @@ class CommandsTest(WindowTest):
         saved = hb.ANSWERS / cpg.LAST_OUTPUT
         self.assertTrue(saved.exists())
         self.assertIn(str(saved), self.cp.links)                            # путь к файлу - ссылка
-        f = self.cp.select('decide')                                        # код выхода 1 - заметно
+        f = show_hidden(self.cp, 'decide')                                        # код выхода 1 - заметно
         put(f, disk='HDD90', path='Нет такой папки', verdict='не нужно')
         self.run_cmd('decide')
         self.assertIn('код выхода 1', self.cp.state.text())
@@ -227,7 +241,7 @@ class CommandsTest(WindowTest):
         self.assertFalse(self.cp.btn_write.isEnabled())
 
     def test_decide_preview_then_write(self):
-        f = self.cp.select('decide')
+        f = show_hidden(self.cp, 'decide')
         put(f, disk='HDD90', path='B', verdict='не нужно')
         rows = lambda: hb.DECISIONS.read_text(encoding='utf-8-sig') if hb.DECISIONS.exists() else ''   # noqa: E731
         text = self.run_cmd('decide')
@@ -244,15 +258,15 @@ class CommandsTest(WindowTest):
         self.assertFalse(self.cp.btn_write.isEnabled())                    # второй раз - только после нового предпросмотра
 
     def test_mklist_creates_task_and_offers_tasks_page(self):
-        f = self.cp.select('mklist')
+        f = show_hidden(self.cp, 'mklist')
         put(f, disk='HDD90', name='Новое задание')
         self.run_cmd('mklist')                                          # «Посчитать» (--dry), затем «Создать задание»
         self.assertFalse((hb.TASKS / 'Новое задание').exists())
         self.run_cmd('mklist create', write=True)
         self.assertTrue((hb.TASKS / 'Новое задание').is_dir(), '\n'.join(self.cp.lines))
         self.assertIn('Создано задание', self.asked[-1])
-        self.assertEqual(self.w.nav.currentRow(), 1)                       # «Задания»
-        tasks = self.w.pages[1][1]
+        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания'))
+        tasks = self.w.page('Задания')
         self.assertTrue(wait(lambda: any(r['task'] == 'Новое задание' for r in tasks.rows)))
 
 
@@ -280,11 +294,11 @@ class CommandsUiTest(CommandsTest):
                 self.assertFalse(it.flags() & Qt.ItemIsSelectable)
         known = [g for g in cpg.GROUPS if g in heads]
         self.assertEqual(heads[:len(known)], known)
-        self.assertEqual(known, list(cpg.GROUPS))
-        want = ['missing', 'only', 'where', 'cmp', 'candel', 'folders', 'find', 'mklist', 'decide',
-                'exclude', 'stats', 'build', 'tasks', 'rebuild']
+        self.assertEqual(known, ['Вопросы о диске', 'Обслуживание'])    # «Подготовить задание» и «Записать» - в разборе
+        want = ['missing', 'only', 'where', 'cmp', 'candel', 'folders', 'find', 'stats', 'build', 'tasks', 'rebuild']
         self.assertEqual([c for c in cmds if c in want], want)
         self.assertNotIn('mvlist', cmds)                                    # отдельного пункта нет
+        self.assertFalse({'mklist', 'decide', 'exclude', 'rescan-plan'} & set(cmds))
         f = self.cp.select('candel')
         self.assertEqual(f.meta['title'], 'Можно ли удалить папку с этого диска?')
         self.assertEqual(f.fields['disk'].label, 'Диск, с которого хотите удалить')
@@ -323,7 +337,7 @@ class CommandsUiTest(CommandsTest):
 
     def test_to_list_short_by_default(self):
         self.cp.got_disks(ROWS)
-        to = self.cp.select('mklist').fields['to']
+        to = show_hidden(self.cp, 'mklist').fields['to']
         self.assertEqual(to.text(), ['HDD45', 'HDD77'])
         shown = [d for d, it in to.boxes.items() if not it.isHidden()]
         self.assertEqual(shown, ['HDD45', 'HDD77', 'HDD91'])                 # основные, затем подключённые
@@ -339,7 +353,7 @@ class CommandsUiTest(CommandsTest):
         m = hidden_form(self.cp, 'manual')
         self.assertIs(m.row_of['disk2'], m.row_of['path2'])
         self.assertEqual(m.fields['disk2'].combo.itemText(0), '— не указан —')
-        mk = self.cp.select('mklist')                                       # у диска две папки - выбор только папки
+        mk = show_hidden(self.cp, 'mklist')                                       # у диска две папки - выбор только папки
         self.assertFalse(mk.fields['source_folder'].pick_disk)
         dlg = cpg.FolderDialog(self.w, 'HDD90', rows=ROWS)                  # «Выбрать…»: носители, затем их папки
         tops = [dlg.tree.topLevelItem(i).data(2, Qt.UserRole) for i in range(dlg.tree.topLevelItemCount())]
@@ -356,7 +370,7 @@ class CommandsUiTest(CommandsTest):
     def test_mklist_modes_build_arguments(self):
         hb.ensure_tables()
         hb.DECISIONS.write_text(hb.DECISION_HEAD + '\nHDD90\tB\tраздел: Фильмы\tпроба\n', encoding='utf-8-sig')
-        f = self.cp.select('mklist')
+        f = show_hidden(self.cp, 'mklist')
         modes = [f.mode_box.itemText(i) for i in range(f.mode_box.count())]
         self.assertEqual(len(modes), 4)
         self.assertEqual(f.fields['name'].text(), '')
@@ -396,7 +410,7 @@ class CommandsUiTest(CommandsTest):
         self.assertEqual(f.fields['name'].text(), 'Своё имя')
 
     def test_count_then_create_with_move_mark(self):
-        f = self.cp.select('mklist')
+        f = show_hidden(self.cp, 'mklist')
         self.assertEqual(self.cp.btn_run.text(), 'Посчитать')
         self.assertEqual(self.cp.btn_write.text(), 'Создать задание')
         self.assertFalse(f.row_of['dry'].isVisibleTo(f))                     # вместо галочки - кнопка

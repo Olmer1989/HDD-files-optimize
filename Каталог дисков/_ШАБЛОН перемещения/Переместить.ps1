@@ -1,22 +1,37 @@
-﻿# ШАБЛОН «ПЕРЕМЕСТИТЬ НА ИСТОЧНИКЕ» (версия 1.0 от 14.11.2026)
+﻿# ШАБЛОН «ПЕРЕМЕСТИТЬ НА НОСИТЕЛЕ» (версия 1.1 от 15.11.2026; 1.0 - от 14.11.2026)
 #
-# Что делает: после копирования перекладывает файлы ВНУТРИ того же диска-источника в папки
-#   <диск>:\ПЕРЕНЕСЕНО → 45 и 77\<тот же путь>      (и «только 45», «только 77», «САФАРИ», … , «МУСОР»)
+# Что делает: после копирования перекладывает файлы ВНУТРИ того же диска-источника в служебные папки
+#   <диск>:\Скопировано на Семейный архив (45 и 77)\<тот же путь>   (логика v3, версия 1.1)
+#   <диск>:\ПЕРЕНЕСЕНО → 45 и 77\<тот же путь>                      (прежние задания; и «только 77», «78», «МУСОР»)
 #   Внутри одного диска это переименование: данные не переписываются и не читаются, это быстро.
 # Чего НЕ делает: ничего не удаляет и не перезаписывает, на другие диски не пишет вообще.
 #   Если в назначении уже лежит файл - не трогает ни его, ни исходник (строка «КОНФЛИКТ» в журнале).
-#   Пустые папки, оставшиеся на старом месте, не удаляются.
-# Какие файлы перемещать, решает программа (py catalog\hashbase.py mvlist ...): в список попадает файл,
-#   только если журнал копирования подтвердил его копии (SHA-256 прочитанного совпал) на всех целевых дисках.
-#   Скрипт перед перемещением ещё раз сверяет размер и дату изменения файла со списком.
+#   Пустые папки, оставшиеся на старом месте после переноса по файлам, не удаляются.
+# Какие файлы перемещать, решает программа (mvlist): в список попадает файл, только если его копии подтверждены
+#   (SHA-256) на всех дисках-целях. Скрипт перед перемещением ещё раз сверяет размер и дату изменения со списком.
+#   Содержимое файлов скрипт не читает.
 #
-# Рядом со скриптом лежат два файла (UTF-8, поля через TAB):
-#   тома.tsv        - <имя диска> TAB <серийный номер тома>  - одна строка: диск-источник
-#   перемещение.tsv - <путь от корня диска> TAB <размер в байтах> TAB <дата изменения, секунды UTC или пусто>
-#                     TAB <папка назначения, например «ПЕРЕНЕСЕНО → только 77»> TAB <SHA-256> TAB <основание>
+# Рядом со скриптом лежат файлы (UTF-8, поля через TAB):
+#   тома.tsv            - <имя диска> TAB <серийный номер тома>  - одна строка: диск-источник
+#   перемещение.tsv     - <путь от корня> TAB <размер> TAB <дата изменения, секунды UTC или пусто>
+#                         TAB <папка назначения> TAB <SHA-256> TAB <основание>
+#   папки целиком.tsv   - (версия 1.1, может не быть) <путь папки от корня> TAB <папка назначения> TAB <файлов> TAB <байт>:
+#                         папка переносится ОДНИМ переименованием, если на диске в ней лежат ровно эти файлы
+#                         (имена, размеры, даты); иначе - по файлам
+#   корни.tsv           - (версия 1.1) <папка «Скопировано на …»> TAB «известен» (её создал журнал перемещения)
+#                         или «новый» (её создаст этот скрипт). Существующую папку, которую программа не создавала,
+#                         скрипт не использует: «нужна ручная проверка».
 #
-# Запуск: двойной щелчок по «Запустить.cmd». Остановка: клавиша Q (после текущего файла).
+# Сбой посередине (версия 1.1): перед переименованием папки скрипт записывает намерение в «Намерение перемещения.tsv»
+#   (с принудительной записью на диск), перед переносом каждого файла - строку «начато» в журнал. Повторный запуск
+#   сначала разбирает незаконченные намерения: источника нет, а назначение есть и совпадает со списком - «уже
+#   перемещён»; источник на месте и назначения нет - переноса не было; иначе - «нужна ручная проверка», эти файлы
+#   не трогаются. Файл без строки «начато» не признаётся перемещённым только потому, что в назначении что-то лежит.
+#
+# Запуск: двойной щелчок по «Запустить.cmd». Остановка: клавиша Q (после текущей операции).
 # Повторный запуск продолжит: уже перемещённые файлы пропускаются («уже перемещён»).
+# Два перемещения на одном носителе одновременно не идут: замок «_замок перемещения <серийный номер>.lock»
+#   рядом с папками заданий.
 # Журнал: «Журнал перемещения <дата время>.tsv» рядом со скриптом, строка после каждого файла.
 #   Программа читает его сама: в базе у файла появится новый путь, решения по старому пути продолжат действовать.
 # Пять ошибок подряд - признак сбоя диска: перемещение прекращается.
@@ -28,11 +43,17 @@ $ErrorActionPreference = 'Stop'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ListFile = Join-Path $Here 'перемещение.tsv'
 $VolFile = Join-Path $Here 'тома.tsv'
+$WholeFile = Join-Path $Here 'папки целиком.tsv'
+$RootsFile = Join-Path $Here 'корни.tsv'
+$IntentPath = Join-Path $Here 'Намерение перемещения.tsv'
 $LongPrefix = '\\?\'
 $U8 = [System.Text.Encoding]::UTF8
+$U8NoBom = New-Object System.Text.UTF8Encoding($false)
 $Auto = [bool]$TestRoots
-$Allowed = 'ПЕРЕНЕСЕНО → '
+$OldPrefix = 'ПЕРЕНЕСЕНО → '
+$NewPrefix = 'Скопировано на '
 $Trash = 'МУСОР'
+$RP = [System.IO.FileAttributes]::ReparsePoint
 
 function Fmt-GB([double]$b) { '{0:N2} ГБ' -f ($b / 1GB) }
 function Stop-Script([string]$text, [int]$code) {
@@ -48,6 +69,20 @@ function Get-InnerMessage($err) {
 function Test-Rel([string]$rel) {
     return ($rel -and -not $rel.StartsWith('\') -and -not $rel.Contains(':') -and -not $rel.Contains('/') -and
             -not ('\' + $rel + '\').Contains('\..\') -and -not ('\' + $rel + '\').Contains('\.\'))
+}
+function Test-DestName([string]$name) {
+    if ($name -eq $Trash) { return $true }
+    if ($name.Contains('\')) { return $false }
+    return ($name.StartsWith($OldPrefix) -or $name.StartsWith($NewPrefix))
+}
+function Get-Unix($dt) { return ([DateTimeOffset]$dt).ToUnixTimeSeconds() }
+# путь назначения в журнале -> «<служебная папка>\<путь>» (буква диска между запусками может быть другой)
+function Get-DestKey([string]$full) {
+    $parts = $full.Split('\')
+    for ($k = 0; $k -lt $parts.Count; $k++) {
+        if ($parts[$k] -and (Test-DestName $parts[$k])) { return (($parts[$k..($parts.Count - 1)]) -join '\').ToLowerInvariant() }
+    }
+    return $null
 }
 
 # --- 1. Диск-источник: буква по серийному номеру тома ---
@@ -69,7 +104,30 @@ if ($TestRoots) {
 }
 if (-not $Root) { Stop-Script "Диск $SrcName (серийный номер $Serial) не подключён. Ничего не сделано." 1 }
 
-# --- 2. Список: всё проверяется ДО первого перемещения ---
+# --- 2. Служебные папки (корни.tsv) ---
+$RootState = @{}          # имя папки «Скопировано на …» -> известен / новый
+if (Test-Path -LiteralPath $RootsFile) {
+    foreach ($line in [System.IO.File]::ReadAllLines($RootsFile, $U8)) {
+        if (-not $line.Trim()) { continue }
+        $p = $line.Split("`t")
+        $RootState[$p[0].Trim()] = if ($p.Count -ge 2) { $p[1].Trim() } else { 'известен' }
+    }
+}
+# намерения прежних запусков
+$Ops = [ordered]@{}       # номер операции -> @{ Kind; From; To; Count; State }
+$CreatedRoots = @{}
+if (Test-Path -LiteralPath $IntentPath) {
+    foreach ($line in [System.IO.File]::ReadAllLines($IntentPath, $U8)) {
+        $p = $line.Split("`t")
+        if ($p.Count -lt 6 -or $p[0] -eq 'время') { continue }
+        $op = $p[1]
+        if ($p[2] -eq 'корень' -and $p[3] -eq 'создан') { $CreatedRoots[$p[5]] = $true; continue }
+        if (-not $Ops.Contains($op)) { $Ops[$op] = @{ Kind = $p[2]; From = $p[4]; To = $p[5]; Count = $(if ($p.Count -ge 7) { $p[6] } else { '' }); State = $p[3] } }
+        else { $Ops[$op].State = $p[3] }
+    }
+}
+
+# --- 3. Список: всё проверяется ДО первого перемещения ---
 $Items = New-Object System.Collections.Generic.List[object]
 $lineNo = 0
 foreach ($line in [System.IO.File]::ReadAllLines($ListFile, $U8)) {
@@ -83,16 +141,38 @@ foreach ($line in [System.IO.File]::ReadAllLines($ListFile, $U8)) {
     $mtime = [int64]-1
     if ($f[2].Trim() -and -not [int64]::TryParse($f[2], [ref]$mtime)) { Stop-Script "перемещение.tsv, строка ${lineNo}: дата не число. Ничего не сделано." 1 }
     if (-not (Test-Rel $rel)) { Stop-Script "перемещение.tsv, строка ${lineNo}: недопустимый путь «$rel». Ничего не сделано." 1 }
-    if (-not (($folder.StartsWith($Allowed) -and -not $folder.Contains('\')) -or $folder -eq $Trash)) {
-        Stop-Script "перемещение.tsv, строка ${lineNo}: папка назначения «$folder» - разрешены только «ПЕРЕНЕСЕНО → …» и «МУСОР». Ничего не сделано." 1
+    if (-not (Test-DestName $folder)) {
+        Stop-Script "перемещение.tsv, строка ${lineNo}: папка назначения «$folder» - разрешены только «ПЕРЕНЕСЕНО → …», «Скопировано на …» и «МУСОР». Ничего не сделано." 1
+    }
+    if ($folder.StartsWith($NewPrefix) -and -not $RootState.ContainsKey($folder)) {
+        Stop-Script "перемещение.tsv, строка ${lineNo}: папки «$folder» нет в корни.tsv - задание собрано не программой. Ничего не сделано." 1
     }
     $first = $rel.Split('\')[0]
-    if ($first.StartsWith($Allowed) -or $first -eq $Trash) { Stop-Script "перемещение.tsv, строка ${lineNo}: файл уже лежит в «$first». Ничего не сделано." 1 }
+    if ($first.StartsWith($OldPrefix) -or $first -eq $Trash -or $RootState.ContainsKey($first)) { Stop-Script "перемещение.tsv, строка ${lineNo}: файл уже лежит в служебной папке «$first». Ничего не сделано." 1 }
     $sha = if ($f.Count -ge 5) { $f[4].Trim() } else { '' }
     $why = if ($f.Count -ge 6) { $f[5].Trim() } else { '' }
-    $Items.Add([pscustomobject]@{ Rel = $rel; Size = $size; Mtime = $mtime; Folder = $folder; Sha = $sha; Why = $why })
+    $Items.Add([pscustomobject]@{ Rel = $rel; Size = $size; Mtime = $mtime; Folder = $folder; Sha = $sha; Why = $why; Done = $false; Blocked = '' })
 }
 if ($Items.Count -eq 0) { Stop-Script 'Список пуст - перемещать нечего.' 0 }
+$Whole = New-Object System.Collections.Generic.List[object]
+if (Test-Path -LiteralPath $WholeFile) {
+    foreach ($line in [System.IO.File]::ReadAllLines($WholeFile, $U8)) {
+        if (-not $line.Trim()) { continue }
+        $p = $line.Split("`t")
+        if ($p.Count -lt 3 -or -not (Test-Rel $p[0]) -or -not (Test-DestName $p[1].Trim())) { Stop-Script "папки целиком.tsv: строка «$line» не разобрана. Ничего не сделано." 1 }
+        $pre = $p[0].ToLowerInvariant() + '\'
+        $mine = @($Items | Where-Object { $_.Rel.ToLowerInvariant().StartsWith($pre) -and $_.Folder -eq $p[1].Trim() })
+        $Whole.Add([pscustomobject]@{ Rel = $p[0]; Folder = $p[1].Trim(); Count = [int]$p[2]; Items = $mine })
+    }
+}
+# существующая папка «Скопировано на …», которую программа не создавала, не используется
+foreach ($name in @($Items | ForEach-Object Folder | Sort-Object -Unique)) {
+    if (-not $name.StartsWith($NewPrefix)) { continue }
+    $exists = [System.IO.Directory]::Exists($LongPrefix + $Root + '\' + $name)
+    if ($exists -and $RootState[$name] -ne 'известен' -and -not $CreatedRoots.ContainsKey($name)) {
+        Stop-Script "Нужна ручная проверка: на диске уже есть папка «$name», но программа её не создавала (нет в базе и в записи намерений). Ничего не сделано." 1
+    }
+}
 
 Write-Host ''
 Write-Host "Перемещение внутри диска $SrcName ($Root). Ничего не удаляется и не перезаписывается." -ForegroundColor Cyan
@@ -102,57 +182,217 @@ foreach ($g in ($Items | Group-Object Folder)) {
     $Total += $b
     Write-Host ("  -> {0}\{1}: {2} файлов, {3}" -f $Root, $g.Name, $g.Count, (Fmt-GB $b))
 }
-Write-Host 'Q - остановиться после текущего файла. Повторный запуск продолжит с места остановки.'
+if ($Whole.Count) { Write-Host ("  папкой целиком (одно переименование, если на диске ровно эти файлы): {0}" -f (($Whole | ForEach-Object Rel) -join '; ')) }
+$pending = @($Ops.Keys | Where-Object { $Ops[$_].State -eq 'намерение' })
+if ($pending.Count) { Write-Host ("  незаконченных переносов папок прошлого запуска: {0} - сначала они будут разобраны" -f $pending.Count) -ForegroundColor Yellow }
+Write-Host 'Содержимое файлов не перечитывается: сверяются размер и дата изменения с описью.'
+Write-Host 'Q - остановиться после текущей операции. Повторный запуск продолжит с места остановки.'
+
+# --- 4. Замок: два перемещения на одном носителе одновременно не идут ---
+$LockPath = Join-Path (Split-Path $Here -Parent) ("_замок перемещения " + $Serial + ".lock")
+try { $Lock = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None) }
+catch { Stop-Script "На носителе $SrcName уже идёт другое перемещение (занят «$LockPath»). Ничего не сделано." 1 }
+
 if (-not $Auto) {
     $ans = Read-Host ("Переместить {0} файлов ({1}) внутри диска {2}? Введите «да»" -f $Items.Count, (Fmt-GB $Total), $SrcName)
-    if (@('да', 'д', 'y', 'yes') -notcontains "$ans".Trim().ToLower()) { Write-Host 'Отменено. Ничего не сделано.'; [void](Read-Host 'Enter - закрыть'); exit 0 }
+    if (@('да', 'д', 'y', 'yes') -notcontains "$ans".Trim().ToLower()) { $Lock.Close(); Write-Host 'Отменено. Ничего не сделано.'; [void](Read-Host 'Enter - закрыть'); exit 0 }
 }
 
-# --- 3. Журнал ---
+# --- 5. Журнал и намерения ---
 $Stamp = Get-Date -Format 'yyyy-MM-dd HH-mm-ss'
+# строки «начато» и «перемещён» прежних журналов: только по ним «нет источника, есть назначение» = «уже перемещён»
+$Started = @{}
+foreach ($old in (Get-ChildItem -LiteralPath $Here -Filter 'Журнал перемещения *.tsv' -ErrorAction SilentlyContinue)) {
+    foreach ($line in [System.IO.File]::ReadAllLines($old.FullName, $U8)) {
+        $p = $line.Split("`t")
+        if ($p.Count -ge 6 -and @('начато', 'перемещён', 'уже перемещён') -contains $p[1]) {
+            $k = Get-DestKey $p[5]
+            if ($k) { $Started[$k] = $true }
+        }
+    }
+}
 $LogPath = Join-Path $Here "Журнал перемещения $Stamp.tsv"
 $Log = [System.IO.StreamWriter]::new($LogPath, $false, [System.Text.UTF8Encoding]::new($true))
 $Log.AutoFlush = $true
 $Log.WriteLine("время`tрезультат`tразмер`tSHA-256`tоткуда`tкуда`tоснование")
+function Write-LogLine($it, [string]$result, [string]$src, [string]$dst) {
+    $Log.WriteLine(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f (Get-Date -Format 'HH:mm:ss'), $result, $it.Size, $it.Sha, $src, $dst, $it.Why))
+}
+function Write-Intent([string]$op, [string]$kind, [string]$state, [string]$from, [string]$to, [string]$count) {
+    $new = -not [System.IO.File]::Exists($IntentPath)
+    $fs = [System.IO.FileStream]::new($IntentPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    try {
+        $text = ''
+        if ($new) { $text = "время`tоперация`tвид`tсостояние`tоткуда`tкуда`tфайлов`n" }
+        $text += ("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $op, $kind, $state, $from, $to, $count)
+        $b = $U8NoBom.GetBytes($text)
+        $fs.Write($b, 0, $b.Length)
+        $fs.Flush($true)                    # на диск, а не только в память Windows: запись должна пережить сбой
+    } finally { $fs.Close() }
+}
+function Confirm-Root([string]$name) {
+    if (-not $name.StartsWith($NewPrefix)) { return }
+    $full = $Root + '\' + $name
+    if ([System.IO.Directory]::Exists($LongPrefix + $full)) { return }
+    Write-Intent ("$Stamp-корень") 'корень' 'создан' '' $name ''
+    $script:CreatedRoots[$name] = $true
+    [void][System.IO.Directory]::CreateDirectory($LongPrefix + $full)
+}
+$RpCache = @{}
+function Test-ReparseChain([string]$dir) {
+    # папка или любая её папка-предок (ниже корня диска) - ссылка (reparse point)?
+    if ($dir.Length -le $Root.Length) { return $false }
+    if ($RpCache.ContainsKey($dir)) { return $RpCache[$dir] }
+    $r = Test-ReparseChain ($dir.Substring(0, $dir.LastIndexOf('\')))
+    if (-not $r) {
+        $di = [System.IO.DirectoryInfo]::new($LongPrefix + $dir)
+        if ($di.Exists -and ($di.Attributes -band $RP)) { $r = $true }
+    }
+    $RpCache[$dir] = $r
+    return $r
+}
+# оглавление папки на диске сверяется со списком: имена (без учёта регистра), размеры, даты; ссылки внутри - отказ
+function Test-Listing([string]$dir, $items, [string]$listPrefix) {
+    $want = @{}
+    foreach ($it in $items) { $want[$it.Rel.Substring($listPrefix.Length).ToLowerInvariant()] = $it }
+    $seen = 0
+    $di = [System.IO.DirectoryInfo]::new($LongPrefix + $dir)
+    $base = $di.FullName.Length + 1
+    foreach ($e in $di.EnumerateFileSystemInfos('*', [System.IO.SearchOption]::AllDirectories)) {
+        if ($e.Attributes -band $RP) { return 'внутри есть ссылка (reparse point)' }
+        if ($e -is [System.IO.DirectoryInfo]) { continue }
+        $k = $e.FullName.Substring($base).ToLowerInvariant()
+        if (-not $want.ContainsKey($k)) { return "на диске есть файл, которого нет в списке: $($e.FullName.Substring($base))" }
+        $it = $want[$k]
+        if ($e.Length -ne $it.Size) { return "другой размер: $($e.FullName.Substring($base))" }
+        if ($it.Mtime -ge 0 -and [math]::Abs((Get-Unix $e.LastWriteTimeUtc) - $it.Mtime) -gt 2) { return "другая дата изменения: $($e.FullName.Substring($base))" }
+        $seen++
+    }
+    if ($seen -ne $want.Count) { return ("на диске нет {0} файлов из списка" -f ($want.Count - $seen)) }
+    return ''
+}
 
-# --- 4. Перемещение ---
 $CanKey = $true
 try { [void][Console]::KeyAvailable } catch { $CanKey = $false }
-$Moved = 0; $Already = 0; $Skipped = 0; $Errors = 0; $Stopped = $false; $ErrorsInRow = 0; $Failing = $false
+$Moved = 0; $Already = 0; $Skipped = 0; $Errors = 0; $Stopped = $false; $ErrorsInRow = 0; $Failing = $false; $Manual = 0
+$WholeDone = 0
 [double]$MovedBytes = 0
 $Start = Get-Date
+
+# --- 6. Сначала - незаконченные переносы папок прошлых запусков ---
+foreach ($op in @($Ops.Keys)) {
+    $o = $Ops[$op]
+    if ($o.Kind -ne 'папка' -or $o.State -ne 'намерение') { continue }
+    $w = $Whole | Where-Object { $_.Rel -eq $o.From -and ($_.Folder + '\' + $_.Rel) -eq $o.To } | Select-Object -First 1
+    $src = $Root + '\' + $o.From; $dst = $Root + '\' + $o.To
+    $se = [System.IO.Directory]::Exists($LongPrefix + $src); $de = [System.IO.Directory]::Exists($LongPrefix + $dst)
+    if ($w -and -not $se -and $de -and -not (Test-Listing $dst $w.Items ($w.Rel + '\'))) {
+        foreach ($it in $w.Items) {
+            Write-LogLine $it 'уже перемещён' ($Root + '\' + $it.Rel) ($Root + '\' + $it.Folder + '\' + $it.Rel)
+            $it.Done = $true; $Already++
+        }
+        Write-Intent $op 'папка' 'выполнено' $o.From $o.To $o.Count
+        Write-Host "Прошлый перенос папки «$($o.From)» состоялся: учтён как «уже перемещён»." -ForegroundColor Cyan
+    } elseif ($w -and $se -and -not $de) {
+        Write-Intent $op 'папка' 'не выполнено' $o.From $o.To $o.Count
+        Write-Host "Прошлый перенос папки «$($o.From)» не состоялся: папка на месте, перенос начнётся заново." -ForegroundColor Cyan
+    } else {
+        Write-Intent $op 'папка' 'ручная проверка' $o.From $o.To $o.Count
+        $pre = $o.From.ToLowerInvariant() + '\'
+        foreach ($it in $Items) { if ($it.Rel.ToLowerInvariant().StartsWith($pre)) { $it.Blocked = 'нужна ручная проверка: прерванный перенос папки' } }
+        $Manual++
+        Write-Host "НУЖНА РУЧНАЯ ПРОВЕРКА: перенос папки «$($o.From)» прервался, а на диске не та картина (папка на месте: $se, в назначении: $de). Файлы этой папки не трогаю." -ForegroundColor Red
+    }
+}
+
+# --- 7. Папки целиком: одно переименование ---
+$n = 0
+foreach ($w in $Whole) {
+    if ($Stopped) { break }
+    $n++
+    if (@($w.Items | Where-Object { $_.Done -or $_.Blocked }).Count) { continue }
+    $src = $Root + '\' + $w.Rel; $dst = $Root + '\' + $w.Folder + '\' + $w.Rel
+    $reason = ''
+    if ($w.Items.Count -ne $w.Count -or $w.Count -eq 0) { $reason = 'список папки не сходится с перемещение.tsv' }
+    elseif (-not [System.IO.Directory]::Exists($LongPrefix + $src)) { $reason = 'папки нет на месте' }
+    elseif ([System.IO.Directory]::Exists($LongPrefix + $dst) -or [System.IO.File]::Exists($LongPrefix + $dst)) { $reason = 'в назначении уже есть такая папка' }
+    elseif ((Test-ReparseChain $src) -or (Test-ReparseChain ($dst.Substring(0, $dst.LastIndexOf('\'))))) { $reason = 'в пути есть ссылка (reparse point)' }
+    else { $reason = Test-Listing $src $w.Items ($w.Rel + '\') }
+    if ($reason) { Write-Host "Папка «$($w.Rel)» пойдёт по файлам: $reason." -ForegroundColor Yellow; continue }
+    $op = "$Stamp-$n"
+    Confirm-Root $w.Folder
+    [void][System.IO.Directory]::CreateDirectory($LongPrefix + $dst.Substring(0, $dst.LastIndexOf('\')))
+    Write-Intent $op 'папка' 'намерение' $w.Rel ($w.Folder + '\' + $w.Rel) $w.Count
+    $moveErr = ''
+    try { [System.IO.Directory]::Move($LongPrefix + $src, $LongPrefix + $dst) } catch { $moveErr = Get-InnerMessage $_ }
+    if (-not $moveErr) {
+        foreach ($it in $w.Items) {
+            Write-LogLine $it 'перемещён' ($Root + '\' + $it.Rel) ($Root + '\' + $it.Folder + '\' + $it.Rel)
+            $it.Done = $true; $Moved++; $MovedBytes += $it.Size
+        }
+        Write-Intent $op 'папка' 'выполнено' $w.Rel ($w.Folder + '\' + $w.Rel) $w.Count
+        $WholeDone++
+        Write-Host ("Папка «{0}» перенесена целиком: {1} файлов." -f $w.Rel, $w.Count) -ForegroundColor Cyan
+    } else {
+        $se = [System.IO.Directory]::Exists($LongPrefix + $src); $de = [System.IO.Directory]::Exists($LongPrefix + $dst)
+        if ($se -and -not $de) {
+            Write-Intent $op 'папка' 'не выполнено' $w.Rel ($w.Folder + '\' + $w.Rel) $w.Count
+            Write-Host "Папку «$($w.Rel)» переименовать не удалось ($moveErr) - пойдёт по файлам." -ForegroundColor Yellow
+        } else {
+            Write-Intent $op 'папка' 'ручная проверка' $w.Rel ($w.Folder + '\' + $w.Rel) $w.Count
+            foreach ($it in $w.Items) { $it.Blocked = 'нужна ручная проверка: перенос папки' }
+            $Manual++
+            Write-Host "НУЖНА РУЧНАЯ ПРОВЕРКА: перенос папки «$($w.Rel)» дал ошибку ($moveErr), на диске не та картина." -ForegroundColor Red
+        }
+    }
+    if ($CanKey -and [Console]::KeyAvailable) { if (([Console]::ReadKey($true)).Key -eq 'Q') { $Stopped = $true } }
+}
+
+# --- 8. По файлам ---
 $LastUi = $Start.AddSeconds(-10)
 $i = 0
 foreach ($it in $Items) {
     $i++
+    if ($Stopped) { break }
+    if ($it.Done) { continue }
     $src = $Root + '\' + $it.Rel
     $dst = $Root + '\' + $it.Folder + '\' + $it.Rel
     $result = ''
     try {
-        $s = [System.IO.FileInfo]::new($LongPrefix + $src)
-        $d = [System.IO.FileInfo]::new($LongPrefix + $dst)
-        if (-not $s.Exists) {
-            if ($d.Exists -and $d.Length -eq $it.Size) { $result = 'уже перемещён' } else { $result = 'нет источника' }
-        }
-        elseif ($s.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $result = 'ссылка (reparse point), не трогал' }
-        elseif ($s.Length -ne $it.Size) { $result = "размер изменился ($($s.Length)), не трогал" }
-        elseif ($it.Mtime -ge 0 -and [math]::Abs(([DateTimeOffset]$s.LastWriteTimeUtc).ToUnixTimeSeconds() - $it.Mtime) -gt 2) { $result = 'дата изменения другая, не трогал' }
-        elseif ($d.Exists) { $result = 'КОНФЛИКТ: в назначении уже есть файл, не трогал' }
+        if ($it.Blocked) { $result = $it.Blocked }
         else {
-            [void][System.IO.Directory]::CreateDirectory($LongPrefix + $dst.Substring(0, $dst.LastIndexOf('\')))
-            [System.IO.File]::Move($LongPrefix + $src, $LongPrefix + $dst)
-            $result = 'перемещён'
-            $Moved++; $MovedBytes += $it.Size
+            $s = [System.IO.FileInfo]::new($LongPrefix + $src)
+            $d = [System.IO.FileInfo]::new($LongPrefix + $dst)
+            if (-not $s.Exists) {
+                $same = $d.Exists -and $d.Length -eq $it.Size -and ($it.Mtime -lt 0 -or [math]::Abs((Get-Unix $d.LastWriteTimeUtc) - $it.Mtime) -le 2)
+                if ($same -and $Started.ContainsKey((Get-DestKey $dst))) { $result = 'уже перемещён' }
+                elseif ($same) { $result = 'нужна ручная проверка: источника нет, в назначении такой же файл, но записи «начато» нет' }
+                else { $result = 'нет источника' }
+            }
+            elseif ($s.Attributes -band $RP) { $result = 'ссылка (reparse point), не трогал' }
+            elseif ($s.Length -ne $it.Size) { $result = "размер изменился ($($s.Length)), не трогал" }
+            elseif ($it.Mtime -ge 0 -and [math]::Abs((Get-Unix $s.LastWriteTimeUtc) - $it.Mtime) -gt 2) { $result = 'дата изменения другая, не трогал' }
+            elseif ($d.Exists -or [System.IO.Directory]::Exists($LongPrefix + $dst)) { $result = 'КОНФЛИКТ: в назначении уже есть файл, не трогал' }
+            elseif ((Test-ReparseChain ($src.Substring(0, $src.LastIndexOf('\')))) -or (Test-ReparseChain ($dst.Substring(0, $dst.LastIndexOf('\'))))) { $result = 'в пути есть ссылка (reparse point), не трогал' }
+            else {
+                Confirm-Root $it.Folder
+                [void][System.IO.Directory]::CreateDirectory($LongPrefix + $dst.Substring(0, $dst.LastIndexOf('\')))
+                Write-LogLine $it 'начато' $src $dst
+                [System.IO.File]::Move($LongPrefix + $src, $LongPrefix + $dst)
+                $result = 'перемещён'
+                $Moved++; $MovedBytes += $it.Size
+            }
         }
     } catch {
         $result = 'ОШИБКА: ' + (Get-InnerMessage $_)
         $Errors++
     }
     if ($result -eq 'уже перемещён') { $Already++ }
+    elseif ($result -like 'нужна ручная проверка*') { $Skipped++; $Manual++ }
     elseif ($result -ne 'перемещён' -and $result -notlike 'ОШИБКА*') { $Skipped++ }
     if ($result -like 'ОШИБКА*') { $ErrorsInRow++ } else { $ErrorsInRow = 0 }
     if ($ErrorsInRow -ge 5) { $Stopped = $true; $Failing = $true; $result += ' | 5 ошибок подряд - перемещение прекращено, проверьте диск' }
-    $Log.WriteLine(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f (Get-Date -Format 'HH:mm:ss'), $result, $it.Size, $it.Sha, $src, $dst, $it.Why))
+    Write-LogLine $it $result $src $dst
     $now = Get-Date
     if ($result -ne 'перемещён' -and $result -ne 'уже перемещён') { Write-Host ("[{0}/{1}] {2} - {3}" -f $i, $Items.Count, $it.Rel, $result) -ForegroundColor Yellow }
     if (($now - $LastUi).TotalMilliseconds -ge 500 -or $i -eq $Items.Count) {
@@ -165,16 +405,17 @@ foreach ($it in $Items) {
         $k = [Console]::ReadKey($true)
         if ($k.Key -eq 'Q') { $Stopped = $true }
     }
-    if ($Stopped) { break }
 }
 $Log.Close()
+$Lock.Close()
 Write-Progress -Id 1 -Activity ' ' -Completed
 $tail = if ($Failing) { ', ПРЕКРАЩЕНО: 5 ошибок подряд' } elseif ($Stopped) { ', ОСТАНОВЛЕНО по Q' } else { '' }
-$color = if ($Errors -gt 0) { 'Red' } else { 'Cyan' }
+$color = if ($Errors -gt 0 -or $Manual -gt 0) { 'Red' } else { 'Cyan' }
 Write-Host ''
-Write-Host ("Итог: перемещено {0} ({1}), уже было перемещено {2}, пропущено {3}, ошибок {4}{5}. Время {6:N1} мин." -f $Moved, (Fmt-GB $MovedBytes), $Already, $Skipped, $Errors, $tail, ((Get-Date) - $Start).TotalMinutes) -ForegroundColor $color
+Write-Host ("Итог: перемещено {0} ({1}; папок целиком {2}), уже было перемещено {3}, пропущено {4}, ошибок {5}{6}. Время {7:N1} мин." -f $Moved, (Fmt-GB $MovedBytes), $WholeDone, $Already, $Skipped, $Errors, $tail, ((Get-Date) - $Start).TotalMinutes) -ForegroundColor $color
+if ($Manual -gt 0) { Write-Host "Нужна ручная проверка: $Manual (строки журнала и «Намерение перемещения.tsv»)." -ForegroundColor Red }
 if ($Skipped -gt 0 -or $Errors -gt 0) { Write-Host 'Пропущенные и ошибки - строки журнала, кроме «перемещён» и «уже перемещён».' -ForegroundColor Yellow }
 Write-Host "Журнал: $LogPath"
 if (-not $Auto) { [void](Read-Host 'Enter - закрыть') }
-if ($Errors -gt 0) { exit 1 }
+if ($Errors -gt 0 -or $Manual -gt 0) { exit 1 }
 exit 0

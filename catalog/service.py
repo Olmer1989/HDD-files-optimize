@@ -1133,3 +1133,345 @@ def contested(disk, folder):
     got = hb.contested(c, disk, folder)
     free = free_space(list(got))
     return [(d, free.get(d, ('', 0))[0], got[d]) for d in sorted(got)]
+
+
+# ---------- экран «Разбор носителя» (логика v3, этап 2, 15.11.2026; razbor_page.py) ----------
+
+def razbor_tree(disk):
+    """Всё для дерева экрана «Разбор носителя» одним вызовом, ничего не пишет: папки носителя из таблицы folders
+    (суммы по поддереву: файлов, байт, число и байты по 5 типам), служебные папки переноса, направления и сохранённые
+    отметки (снимок таблиц под замком - тот же, по которому считает итог), сведения об описи, поколение базы. -> dict."""
+    snap = snapshot()
+    c = ro()
+    try:
+        check_disk(c, disk)
+        cols = 'folder, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(5))
+        folders = {}
+        for r in c.execute(f'select {cols} from folders where disk=?', (disk,)):
+            folders[r[0]] = (r[1] or 0, r[2] or 0, tuple(r[3 + 2 * i] or 0 for i in range(5)),
+                             tuple(r[4 + 2 * i] or 0 for i in range(5)))
+        roots = hb.moved_roots(c, disk)
+        st = c.execute('select status, scanned, label from disks where disk=?', (disk,)).fetchone() or ('', None, '')
+        issues = c.execute('select count(*) from issues where disk=?', (disk,)).fetchone()[0]
+        gen = (c.execute("select value from meta where key='built'").fetchone() or [''])[0]
+    finally:
+        c.close()
+    return dict(disk=disk, folders=folders, roots=roots, dirs=hb.parse_directions(snap['directions']),
+                rows=hb.mark_rows(disk, snap['decisions']), sig=snap['sig'], built=gen, status=st[0] or '',
+                scanned=st[1], label=st[2] or '', issues=issues)
+
+
+def razbor_have(disk, disks_):
+    """Колонка «Уже есть» экрана разбора: файлы носителя С ХЕШЕМ по папкам (непосредственно в папке, без подпапок), по
+    типам и по тому, на каких из дисков disks_ уже есть подтверждённая запись (S/C) с тем же SHA-256: 45 и 77 - по
+    таблице presence, у других дисков - множество их SHA-256 (как в итоге разбора; поиск по индексу на каждый файл был
+    в 4 раза медленнее). Сам носитель среди disks_ считается имеющим файл (как в итоге разбора). Один проход по файлам
+    с хешем носителя; ничего не пишет. Замер на настоящей базе: HDD45 (567 тыс. файлов с хешем) - около 5 с.
+    -> {папка: {маска: [n0..n4, b0..b4]}}, бит i маски - диск disks_[i]."""
+    disks_ = list(disks_)
+    main = [(i, d) for i, d in enumerate(disks_) if d in hb.MAIN and d != disk]
+    base = sum(1 << i for i, d in enumerate(disks_) if d == disk)
+    sel = ''.join(f", coalesce(p.e{d[3:]} in ('S','C'), 0)" for _, d in main)
+    q = (f'select f.path, f.size, f.name_lc, f.sha{sel} from files f ' +
+         ('left join presence p on p.sha=f.sha ' if main else '') + 'where f.disk=? and f.sha is not null')
+    ft = hb.fast_folder_type()
+    res = collections.defaultdict(dict)
+    c = ro()
+    try:
+        sets = [(1 << i, {x for (x,) in c.execute('select sha from files where disk=? and sha is not null', (d,))})
+                for i, d in enumerate(disks_) if d not in hb.MAIN and d != disk]
+        bits = [1 << i for i, _ in main]
+        for r in c.execute(q, (disk,)):
+            path, size, sha = r[0], r[1] or 0, r[3]
+            mask = base
+            for b, x in zip(bits, r[4:]):
+                if x:
+                    mask |= b
+            for b, s_ in sets:
+                if sha in s_:
+                    mask |= b
+            k = ft(path, r[2], size)
+            cell = res[hb.parent_of(path)].get(mask)
+            if cell is None:
+                cell = res[hb.parent_of(path)][mask] = [0] * 10
+            cell[k] += 1
+            cell[5 + k] += size
+    finally:
+        c.close()
+    return dict(res)
+
+
+# ---------- экран «Направления» и шаблон копирования 2.4 (логика v3, этап 4, 15.11.2026; directions_page.py) ----------
+# Документ - «Логика_v3_разбор_носителя.md», раздел «Этап 4». Описание направления («что собирается на этих дисках») -
+# 7-я колонка направления.tsv (hb_core/directions.py). Смена дисков у направления с заданиями: предпросмотр показывает
+# задания по журналам и отметки; убрать диск, на который у направления есть задания, - только с подтверждением (ack).
+
+DESC_MAX = 200
+GOOD_COPY = ('скопирован', 'уже есть')
+
+
+def direction_usage(num, dirs=None, root=None):
+    """Что уже сделано по направлению: задания (по разбор.json в папках заданий) с ходом по каждой цели ПО ЖУРНАЛАМ
+    и число действующих отметок папок. -> dict(tasks=[dict(name, disks, targets, per={диск: (хорошо, всего)},
+    state)], marks={носитель: n}). «хорошо» - строки журнала «скопирован…» или «уже есть» (это не доказательство
+    копии: подтверждение даёт только база по SHA-256)."""
+    dirs = directions() if dirs is None else dirs
+    root = Path(root or hb.TASKS)
+    tasks_ = []
+    if root.exists():
+        for t in sorted(p for p in root.iterdir() if p.is_dir()):
+            meta = _task_meta(t)
+            if not meta or meta.get('направление') != num:
+                continue
+            total = collections.Counter(f[0] for f in hb.read_tsv(t / 'список.tsv') if len(f) >= 3) \
+                if (t / 'список.tsv').exists() else collections.Counter()
+            good = collections.defaultdict(set)
+            logs = sorted(t.glob('Журнал копирования *.tsv'))
+            for log in logs:
+                for f in hb.read_tsv(log)[1:]:
+                    if len(f) >= 7 and f[2].startswith(GOOD_COPY):
+                        good[f[1]].add(f[5].lower())
+            per = {d: (min(len(good[d]), total[d]), total[d]) for d in (meta.get('цели') or sorted(total))}
+            if not logs:
+                state = 'не запускалось'
+            elif all(g >= n for g, n in per.values()):
+                state = 'по журналам все строки пройдены'
+            else:
+                state = 'по журналам не всё'
+            tasks_.append(dict(name=t.name, disks=meta.get('обязательные диски') or [], targets=meta.get('цели') or [],
+                               per=per, state=state))
+    marks = collections.Counter()
+    data = hb.table_bytes(hb.DECISIONS)
+    last = {}
+    for i, f in enumerate(hb.tsv_rows(data[:data.rfind(b'\n') + 1]), start=1):
+        f = [x.strip() for x in f] + [''] * 3
+        if i == 1 and f[0].lower() == 'диск':
+            continue
+        if f[1].lower().startswith('класс:') or not f[2]:
+            continue
+        last[(f[0], f[1].strip(SEP).lower())] = f[2]
+    for (disk, _p), verdict in last.items():
+        kind, n, _, _ = hb.parse_verdict(verdict, dirs)
+        if kind == hb.R_DIR and n == num:
+            marks[disk] += 1
+    return dict(tasks=tasks_, marks=dict(marks))
+
+
+def copied_name(d):
+    return d.folder() or f'Скопировано на {d.name} (диск не назначен)'
+
+
+def _usage_lines(cur, nd, dirs, root=None):
+    """Строки предпросмотра смены дисков. -> (строки, убранные диски, на которые у направления есть задания)."""
+    use = direction_usage(cur.num, dirs, root)
+    old, new = list(cur.disks), list(nd.disks)
+    removed, added = [d for d in old if d not in new], [d for d in new if d not in old]
+    lines = []
+    if use['tasks']:
+        lines.append(f'У направления уже подготовлено заданий: {len(use["tasks"])}. Ход по журналам копирования '
+                     '(журнал - не подтверждение; подтверждает база по SHA-256):')
+        for t in use['tasks'][:8]:
+            per = ', '.join(f'{d}: {g} из {n}' for d, (g, n) in t['per'].items())
+            lines.append(f'  «{t["name"]}» - {t["state"]} ({per})')
+        if len(use['tasks']) > 8:
+            lines.append(f'  … и ещё {len(use["tasks"]) - 8}')
+        lines.append('Уже созданные задания и перемещения по ним по-прежнему требуют копий на своих прежних дисках '
+                     f'({", ".join(sorted({d for t in use["tasks"] for d in t["disks"]}))}).')
+    if use['marks']:
+        lines.append('Отмечено папок этим направлением: ' + ', '.join(f'{d}: {n}' for d, n in sorted(use['marks'].items()))
+                     + '. Новые задания по этим отметкам пойдут на новый набор дисков.')
+    if old:
+        lines.append('Прежние копии на новый диск сами не попадут: что не хватает на новом диске, покажет итог разбора '
+                     'носителя (строка «копировать на …»).')
+        lines.append(f'Папки «{copied_name(cur)}» на носителях не переименовываются; новые будут «{copied_name(nd)}».')
+    risky = []
+    for d in removed:
+        n = sum(1 for t in use['tasks'] if d in t['targets'] or d in t['disks'])
+        lines.append(f'Диск {d} перестаёт быть диском направления; всё, что на нём уже скопировано, остаётся на нём.'
+                     + (f' На этот диск у направления заданий: {n} - нужно подтверждение.' if n else ''))
+        if n:
+            risky.append(d)
+    for d in added:
+        busy = [f'{x.num} «{x.name}»' for x in dirs.values() if x.num != cur.num
+                and any(d in t['targets'] for t in direction_usage(x.num, dirs, root)['tasks'])]
+        if busy:
+            lines.append(f'На диск {d} раньше шли задания направлений {", ".join(busy)}: их копии остаются там.')
+    return lines, risky
+
+
+def direction_save_preview(num=None, name=None, disks=None, kind=None, desc=None, dirs=None, c=None, root=None):
+    """Окно «Направления»: новое направление (num=None) или полная новая версия: имя, диски (ПОЛНЫЙ список; None -
+    оставить), что копировать, описание (None - оставить). Проверки - ядро direction_preview (имя, прежние имена,
+    один диск - одному направлению, диск есть в базе). Одна строка таблицы.
+    -> dict(fields, lines, direction, needs_ack=[убранные диски, на которые есть задания])."""
+    import dataclasses
+    dirs = directions() if dirs is None else dirs
+    d_txt = None if desc is None else ' '.join(str(desc).split())
+    if d_txt is not None and len(d_txt) > DESC_MAX:
+        raise Refused(f'Описание длиннее {DESC_MAX} знаков.')
+    cur = None
+    if num:
+        cur = dirs.get(hb.norm_num(num)) or hb.find_direction(dirs, num)
+        if not cur:
+            raise Refused(f'Нет направления «{num}».')
+    want = None if disks is None else list(dict.fromkeys(x.strip() for x in disks if x and x.strip()))
+    core_same = cur is not None and (name is None or name.strip() == cur.name) \
+        and (want is None or want == list(cur.disks)) and (kind is None or _norm_kind(kind) == cur.kind)
+    if core_same:
+        if d_txt is None or d_txt == (cur.desc or ''):
+            raise Refused('Ничего не меняется.')
+        nd = dataclasses.replace(cur, desc=d_txt)
+        lines = [f'Изменить {cur.num} «{cur.name}»: только описание.']
+    else:
+        pv = direction_preview(num=cur.num if cur else None, name=name, disks=want, kind=kind, dirs=dirs, c=c)
+        nd = dataclasses.replace(pv['direction'], desc=d_txt if d_txt is not None else ((cur.desc or '') if cur else ''))
+        lines = list(pv['lines'])
+    if d_txt is not None and d_txt != ((cur.desc or '') if cur else ''):
+        lines.append(f'Что собирается на дисках: «{d_txt}».' if d_txt else 'Описание будет стёрто.')
+    risky = []
+    if cur and list(cur.disks) != list(nd.disks):
+        more, risky = _usage_lines(cur, nd, dirs, root)
+        lines += more
+    return dict(fields=hb.direction_row(nd), lines=lines, direction=nd, needs_ack=risky)
+
+
+def direction_save(ack=False, **kw):
+    """Запись из окна: под замком таблиц снова предпросмотр по свежей таблице, затем одна строка (копия - в архив)."""
+    with TableLock():
+        snap = _read_snapshot()
+        pv = direction_save_preview(dirs=hb.parse_directions(snap['directions']), **kw)
+        if pv['needs_ack'] and not ack:
+            raise Refused('Диск ' + ', '.join(pv['needs_ack']) + ' убирается из направления, у которого есть задания на '
+                          'него. Поставьте галочку «Понимаю…» и запишите снова.')
+        _ensure_directions()
+        backup(hb.DIRECTIONS)
+        pv['line'] = append_row(hb.DIRECTIONS, pv['fields'])
+    return pv
+
+
+TEMPLATE_VER_RE = re.compile(r'версия (\d+)\.(\d+)')
+
+
+def copy_template_version(task):
+    """Версия шаблона копирования в папке задания: (2, 4) / (2, 3) / None. Для очереди: -Confirmed понимают только
+    задания 2.4 и новее; старые в автоматическую очередь не включаются (Дискуссия этапа 4, р2-7)."""
+    try:
+        with open(Path(task) / 'Копировать.ps1', encoding='utf-8-sig') as f:
+            m = TEMPLATE_VER_RE.search(f.readline())
+    except OSError:
+        return None
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def copy_task_fingerprint(task):
+    """Отпечаток задания для подтверждения в окне (шаблон 2.4, параметр -Expect): SHA-256 байтов список.tsv + 0 +
+    тома.tsv + 0 + разбор.json (нет файла - пусто), заглавными; и объём по целям из ТЕХ ЖЕ байтов: {цель: (файлов,
+    байт)}. Окно показывает владельцу объём по целям, шаблону передаёт отпечаток: изменилось что-то - шаблон не начнёт."""
+    import hashlib
+    task = Path(task)
+    lst = (task / 'список.tsv').read_bytes()
+    vol = (task / 'тома.tsv').read_bytes()
+    raz = (task / 'разбор.json').read_bytes() if (task / 'разбор.json').exists() else b''
+    sha = hashlib.sha256(lst + b'\0' + vol + b'\0' + raz).hexdigest().upper()
+    per = collections.defaultdict(lambda: [0, 0])
+    for f in hb.tsv_rows(lst):
+        if len(f) >= 3 and f[2].strip().isdigit():
+            per[f[0]][0] += 1
+            per[f[0]][1] += int(f[2])
+    return dict(sha=sha, per={k: tuple(v) for k, v in per.items()})
+
+
+# ---------- логика v3, этап 3: «Повторить копирование» остального (после «Переместить скопированное») ----------
+# Старое задание не перезапускается: после переноса скопированной части его строки дали бы «нет источника».
+# Создаётся новое задание «<задание> — повтор N» только из пар (цель, путь), у которых последний результат по журналам
+# исходного задания и всех прежних повторов - не «скопирован…» и не «уже есть». Ничего не копирует и не запускает.
+
+RETRY_WORD = ' — повтор'
+
+
+def _copy_group(name):
+    """Исходное задание разбора и все его повторы -> (папка исходного, разбор.json исходного, [папки повторов])."""
+    t = hb.TASKS / name
+    meta = _task_meta(t)
+    if not meta:
+        raise Refused(f'«{name}» - не задание разбора (нет разбор.json).')
+    if meta.get('повтор'):
+        t = hb.TASKS / meta['повтор']
+        meta = _task_meta(t)
+        if not meta:
+            raise Refused(f'Нет исходного задания «{t.name}».')
+    retries = []
+    if hb.TASKS.exists():
+        for d in sorted(p for p in hb.TASKS.iterdir() if p.is_dir()):
+            m = _task_meta(d) if (d / 'разбор.json').exists() else None
+            if m and m.get('повтор') == t.name:
+                retries.append(d)
+    return t, meta, retries
+
+
+def copy_left(name):
+    """Что не скопировано: [(строка списка.tsv исходного задания)], по паре (цель, путь) и последнему результату."""
+    t, _meta, retries = _copy_group(name)
+    last = {}
+    logs = []
+    for d in [t] + retries:
+        logs += [(hb.log_time(x), x) for x in d.glob('Журнал копирования *.tsv')]
+    for _w, log in sorted(logs, key=lambda x: (x[0], x[1].name)):
+        rows = hb.read_tsv(log)
+        head = [h.strip().lower() for h in rows[0]] if rows else []
+        if not all(x in head for x in ('цель', 'результат', 'источник')):
+            continue
+        i_t, i_r, i_s = head.index('цель'), head.index('результат'), head.index('источник')
+        for f in rows[1:]:
+            if len(f) > max(i_t, i_r, i_s):
+                last[(f[i_t].strip(), hb.rel_of(f[i_s])[1])] = f[i_r]
+    sub = ''
+    vols = [f for f in hb.read_tsv(t / 'тома.tsv') if len(f) >= 2]
+    if vols and len(vols[0]) >= 3:
+        sub = vols[0][2].strip().strip(SEP)
+    res = []
+    for f in hb.read_tsv(t / 'список.tsv'):
+        if len(f) < 3 or not f[0].strip():
+            continue
+        key = (f[0].strip(), (sub + SEP + f[1]) if sub else f[1])
+        r = last.get(key, '')
+        if not (r.startswith('скопирован') or r == 'уже есть'):
+            res.append(f)
+    return res
+
+
+def retry_copy_task(name):
+    """«Повторить копирование»: новое задание из того, что не скопировано. -> dict(task, files, bytes)."""
+    t, meta, retries = _copy_group(name)
+    running = running_scripts()
+    for d in [t] + retries:
+        st = task_state(d, running)
+        if st and st['state'] == 'идёт':
+            raise Refused(f'Задание «{d.name}» сейчас идёт - дождитесь конца.')
+    rows = copy_left(t.name)
+    if not rows:
+        raise Refused(f'В задании «{t.name}» всё скопировано - повторять нечего.')
+    n = len(retries) + 1
+    while (hb.TASKS / f'{t.name}{RETRY_WORD} {n}').exists():
+        n += 1
+    new = f'{t.name}{RETRY_WORD} {n}'
+    hb.RAZBORY.mkdir(parents=True, exist_ok=True)
+    stage = hb.RAZBORY / (new + '.tmp')
+    if stage.exists():
+        raise Refused(f'Осталась папка прошлой попытки: {stage}. Уберите её и повторите.')
+    stage.mkdir()
+    with io.open(stage / 'список.tsv', 'w', encoding='utf-8', newline='\n') as f:
+        for r in rows:
+            f.write('\t'.join(r) + '\n')
+    shutil.copy2(t / 'тома.tsv', stage / 'тома.tsv')
+    for fn in ('Копировать.ps1', 'Запустить.cmd'):
+        shutil.copy2(hb.TEMPLATE / fn, stage / fn)
+    _write_json(stage / 'разбор.json', dict(meta, повтор=t.name, **{'дата повтора': time.strftime('%d.%m.%Y %H:%M')}))
+    os.replace(stage, hb.TASKS / new)
+    size = 0
+    for r in rows:
+        try:
+            size += int(r[2])
+        except (IndexError, ValueError):
+            pass
+    return dict(task=hb.TASKS / new, files=len(rows), bytes=size)

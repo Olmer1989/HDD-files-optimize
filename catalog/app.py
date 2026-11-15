@@ -127,11 +127,14 @@ class OverviewPage(QWidget):
         top.addStretch()
         top.addWidget(self.btn)
         lay.addLayout(top)
+        self.dirs = __import__('directions_page').DirectionsSection(win)     # «Направления» (логика v3, этап 4)
+        lay.addWidget(self.dirs)
         self.text = QTextBrowser()
         self.text.setOpenExternalLinks(False)
         lay.addWidget(self.text)
 
     def refresh(self):
+        self.dirs.refresh()
         self.text.setHtml('<p>Считаю…</p>')
         self.win.bg.run(lambda: (sv.overview(), sv.tasks()), ok=self.render)
 
@@ -467,7 +470,9 @@ class Window(QMainWindow):
         self.resize(1250, 800)
         self.bg = Background(self)
         self.updating, self.sig = False, None
-        self.pages = [('Обзор', OverviewPage(self)), ('Задания', __import__('tasks_page').TasksPage(self)), ('Диски и папки', DisksPage(self)),
+        self.pages = [('Обзор', OverviewPage(self)),
+                      ('Разбор носителя', __import__('razbor_page').RazborPage(self)),
+                      ('Задания', __import__('tasks_page').TasksPage(self)), ('Диски и папки', DisksPage(self)),
                       ('Я сделал в Проводнике', explorer_page.ExplorerPage(self)),
                       ('Команды', commands_page.CommandsPage(self))]
         self.nav = QListWidget()

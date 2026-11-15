@@ -13,13 +13,36 @@ from hb_core.report import save, table
 from hb_core.sources import log_time, read_table, read_tsv, serial_map
 
 
+class Decisions(list):
+    """Список решений диска [(путь, решение)] и служебные папки «Скопировано на …» этого диска (из moved_roots):
+    decision_of снимает их с пути, как «ПЕРЕНЕСЕНО → …» (логика v3, этап 3). Сравнивается как обычный список."""
+    roots = frozenset()
+
+
+def copied_roots(disk):
+    """Папки «Скопировано на …» диска, созданные журналом перемещения (таблица moved_roots). Только чтение базы;
+    базы или таблицы ещё нет (база старой версии, тесты без базы) - пусто."""
+    import sqlite3
+    if not disk or not paths.DB.exists():
+        return frozenset()
+    try:
+        c = sqlite3.connect(f'file:{paths.DB.as_posix()}?mode=ro', uri=True, timeout=30)
+        try:
+            return frozenset(r[0] for r in c.execute('select folder from moved_roots where disk=?', (disk,)))
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return frozenset()
+
+
 def decisions_for(disk):
     """Решения по путям для диска (строки с диском «*» действуют на все диски)."""
-    res = []
+    res = Decisions()
     for f in read_table(paths.DECISIONS)[1:]:
         f = [x.strip() for x in f] + [''] * 4
         if f[0] in (disk, '*') and f[2] and not f[1].lower().startswith('класс:') and not is_v3_mark(f[2]):
             res.append((f[1].rstrip(SEP), f[2]))        # отметки разбора v3 старые команды не видят (логика v3, 1.3)
+    res.roots = copied_roots(disk)
     return res
 
 
@@ -34,7 +57,7 @@ def class_rules(disk):
 
 
 def decision_of(path, decs):
-    path = original_path(path)                # решения привязаны к исходному пути и действуют после перемещения
+    path = original_path(path, getattr(decs, 'roots', None))   # решения - по исходному пути, действуют после перемещения
     for p, verdict in decs:
         if not p or path == p or path.startswith(p + SEP):
             return verdict

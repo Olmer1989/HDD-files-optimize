@@ -105,7 +105,7 @@ class ModulesTest(unittest.TestCase):
             if not show:
                 hidden.add(name)
         self.assertEqual(hidden, {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist',
-                                  'manual', 'fix-manual'})
+                                  'manual', 'fix-manual', 'mklist', 'decide', 'exclude', 'rescan-plan'})
 
     def test_visible_commands_have_window_texts(self):
         # окно «Архив дисков»: у каждой видимой команды есть понятный заголовок и группа (GUI_TITLE, GUI_GROUP)

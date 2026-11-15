@@ -159,10 +159,12 @@ def moved_folder(targets):
     return MOVED_PREFIX + (nums[0] if len(nums) == 1 else ', '.join(nums[:-1]) + ' и ' + nums[-1])
 
 
-def original_path(path):
-    """Путь файла до перемещения на источнике: «ПЕРЕНЕСЕНО → только 77\\A\\1.jpg» -> «A\\1.jpg»."""
+def original_path(path, roots=None):
+    """Путь файла до перемещения на источнике: «ПЕРЕНЕСЕНО → только 77\\A\\1.jpg» -> «A\\1.jpg».
+    roots - служебные папки «Скопировано на …» этого носителя из журнала перемещения (таблица moved_roots, логика v3):
+    только они снимаются; папка, которую владелец сам назвал «Скопировано на …», остаётся частью пути."""
     head, _, tail = path.partition(SEP)
-    return tail if tail and is_moved_dir(head) else path
+    return tail if tail and (is_moved_dir(head) or (roots and head in roots)) else path
 
 
 def moved_rel(src, dst):

@@ -1044,6 +1044,14 @@ class CommandsPage(QWidget):
                       (self.btn_copy, self.copy)):
             b.clicked.connect(fn)
             bar.addWidget(b)
+        # после ответа «можно ли удалить» = НЕТ / НЕДОСТАТОЧНО (логика v3, этап 2): диск и папка - те, что были при запуске
+        self.btn_contested = QPushButton('Пересчитать хеши спорных файлов…')
+        self.btn_contested.setToolTip('Где лежат файлы без хеша и неподтверждённые копии этой папки; подключённые диски - '
+                                      'пересканировать с хешем всех файлов, остальные - какие подключить.')
+        self.btn_contested.clicked.connect(self.contested)
+        self.btn_contested.hide()
+        self.candel_args = None
+        bar.addWidget(self.btn_contested)
         self.state = QLabel('')
         bar.addWidget(self.state, 1)
         tl.addLayout(bar)
@@ -1152,6 +1160,8 @@ class CommandsPage(QWidget):
             d = hb.TASKS / f.value('name')
             self.task_dir = None if d.exists() else d     # только задание, созданное именно этим запуском
         self.protected = self.yes or (f.task and '--dry' not in args)
+        self.btn_contested.hide()
+        self.candel_args = (f.value('disk'), f.value('folder') or '') if self.current == 'candel' else None
         self.cmd, self.lines, self.links = self.current, [], []
         self.out.clear()
         self.add(['> hashbase.py ' + ' '.join(quote(x) for x in args)], gray=True)
@@ -1236,6 +1246,10 @@ class CommandsPage(QWidget):
             self.state.setText(f'<b style="color:#c62828">Ошибка: код выхода {code}.</b>')
             self.add([f'Команда завершилась с ошибкой (код выхода {code}).'] + tail, color='#c62828')
         form = self.form(self.cmd)
+        if self.cmd == 'candel' and self.candel_args and any(x.startswith(('ОТВЕТ: НЕТ', 'ОТВЕТ: НЕДОСТАТОЧНО'))
+                                                             for x in self.lines):
+            self.btn_contested.setText(f'Пересчитать хеши спорных файлов ({self.candel_args[0]})…')
+            self.btn_contested.show()
         if code == 0 and form.write and not self.yes:
             self.preview = (self.cmd, run.args)
             self.add(['Это предпросмотр. Если всё верно - нажмите «Записать».'], color='#e65100')
@@ -1287,6 +1301,14 @@ class CommandsPage(QWidget):
                 QGuiApplication.clipboard().setText(str(path))
         except OSError as e:
             QMessageBox.information(self, TITLE, f'Не открылось: {e}')
+
+    def contested(self):
+        """Окно «Пересчитать хеши спорных файлов» (то же, что в «Разборе носителя») для диска и папки проверки."""
+        if not self.candel_args:
+            return
+        import razbor_page                       # не при загрузке: страница разбора сама берёт DiskCombo отсюда
+        self.contested_dlg = razbor_page.ContestedDialog(self.win, *self.candel_args)
+        self.contested_dlg.show()
 
     def copy(self):
         QGuiApplication.clipboard().setText('\n'.join(self.lines))

@@ -38,6 +38,7 @@ class Direction:
     disks: tuple = ()
     kind: str = KIND_ALL
     note: str = ''
+    desc: str = field(default=None, compare=False)   # None - строка без 7-й колонки (наследует описание)
 
     @property
     def media_only(self):
@@ -88,9 +89,10 @@ def _rows(data):
 
 def parse_directions(data):
     """Байты направления.tsv -> {номер: Direction} (последняя строка номера), по возрастанию номера."""
-    cur, names_seen = {}, collections.defaultdict(list)
+    cur, names_seen, descs = {}, collections.defaultdict(list), {}
     for f in _rows(data):
-        f = [x.strip() for x in f] + [''] * 6
+        has_desc = len(f) >= 7
+        f = [x.strip() for x in f] + [''] * 7
         num = norm_num(f[0])
         if not num or not f[1]:
             continue                                   # заголовок и пустые строки
@@ -99,6 +101,8 @@ def parse_directions(data):
         disks = tuple(dict.fromkeys(x.strip() for x in f[3].split(',') if x.strip()))
         kind = f[4] if f[4] in KINDS else KIND_ALL
         cur[num] = (f[1], former, disks, kind, f[5])
+        if has_desc:
+            descs[num] = f[6]
     res = {}
     for num in sorted(cur, key=num_key):
         name, former, disks, kind, note = cur[num]
@@ -106,7 +110,7 @@ def parse_directions(data):
         for x in former + names_seen[num]:
             if x.casefold() != name.casefold() and x.casefold() not in {y.casefold() for y in allf}:
                 allf.append(x)
-        res[num] = Direction(num, name, tuple(allf), disks, kind, note)
+        res[num] = Direction(num, name, tuple(allf), disks, kind, note, descs.get(num, ''))
     return res
 
 
@@ -151,7 +155,8 @@ def check_name(name):
 
 
 def direction_row(d):
-    return [d.num, d.name, '; '.join(d.former), ', '.join(d.disks), d.kind, d.note]
+    row = [d.num, d.name, '; '.join(d.former), ', '.join(d.disks), d.kind, d.note]
+    return row + [d.desc] if d.desc is not None else row      # без описания - 6 колонок: описание наследуется
 
 
 # ---------- отметки ----------
