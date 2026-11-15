@@ -20,11 +20,15 @@ import uuid
 from inventory import inventory, volume, discover_disk, MEDIA, MIN_BYTES, EXCLUDED_DIRS
 from build_selection import select, THRESHOLDS_V1, THRESHOLDS_V2, CAMERA_IMAGES, VIDEO
 from hash_files import hash_one, signature, ReadFailure
+import rescan
 
 # VERSION is the job format/algorithm. It is unchanged, so jobs started by
 # 1.0.x continue with this program. APP_VERSION is the program release.
 VERSION = '1.0.0'
-APP_VERSION = '1.3.2'
+# Partial (selected folders) jobs have their own format version, so that a program
+# before 1.4.0 refuses to continue them as a full scan of the whole disk.
+VERSION_PARTIAL = '1.1.0'
+APP_VERSION = '1.4.0'
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
@@ -478,7 +482,9 @@ def process(job):
     global JOB_LOG
     manifest = json.loads((job / 'job.json').read_text(encoding='utf-8'))
     JOB_LOG = job / 'log.txt'  # early, so that a refusal is also kept with the job
-    if manifest.get('version') != VERSION or policy_version(manifest['policy']) is None:
+    partial = is_partial_job(manifest)
+    allowed = (VERSION, VERSION_PARTIAL) if partial else (VERSION,)
+    if manifest.get('version') not in allowed or policy_version(manifest['policy']) is None:
         raise RuntimeError('Different scan policy; use the original worker version')
     disk_id, record = manifest['disk_id'], manifest['record']
     base_state = {'job': str(job), 'disk_id': disk_id, 'model': record.get('model', ''),
@@ -502,6 +508,8 @@ def process(job):
                          'disk_id': disk_id, 'letter': root[0], 'physical': physical, 'identity': info})
         check()
         started = time.monotonic()
+        if partial:      # selected folders: own pass, the register of full scans is not touched
+            return run_partial(job, manifest, root, check, run_id, base_state, physical, started)
         inv = job / 'inventory.sqlite'
         if not inv.exists() or not manifest.get('inventory_finished'):
             # An interrupted metadata pass is rebuilt; hashes are never discarded.
@@ -675,6 +683,234 @@ def process(job):
     refresh_index(results_root(job))
     return 0 if report['status'].startswith('complete') else 2
 
+def is_partial_job(manifest):
+    return str(manifest.get('scan_scope') or '').lower() == 'partial'
+
+def prior_sources(manifest):
+    """Previous jobs of this disk fixed at job creation (rescan.find_sources), oldest first."""
+    return [{**s, 'dir': Path(s['dir'])} for s in manifest.get('prior_sources') or []]
+
+def run_partial(job, manifest, root, check, run_id, base_state, physical, started):
+    """Selected folders of a disk (1.4.0). The inventory of the folders is made anew on every run; a file is read
+    only if its previous hash cannot be trusted (rescan.decide); every hash row keeps the earliest moment when it
+    was certainly not yet measured (hash_info.bound_ns), also along a chain of reuse."""
+    disk_id, folders = manifest['disk_id'], manifest['folders']
+    rehash_all = bool(manifest.get('rehash_all'))
+    run_start_ns = time.time_ns()
+    inv = job / 'inventory.sqlite'
+    if inv.exists():
+        inv.unlink()                     # a new inventory of the folders on every run: no stale paths
+    manifest['inventory_finished'] = False
+    write_json(job / 'job.json', manifest)
+    last_publish = [0.0]
+    def inventory_progress(summary):
+        now = time.monotonic()
+        if now - last_publish[0] >= 2:
+            last_publish[0] = now
+            publish({**base_state, 'phase': 'inventory', 'phase_title': 'Этап 1 из 2: опись выбранных папок',
+                     'files_done': summary['files'], 'bytes_done': summary['bytes'], 'errors': summary['errors'],
+                     'elapsed_seconds': round(now - started)})
+    say('Папки: ' + '; '.join(folders))
+    say('Этап 1 из 2: опись выбранных папок (только имена, размеры и даты)')
+    with closing(sqlite3.connect(inv)) as db:
+        summary = inventory(root, db, check, inventory_progress, folders=folders)
+    write_json(job / 'inventory_summary.json', summary)
+    report = {'disk_id': disk_id, 'scan_scope': 'partial', 'folders': folders, 'hash_scope': 'all_regular_files',
+              'rehash_all': rehash_all, 'status': 'running', 'inventory_errors': summary['errors'], 'physical': physical,
+              'app_version': APP_VERSION}
+    if summary['status'] == 'interrupted':
+        report['status'] = 'interrupted' if STOP_FILE and STOP_FILE.exists() else 'error'
+        report['error'] = 'Опись папок прервана'
+    elif summary['errors']:
+        # A folder that could not be listed must not look empty: the database would drop its records.
+        report['status'] = 'inventory_incomplete'
+        report['error'] = (f'Недоступно мест при описи: {summary["errors"]}. База такой скан не примет; '
+                           'исправьте доступ и продолжите сканирование.')
+    if report['status'] != 'running':
+        write_json(job / 'result.json', report)
+        append_run(job, {'event': 'finish', 'run_id': run_id, 'utc': utc(), 'status': report['status'],
+                         'error': report['error']})
+        publish({**base_state, 'phase': 'stopped' if report['status'] == 'interrupted' else 'error',
+                 'phase_title': report['error'], 'status': report['status']})
+        say(f'=== Итог: {report["status"]} · {report["error"]}')
+        return 2
+    manifest['inventory_finished'] = True
+    write_json(job / 'job.json', manifest)
+    say(f'Опись завершена: {summary["files"]:,} файлов, {summary["bytes"] / 1e9:,.1f} ГБ')
+    ntfs = volume(root)[2].upper() == 'NTFS'
+    sources = prior_sources(manifest)
+    prior = {} if rehash_all else rescan.prior_map(sources, folders)
+    with closing(sqlite3.connect(inv.as_uri() + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(job / 'hashes.sqlite')) as target:
+        target.execute('create table if not exists hashes(disk_id text,path text,size integer,mtime_ns text,file_id text,sha256 text,status text,error text,primary key(disk_id,path))')
+        # How each hash was obtained: read in this job, or reused (from_job, its basis). bound_ns: before this moment
+        # the hash was certainly not yet measured - the start of the run (or job) that really read the file.
+        target.execute('create table if not exists hash_info(path text primary key,how text,from_job text,bound_ns integer,'
+                       'change_ns integer,reason text)')
+        rows = source.execute('select path,size,mtime_ns,ctime_ns,file_id from files order by size,path').fetchall()
+        present = {r[0] for r in rows}
+        stale = [p for (p,) in target.execute('select path from hashes where disk_id=?', (disk_id,)) if p not in present]
+        target.executemany('delete from hashes where disk_id=? and path=?', [(disk_id, p) for p in stale])
+        target.executemany('delete from hash_info where path=?', [(p,) for p in stale])
+        target.commit()
+        own = {p: (s, str(m), str(i), st, sha) for p, s, m, i, st, sha in target.execute(
+            'select path,size,mtime_ns,file_id,status,sha256 from hashes where disk_id=?', (disk_id,))}
+        own_info = {p: (fj, b) for p, fj, b in target.execute('select path,from_job,bound_ns from hash_info')}
+        gone = [p for p in prior if p not in present]
+        by_id = {}
+        for p in gone:
+            r = prior[p]
+            if r['file_id'] not in ('', '0'):
+                by_id.setdefault((r['file_id'], r['size'], r['mtime_ns']), []).append(p)
+        total = sum(r[1] for r in rows)
+        def usable(rel, size, mtime, ctime, file_id):
+            o = own.get(rel)
+            if o and o[3] == 'verified' and o[4] and o[:2] == (size, str(mtime)) and rel in own_info:
+                fj, b = own_info[rel]
+                return dict(size=size, mtime_ns=str(mtime), file_id=o[2], ctime_ns=str(ctime or '0'), sha=o[4],
+                            status='verified', job=fj, bound_ns=b, own=True)
+            return prior.get(rel)
+        to_read = total - sum(r[1] for r in rows if (lambda c: c and c['sha'] and c['size'] == r[1] and c['mtime_ns'] == str(r[2]))(usable(*r)))
+        cached = reused = hashed = unread = damaged = 0
+        reused_bytes = finished = read = unread_bytes = damaged_bytes = device_in_row = 0
+        reasons = {}
+        rate = Rate()
+        last = [time.monotonic(), time.monotonic()]
+        report.update(selected_files=len(rows), selected_bytes=total)
+        write_json(job / 'result.json', report)
+        say(f'Этап 2 из 2: контрольные суммы SHA-256 — {len(rows):,} файлов, {total / 1e9:,.1f} ГБ; '
+            f'прочитать предстоит около {to_read / 1e9:,.1f} ГБ' + (' (перечитать всё)' if rehash_all else ''))
+        def state(count=0, phase='hashing', title='Этап 2 из 2: контрольные суммы'):
+            now = time.monotonic()
+            newly = read + count
+            rate.add(now, newly)
+            speed = rate.value()
+            remaining = max(0, to_read - newly)
+            return {**base_state, 'phase': phase, 'phase_title': title,
+                    'percent': round(100 * (finished + count) / total, 2) if total else 100.0,
+                    'bytes_done': finished + count, 'bytes_total': total, 'files_done': cached + reused + hashed + unread,
+                    'files_total': len(rows), 'reused_files': cached + reused, 'new_files': hashed, 'unread_files': unread,
+                    'damaged_files': damaged, 'read_bytes': newly, 'to_read_bytes': to_read, 'rate_bytes_per_second': speed,
+                    'eta_seconds': round(remaining / speed) if speed else (0 if not remaining else None),
+                    'elapsed_seconds': round(now - started), 'errors': summary['errors']}
+        def progress(count=0, force=False):
+            if not force and STOP_FILE and STOP_FILE.exists():
+                raise KeyboardInterrupt()
+            now = time.monotonic()
+            if not force and now - last[0] < 2:
+                return
+            last[0] = now
+            current = state(count)
+            publish(current)
+            if force or now - last[1] >= 30:
+                last[1] = now
+                say(f'{disk_id}: {current["percent"]:.1f}% · файлов {current["files_done"]:,} из {len(rows):,} '
+                    f'(из описи {cached + reused:,}, прочитано {hashed:,}) · прочитано {current["read_bytes"] / 1e9:,.1f} '
+                    f'из ~{to_read / 1e9:,.1f} ГБ · осталось {duration(current["eta_seconds"])}', to_file=force)
+        try:
+            for rel, size, mtime, ctime, file_id in rows:
+                path = Path(root).joinpath(*safe_relative(rel))
+                expected = size, str(mtime), str(file_id)
+                check()
+                cand = usable(rel, size, mtime, ctime, file_id)
+                change_ns = None
+                try:
+                    if rehash_all or not cand or not cand['sha'] or not ntfs:
+                        how, why = rescan.decide(None, cand, rehash_all, ntfs)
+                    else:
+                        try:
+                            cur = rescan.file_info(path, exclusive=True)   # nobody writes while it is checked
+                            change_ns = cur['change_ns']
+                            if (cur['size'], str(cur['mtime_ns'])) != expected[:2] or \
+                                    (expected[2] != '0' and cur['file_id'] != expected[2]):
+                                how, why = 'read', 'changed'
+                            else:
+                                how, why = rescan.decide(cur, cand, False, ntfs)
+                        except rescan.Busy:
+                            how, why = 'read', 'busy'
+                    if how == 'reuse':
+                        target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)',
+                                       (disk_id, rel, *expected, cand['sha'], 'verified', ''))
+                        target.execute('insert or replace into hash_info values (?,?,?,?,?,?)',
+                                       (rel, 'own' if cand.get('own') else 'reused', cand['job'], cand['bound_ns'], change_ns, ''))
+                        target.commit()
+                        if cand.get('own'):
+                            cached += 1
+                        else:
+                            reused += 1; reused_bytes += size
+                        finished += size
+                        progress()
+                        continue
+                    if why == 'new' and len(by_id.get((str(file_id), size, str(mtime)), [])) == 1:
+                        why = 'renamed'
+                    digest = hash_one(path, expected, progress)
+                except (OSError, RuntimeError) as exc:
+                    kind = error_kind(exc)
+                    target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)',
+                                   (disk_id, rel, *expected, None, 'damaged' if kind == 'device' else 'error', str(exc)))
+                    target.execute('delete from hash_info where path=?', (rel,))
+                    target.commit()
+                    unread += 1; unread_bytes += size; finished += size
+                    if kind == 'device':
+                        damaged += 1; damaged_bytes += size
+                    check()
+                    say(f'ПРОПУЩЕН ({"нет доступа к файлу" if kind == "file" else "ПОВРЕЖДЕНИЕ НОСИТЕЛЯ"}): {rel}: {exc}')
+                    if kind == 'device':
+                        device_in_row += 1
+                        if device_in_row >= MAX_DEVICE_ERRORS_IN_ROW:
+                            raise RuntimeError(f'{device_in_row} ошибок чтения устройства подряд — возможно, диск '
+                                               'неисправен. Остановлено; готовые хеши сохранены.')
+                    progress()
+                    continue
+                check()
+                target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)', (disk_id, rel, *expected, digest, 'verified', ''))
+                target.execute('insert or replace into hash_info values (?,?,?,?,?,?)', (rel, 'read', job.name, run_start_ns, change_ns, why))
+                target.commit()
+                r = reasons.setdefault(why, [0, 0])
+                r[0] += 1; r[1] += size
+                hashed += 1; finished += size; read += size
+                device_in_row = 0
+                progress()
+            report['status'] = 'complete_with_unread_files' if unread else 'complete'
+        except KeyboardInterrupt:
+            report.update(status='interrupted', error='Stopped by user')
+        except (OSError, RuntimeError) as exc:
+            report.update(status='error', error=str(exc))
+        finally:
+            # Honest record of where the hashes came from (degree S in the database: measured by the scanner;
+            # for reused ones - at the time of the previous scan, see reuse_sources and hash_info).
+            report.update(hashed_files=hashed, cached_files=cached, reused_files=reused, reused_bytes=reused_bytes,
+                          newly_read_bytes=read, read_reasons=reasons, gone_files=len(gone), gone_examples=sorted(gone)[:20],
+                          unread_files=unread, unread_bytes=unread_bytes, damaged_files=damaged, damaged_bytes=damaged_bytes,
+                          reuse_basis=rescan.BASIS if not rehash_all else 'перечитать всё: прежние хеши не использовались',
+                          reuse_sources=[{'job': s['dir'].name, 'kind': s['kind'], 'created_utc': rescan.ns_utc(s['created_ns'])}
+                                         for s in sources] if not rehash_all else [],
+                          filesystem_ntfs=ntfs, seconds=round(time.monotonic() - started, 2), app_version=APP_VERSION)
+            write_json(job / 'result.json', report)
+            progress(force=True)
+            phase = 'stopped' if report['status'] == 'interrupted' else ('done' if report['status'].startswith('complete') else 'error')
+            titles = {'done': 'Сканирование папок завершено', 'stopped': 'Остановлено с сохранением', 'error': 'Остановлено из-за ошибки'}
+            if unread and phase == 'done':
+                titles['done'] = f'Завершено, не прочитано файлов: {unread:,}'.replace(',', ' ')
+            final = state(phase=phase, title=titles[phase])
+            final['status'] = report['status']
+            if phase != 'done':
+                final['eta_seconds'] = None
+            publish(final)
+            append_run(job, {'event': 'finish', 'run_id': run_id, 'utc': utc(), 'status': report['status'],
+                             'hashed_files': hashed, 'cached_files': cached, 'reused_files': reused, 'reused_bytes': reused_bytes,
+                             'read_reasons': reasons, 'gone_files': len(gone), 'newly_read_bytes': read,
+                             'unread_files': unread, 'damaged_files': damaged, 'reuse_basis': report['reuse_basis'],
+                             'reuse_sources': report['reuse_sources'], 'seconds': report['seconds'], 'error': report.get('error', '')})
+            why = ', '.join(f'{rescan.REASONS.get(k, k)} {v[0]:,}' for k, v in reasons.items())
+            say(f'=== Итог: {report["status"]} · файлов {len(rows):,}: хеш из прежней описи {reused:,}'
+                + (f', из прошлого запуска {cached:,}' if cached else '')
+                + f', прочитано {hashed:,} ({read / 1e9:,.2f} ГБ' + (f'; {why}' if why else '') + ')'
+                + f', исчезли {len(gone):,}' + (f', не прочитано {unread:,}' if unread else '')
+                + (f', из них повреждения носителя {damaged:,}' if damaged else '')
+                + f' · за {duration(time.monotonic() - started)}' + (f' · {report["error"]}' if report.get('error') else ''))
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report['status'].startswith('complete') else 2
+
 def require_separate_output(job, root):
     if job.resolve().drive.upper() == Path(root).drive.upper():
         raise RuntimeError('Results must not be stored on the source volume')
@@ -790,6 +1026,39 @@ def import_result(folder, destination, refresh=True):
         refresh_index(destination)
     return output
 
+def source_root(letter):
+    return check_letter(letter) + ':\\'
+
+def start_partial(args, record, output):
+    """New job of selected folders: identity checked against the previous full inventory of this disk ID."""
+    roots = [p.resolve() for p in args.prior_root] if args.prior_root else \
+        [output.parent if output.name == rescan.PARTIAL_DIR else output]
+    sources = rescan.find_sources(roots, args.disk)
+    if not sources:
+        raise RuntimeError(f'Нет завершённой полной описи {args.disk} в {"; ".join(map(str, roots))}: '
+                           'сначала полное сканирование носителя')
+    full = sources[0]['record']
+    if str(full.get('volume_serial', '')).upper() != str(record['volume_serial']).upper() or \
+            (full.get('hardware_serial') and full.get('hardware_serial') != record.get('hardware_serial')):
+        raise RuntimeError(f'Подключён не тот носитель: серийные номера не совпадают с полной описью {args.disk}. '
+                           'Ничего не сканировалось.')
+    folders = rescan.normalize_folders(source_root(args.letter), args.folder)
+    print(json.dumps({'disk_id': args.disk, 'folders': folders, 'rehash_all': args.rehash_all, **record},
+                     ensure_ascii=False, indent=2))
+    if not args.yes and input('Check disk ID, device and folders. Type YES to scan: ').strip() != 'YES':
+        return 1
+    job = disk_folder(output, args.disk, record) / (args.disk + '_' + uuid.uuid4().hex)
+    job.mkdir(parents=True, exist_ok=False)
+    write_json(job / 'job.json', {'version': VERSION_PARTIAL, 'job_id': job.name, 'disk_id': args.disk,
+                'record': record, 'policy': POLICY, 'created_utc': utc(), 'app_version': APP_VERSION,
+                'identity_at_registration': describe(args.letter),
+                'scan_scope': 'partial', 'hash_scope': 'all_regular_files', 'folders': folders,
+                'rehash_all': bool(args.rehash_all),
+                'prior_sources': [{'dir': str(s['dir']), 'kind': s['kind'], 'folders': s['folders'],
+                                   'created_ns': s['created_ns']} for s in sources]})
+    print('JOB (save this path for resume):', job, flush=True)
+    return process(job)
+
 def main():
     global STOP_FILE, PROGRESS_FILE
     parser = argparse.ArgumentParser(description=__doc__)
@@ -801,6 +1070,11 @@ def main():
     start.add_argument('--letter', required=True)
     start.add_argument('--yes', action='store_true', help='Confirmation already obtained by graphical launcher')
     start.add_argument('--output', type=Path, default=Path(os.environ.get('LOCALAPPDATA', '.')) / 'HDDScanner' / 'results')
+    start.add_argument('--folder', action='append', help='Only this folder (from the volume root); repeat for several. '
+                       'Result: a partial scan; the previous full inventory of the disk is required')
+    start.add_argument('--rehash-all', action='store_true', help='With --folder: read every file, trust no previous hash')
+    start.add_argument('--prior-root', type=Path, action='append',
+                       help='Where previous jobs of the disk are (default: the parent of «Повторное сканирование»)')
     resume = sub.add_parser('resume'); resume.add_argument('job', type=Path)
     exp = sub.add_parser('export'); exp.add_argument('job', type=Path); exp.add_argument('destination', type=Path)
     exa = sub.add_parser('export-all', help='Export all completed jobs of a results folder')
@@ -833,10 +1107,14 @@ def main():
             check_disk_id(args.disk)
         except ValueError as exc:
             parser.error(str(exc))
+        if args.rehash_all and not args.folder:
+            parser.error('--rehash-all only with --folder')
         record = inspect(args.letter, media_kind(args.disk))
         output = args.output.resolve()
         if output.drive.upper() == args.letter.rstrip(':\\').upper() + ':':
             parser.error('Output must not be on source volume')
+        if args.folder:
+            return start_partial(args, record, output)
         print(json.dumps({'disk_id': args.disk, **record}, ensure_ascii=False, indent=2))
         if not args.yes and input('Check central disk ID and device. Type YES to scan: ').strip() != 'YES':
             return 1

@@ -3,6 +3,7 @@
 
 Запуск из корня проекта:  py -m unittest catalog\\test_modules.py
 """
+import argparse
 import ast
 import os
 import shutil
@@ -21,7 +22,7 @@ LEVELS = {'paths': 0, 'consts': 0, 'schema': 1, 'util': 1, 'report': 2, 'sources
           'derived': 6, 'builder': 7, 'db': 8, 'query': 9, 'short': 10, 'api': 11}
 COMMANDS = {'missing', 'only', 'cmp', 'where', 'candel', 'mklist', 'mvlist', 'manual', 'fix-manual', 'decide',
             'exclude', 'tasks', 'stats', 'build', 'folders', 'find', 'rebuild', 'family-plan', 'family-check',
-            'recovery-plan', 'recovery-staging'}
+            'recovery-plan', 'recovery-staging', 'rescan-plan'}
 UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего ядро не импортирует никогда
 PATHVARS = {'BASE_DIR', 'DB', 'SNAP', 'MANUAL', 'DECISIONS', 'EXCLUSIONS', 'ANSWERS', 'TEMPLATE', 'MOVE_TEMPLATE', 'TASKS'}
 
@@ -99,7 +100,28 @@ class ModulesTest(unittest.TestCase):
             self.assertTrue(hlp, name)
             if not show:
                 hidden.add(name)
-        self.assertEqual(hidden, {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check'})
+        self.assertEqual(hidden, {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist'})
+
+    def test_visible_commands_have_window_texts(self):
+        # окно «Архив дисков»: у каждой видимой команды есть понятный заголовок и группа (GUI_TITLE, GUI_GROUP)
+        for mod in hb_cli.command_modules():
+            gui = getattr(mod, 'GUI', True)
+            for name in mod.NAMES:
+                if not (gui.get(name, True) if isinstance(gui, dict) else gui):
+                    continue
+                for attr in ('GUI_TITLE', 'GUI_GROUP'):
+                    v = getattr(mod, attr, None)
+                    if isinstance(v, dict):
+                        v = v.get(name)
+                    self.assertTrue(isinstance(v, str) and v.strip(), f'{name}: нет {attr}')
+                args = getattr(mod, 'GUI_ARGS', {})
+                if isinstance(args, dict) and args and set(args) <= set(mod.NAMES):
+                    args = args.get(name, {})
+                p = argparse.ArgumentParser()
+                mod.add_args(p, name)
+                dests = {a.dest for a in p._actions}
+                self.assertTrue(set(args) <= dests, f'{name}: GUI_ARGS для несуществующих аргументов '
+                                                    f'{set(args) - dests}')
 
     def test_hb_root_from_environment(self):
         # окно передаёт подпроцессу свои корни: подпроцесс не должен видеть настоящие таблицы владельца

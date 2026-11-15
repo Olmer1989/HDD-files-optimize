@@ -2,6 +2,7 @@
 
 Запуск из корня проекта:  py -m unittest catalog\\test_app.py
 """
+import json
 import os
 import sqlite3
 import sys
@@ -102,7 +103,7 @@ class WindowTest(Base):
         self.assertIn('Применены новые модули', self.w.statusBar().currentMessage())
 
 
-HIDDEN = {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check'}
+HIDDEN = {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist'}
 
 
 def put(f, **values):
@@ -158,7 +159,7 @@ class CommandsTest(WindowTest):
     def test_forms_for_all_visible_commands(self):
         names = [n for n, _, _ in self.cp.cmds]
         self.assertFalse(HIDDEN & set(names))
-        self.assertEqual(self.cp.list.count(), len(names))
+        self.assertEqual(sum(1 for i in range(self.cp.list.count()) if self.cp.list.item(i).data(Qt.UserRole)), len(names))
         for n in names:
             f = self.cp.select(n)
             self.assertFalse(f.unsupported, n)
@@ -170,7 +171,7 @@ class CommandsTest(WindowTest):
         self.assertEqual(f.fields['action'].kind, 'choice')
         self.assertEqual(self.cp.select('mklist').fields['to'].text(), ['HDD45', 'HDD77'])
         combo = self.cp.select('where').fields['disk'].combo
-        self.assertIn('HDD90', [combo.itemText(i) for i in range(combo.count())])
+        self.assertIn('HDD90', [combo.itemData(i) for i in range(combo.count())])
         dlg = cpg.FolderDialog(self.w, 'HDD90')                             # «Выбрать…»: дерево папок по базе
         root = dlg.tree.topLevelItem(0)
         self.assertTrue(wait(lambda: root.childCount() == 2))
@@ -194,7 +195,7 @@ class CommandsTest(WindowTest):
         f = self.cp.select('manual')                                        # пустой disk2 перед заполненным path2
         put(f, disk='HDD90', path='A', path2='B', action='удалено')
         args, err = f.argv()
-        self.assertIn('Второй диск', err)
+        self.assertIn('Куда: диск', err)
         f = self.cp.select('folders')                                       # значение по умолчанию не передаётся
         put(f, disk='HDD90', depth=1)
         self.assertEqual(f.argv()[0], ['folders', 'HDD90'])
@@ -235,12 +236,171 @@ class CommandsTest(WindowTest):
     def test_mklist_creates_task_and_offers_tasks_page(self):
         f = self.cp.select('mklist')
         put(f, disk='HDD90', name='Новое задание')
-        self.run_cmd('mklist')
+        self.run_cmd('mklist')                                          # «Посчитать» (--dry), затем «Создать задание»
+        self.assertFalse((hb.TASKS / 'Новое задание').exists())
+        self.run_cmd('mklist create', write=True)
         self.assertTrue((hb.TASKS / 'Новое задание').is_dir(), '\n'.join(self.cp.lines))
         self.assertIn('Создано задание', self.asked[-1])
         self.assertEqual(self.w.nav.currentRow(), 1)                       # «Задания»
         tasks = self.w.pages[1][1]
         self.assertTrue(wait(lambda: any(r['task'] == 'Новое задание' for r in tasks.rows)))
+
+
+ROWS = [{'disk': 'HDD90', 'label': 'ACASIS EC-7352 - 750 ГБ', 'letter': ''},
+        {'disk': 'HDD91', 'label': 'ADATA SX8200PNP - 2 ТБ - Исходники', 'letter': 'E:'},
+        {'disk': 'HDD45', 'label': 'ST16000NM000J-2TW103 - 16 ТБ - Бэкап', 'letter': ''},
+        {'disk': 'HDD77', 'label': '', 'letter': 'S:'}]
+
+
+class CommandsUiTest(CommandsTest):
+    """Понятный раздел «Команды» (15.11.2026): группы, тексты GUI_*, выбор носителя, уровни, пары, режимы mklist."""
+
+    test_forms_for_all_visible_commands = test_required_fields_and_argv = test_read_command_in_subprocess = None
+    test_decide_preview_then_write = test_mklist_creates_task_and_offers_tasks_page = None
+
+    def test_groups_order_and_titles(self):
+        heads, cmds = [], []
+        for i in range(self.cp.list.count()):
+            it = self.cp.list.item(i)
+            if it.data(Qt.UserRole):
+                cmds.append(it.data(Qt.UserRole))
+                self.assertFalse(it.text().strip().startswith('py '), it.text())
+            else:
+                heads.append(it.text())
+                self.assertFalse(it.flags() & Qt.ItemIsSelectable)
+        known = [g for g in cpg.GROUPS if g in heads]
+        self.assertEqual(heads[:len(known)], known)
+        self.assertEqual(known, list(cpg.GROUPS))
+        want = ['missing', 'only', 'where', 'cmp', 'candel', 'folders', 'find', 'mklist', 'manual', 'decide',
+                'exclude', 'fix-manual', 'stats', 'build', 'tasks', 'rebuild']
+        self.assertEqual([c for c in cmds if c in want], want)
+        self.assertNotIn('mvlist', cmds)                                    # отдельного пункта нет
+        f = self.cp.select('candel')
+        self.assertEqual(f.meta['title'], 'Можно ли удалить папку с этого диска?')
+        self.assertEqual(f.fields['disk'].label, 'Диск, с которого хотите удалить')
+        self.assertEqual(f.fields['folder'].label, 'Папка, которую хотите удалить')
+        self.assertIn('НЕДОСТАТОЧНО ПОДТВЕРЖДЕНИЙ', f.meta['hint'])
+        self.assertEqual(self.cp.select('manual').fields['disk2'].label, 'Куда: диск')
+
+    def test_disk_choice_and_depth_everywhere(self):
+        self.cp.got_disks(ROWS)
+        for n, _, _ in self.cp.cmds:
+            f = self.cp.select(n)
+            for d, fld in f.fields.items():
+                if fld.kind == 'disk':
+                    self.assertIsInstance(fld.combo, cpg.DiskCombo, f'{n} {d}')
+                if d == 'depth':
+                    self.assertIsInstance(fld.widget, cpg.DepthCombo, n)
+                    self.assertEqual(fld.widget.itemData(fld.widget.count() - 1), 0)      # «все уровни»
+        combo = self.cp.select('where').fields['disk'].combo
+        texts = [combo.itemText(i) for i in range(combo.count())]
+        self.assertEqual(combo.itemData(0), 'HDD77')                          # подключённые сверху, по номеру
+        self.assertEqual(combo.itemData(1), 'HDD91')
+        self.assertEqual(texts[1], '● HDD91 — E: — Исходники (ADATA 2 ТБ)')
+        self.assertEqual(texts[2], '')                                        # разделитель
+        self.assertEqual(texts[3], 'HDD45 — Бэкап (16 ТБ) — не подключён')
+        self.assertIn('HDD90 — ACASIS EC-7352, 750 ГБ — не подключён', texts)
+        self.assertTrue(combo.itemData(1, Qt.FontRole).bold())
+        self.assertEqual(combo.currentIndex(), -1)
+        self.assertEqual(combo.placeholderText(), cpg.CHOOSE_DISK)
+        find = self.cp.select('find').fields['disk'].combo
+        self.assertEqual((find.itemText(0), find.itemData(0)), (cpg.ALL_DISKS, ''))
+        f = self.cp.select('folders')
+        put(f, disk='HDD90', depth=0)
+        self.assertEqual(f.argv()[0], ['folders', 'HDD90', '--depth=0'])
+        put(f, depth=1)
+        self.assertEqual(f.argv()[0], ['folders', 'HDD90'])
+
+    def test_to_list_short_by_default(self):
+        self.cp.got_disks(ROWS)
+        to = self.cp.select('mklist').fields['to']
+        self.assertEqual(to.text(), ['HDD45', 'HDD77'])
+        shown = [d for d, it in to.boxes.items() if not it.isHidden()]
+        self.assertEqual(shown, ['HDD45', 'HDD77', 'HDD91'])                 # основные, затем подключённые
+        self.assertTrue(to.more.isVisibleTo(to.widget))
+        to.toggle_all()
+        self.assertEqual(sorted(d for d, it in to.boxes.items() if not it.isHidden()), ['HDD45', 'HDD77', 'HDD90', 'HDD91'])
+
+    def test_disk_folder_pairs(self):
+        self.cp.got_disks(ROWS)
+        f = self.cp.select('cmp')
+        self.assertIs(f.row_of['disk_a'], f.row_of['folder_a'])            # диск и папка - одной строкой
+        self.assertTrue(f.fields['folder_a'].pick_disk)
+        m = self.cp.select('manual')
+        self.assertIs(m.row_of['disk2'], m.row_of['path2'])
+        self.assertEqual(m.fields['disk2'].combo.itemText(0), '— не указан —')
+        mk = self.cp.select('mklist')                                       # у диска две папки - выбор только папки
+        self.assertFalse(mk.fields['source_folder'].pick_disk)
+        dlg = cpg.FolderDialog(self.w, 'HDD90', rows=ROWS)                  # «Выбрать…»: носители, затем их папки
+        tops = [dlg.tree.topLevelItem(i).data(2, Qt.UserRole) for i in range(dlg.tree.topLevelItemCount())]
+        self.assertEqual(tops, ['HDD77', 'HDD91', 'HDD45', 'HDD90'])
+        top = dlg.tree.topLevelItem(3)
+        self.assertTrue(wait(lambda: top.childCount() == 2 and top.child(0).text(0) != '…'))
+        a = next(top.child(i) for i in range(2) if top.child(i).text(0) == 'A')
+        dlg.tree.setCurrentItem(a)
+        dlg.accept()
+        self.assertEqual((dlg.chosen_disk, dlg.chosen), ('HDD90', 'A'))
+        f.fields['disk_a'].combo.setCurrentText(dlg.chosen_disk)
+        self.assertEqual(f.fields['disk_a'].text(), 'HDD90')
+
+    def test_mklist_modes_build_arguments(self):
+        hb.ensure_tables()
+        hb.DECISIONS.write_text(hb.DECISION_HEAD + '\nHDD90\tB\tраздел: Фильмы\tпроба\n', encoding='utf-8-sig')
+        f = self.cp.select('mklist')
+        modes = [f.mode_box.itemText(i) for i in range(f.mode_box.count())]
+        self.assertEqual(len(modes), 4)
+        self.assertEqual(f.fields['name'].text(), '')
+        put(f, disk='HDD90')
+        self.assertTrue(f.fields['name'].text().startswith('HDD90 → HDD45 и HDD77, '))   # имя - само
+        self.assertEqual(f.argv()[0][:2], ['mklist', 'HDD90'])
+        self.assertNotIn('--whole', f.argv()[0])
+        f.mode_box.setCurrentIndex(1)                                       # папки целиком
+        self.assertEqual(f.fields['to'].text(), [])
+        self.assertIn('Заполните', f.argv()[1])
+        put(f, folder='A')
+        self.assertIn('Отметьте', f.argv()[1])
+        f.fields['to'].boxes['HDD45'].setCheckState(Qt.Checked)
+        args = f.argv()[0]
+        self.assertIn('--whole', args)
+        self.assertIn('--folder=A', args)
+        self.assertEqual(args[args.index('--to') + 1], 'HDD45')
+        self.assertTrue(f.fields['name'].text().startswith('HDD90 целиком (A) → HDD45'))
+        f.mode_box.setCurrentIndex(2)                                       # на диск раздела
+        items = [f.fields['section'].combo.itemText(i) for i in range(f.fields['section'].combo.count())]
+        self.assertEqual(items, ['раздел: Фильмы'])
+        f.fields['section'].combo.setCurrentText('раздел: Фильмы')
+        f.fields['to'].boxes['HDD77'].setCheckState(Qt.Checked)
+        args = f.argv()[0]
+        self.assertIn('--section=раздел: Фильмы', args)
+        self.assertNotIn('--whole', args)
+        self.assertNotIn(':', f.fields['name'].text().split(',')[0])        # в имени папки нет «:»
+        f.mode_box.setCurrentIndex(3)                                       # из копии на другом диске
+        put(f, source_folder='A', as_name='HDD17')
+        args = f.argv()[0]
+        self.assertIn('--source-folder=A', args)
+        self.assertIn('--as=HDD17', args)
+        self.assertNotIn('--folder=A', args)                                # поле другого режима не идёт
+        self.assertNotIn('--section=раздел: Фильмы', args)
+        put(f, name='Своё имя')                                             # своё имя владельца не затирается
+        put(f, as_name='HDD18')
+        self.assertEqual(f.fields['name'].text(), 'Своё имя')
+
+    def test_count_then_create_with_move_mark(self):
+        f = self.cp.select('mklist')
+        self.assertEqual(self.cp.btn_run.text(), 'Посчитать')
+        self.assertEqual(self.cp.btn_write.text(), 'Создать задание')
+        self.assertFalse(f.row_of['dry'].isVisibleTo(f))                     # вместо галочки - кнопка
+        put(f, disk='HDD90', name='С пометкой', move_after=True)
+        self.assertNotIn('move_after', ' '.join(f.argv()[0]))
+        self.run_cmd('mklist --dry')
+        self.assertIn('--dry', self.cp.lines[0])
+        self.assertFalse((hb.TASKS / 'С пометкой').exists())
+        self.assertTrue(self.cp.btn_write.isEnabled())
+        self.run_cmd('mklist', write=True)
+        mark = hb.TASKS / 'С пометкой' / 'после копирования.json'
+        self.assertTrue(mark.exists(), '\n'.join(self.cp.lines))
+        data = json.loads(mark.read_text(encoding='utf-8'))
+        self.assertEqual((data['разложить_на_источнике'], data['диск'], data['папки']), (True, 'HDD90', None))
 
 
 if __name__ == '__main__':

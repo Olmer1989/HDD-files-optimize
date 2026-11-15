@@ -770,5 +770,27 @@ class MoveOnSourceTest(Base):
         self.assertTrue((disk / 'A' / '1.jpg').exists())                                 # ничего не тронуто
 
 
+class AllLevelsTest(Base):
+    """--depth 0 (окно: «Все уровни вложенности»): folders и missing показывают все уровни; 1 и 2 - как раньше."""
+
+    def test_folders_depth_zero_lists_all_subfolders(self):
+        self.quiet(hb.cmd_folders, NS(disk='HDD90', folder='', depth=1))
+        self.assertIn('Все подпапки (2)', self.printed)                      # A, B
+        self.quiet(hb.cmd_folders, NS(disk='HDD90', folder='', depth=0))
+        self.assertIn('Все подпапки (3)', self.printed)                      # A, B, A\sub
+        self.assertIn('A\\sub', self.printed)
+        self.quiet(hb.cmd_folders, NS(disk='HDD90', folder='A', depth=0))
+        self.assertIn('Все подпапки (1)', self.printed)
+        self.assertIn('sub', self.printed)
+        self.assertNotIn('A\\sub', self.printed.split('Все подпапки')[0])   # путь - от выбранной папки
+
+    def test_missing_depth_zero_gives_full_folder(self):
+        self.quiet(hb.cmd_missing, NS(disk='HDD90', folder='', depth=1))
+        self.assertNotIn('A\\sub', self.printed)
+        self.quiet(hb.cmd_missing, NS(disk='HDD90', folder='', depth=0))
+        self.assertIn('A\\sub', self.printed)
+        self.assertNotIn('\n  \t', self.printed)
+
+
 if __name__ == '__main__':
     unittest.main()

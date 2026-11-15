@@ -36,7 +36,7 @@ def main():
     (runtime / 'python313._pth').write_text('python313.zip\n.\n../app\n', encoding='ascii')
     app = folder / 'app'
     app.mkdir(exist_ok=True)
-    for name in ['portable.py', 'inventory.py', 'hash_files.py', 'build_selection.py',
+    for name in ['portable.py', 'inventory.py', 'hash_files.py', 'build_selection.py', 'rescan.py', 'test_rescan.py',
                  'test_portable.py', 'test_inventory.py', 'test_selection.py', 'test_hash_files.py']:
         shutil.copy2(BASE / 'scanner' / name, app / name)
     shutil.copy2(BASE / 'scanner' / 'PORTABLE.md', folder / 'READ_ME.md')

@@ -33,7 +33,7 @@ def cmd_missing(a, only=False):
             continue
         if only and ndisks > 1:
             continue
-        k = agg[folder_key(path, prefix, a.depth)]
+        k = agg[folder_key(path, prefix, a.depth or 10 ** 6)]     # 0 - все уровни: полная папка файла
         k[0] += 1; k[1] += size
         if not on45: k[2] += size
         if not on77: k[3] += size
@@ -77,11 +77,21 @@ def cmd_missing(a, only=False):
 
 NAMES = ('missing', 'only')
 HELP = {'missing': 'чего с диска нет на 45 и 77, по папкам', 'only': 'что лежит только на этом диске'}
+# для окна «Архив дисков» (раздел «Команды»); командная строка их не использует
+GUI_GROUP = 'Вопросы о диске'
+GUI_ORDER = {'missing': 1, 'only': 2}
+GUI_TITLE = {'missing': 'Чего с диска не хватает на 45 и 77?', 'only': 'Что есть только на этом диске?'}
+GUI_HINT = {'missing': ('Показывает по папкам фото и видео этого носителя, которых нет на 45 и/или 77.\n'
+                        'Диск — что проверяем; папку можно не указывать (тогда весь диск); ниже — сколько уровней '
+                        'папок показать.'),
+            'only': ('Папки и файлы, которых по базе нет ни на одном другом носителе.\n'
+                     'Папку можно не указывать (тогда весь диск).')}
+GUI_ARGS = {'disk': 'Диск, который проверяем', 'folder': 'Папка', 'depth': 'Сколько уровней папок показать'}
 
 
 def add_args(p, name):
     p.add_argument('disk'); p.add_argument('folder', nargs='?', default='')
-    p.add_argument('--depth', type=int, default=1)
+    p.add_argument('--depth', type=int, default=1, help='уровней папок (0 - все уровни)')
 
 
 def run(a):

@@ -68,8 +68,9 @@ def discover_disk(record):
         raise RuntimeError('Registered disk absent, ambiguous, or changed. No scan started. Check registry manually.')
     return matches[0]
 
-def inventory(root, db, check, progress=None):
+def inventory(root, db, check, progress=None, folders=None):
     # progress(summary) is called after each directory; callers throttle it.
+    # folders: only these folders (relative to root, already checked by rescan.normalize_folders).
     summary = {'started_utc': utc(), 'source': root, 'status': 'running',
                'files': 0, 'bytes': 0, 'directories': 0,
                'excluded_directories': 0, 'excluded_secret_files': 0, 'reparse_skipped': 0,
@@ -83,7 +84,8 @@ def inventory(root, db, check, progress=None):
     db.execute('create table metadata(key text primary key,value text)')
     db.execute('insert into metadata values (?,?)', ('status', 'running'))
     db.commit()
-    stack = [root]
+    stack = [os.path.join(root, f) for f in folders] if folders else [root]
+    tops = set(stack)
     last = time.monotonic()
     def error(path, op, exc):
         summary['errors'] += 1
@@ -131,7 +133,7 @@ def inventory(root, db, check, progress=None):
                             error(entry.path, 'stat', exc)
             except OSError as exc:
                 error(directory, 'scandir', exc)
-                if directory == root:
+                if directory in tops:
                     raise
             if progress:
                 progress(summary)

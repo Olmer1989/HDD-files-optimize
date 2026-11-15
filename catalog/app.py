@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hb_core import api as hb  # noqa: E402  (ядро; hashbase.py - только обёртка командной строки)
 import service as sv           # noqa: E402
 import commands_page           # noqa: E402
+import rescan_dialog           # noqa: E402
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal   # noqa: E402
 from PySide6.QtGui import QColor, QFont, QGuiApplication                                  # noqa: E402
@@ -286,6 +287,7 @@ class DisksPage(QWidget):
         self.tree.setHeaderLabels(self.TREE)
         self.tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)      # несколько папок - с Ctrl
         self.tree.itemExpanded.connect(self.expand)
         self.tree.itemSelectionChanged.connect(lambda: self.info.setText(''))
         ll.addWidget(self.tree)
@@ -293,6 +295,11 @@ class DisksPage(QWidget):
         b = QPushButton('Чего из папки нет на 45 и 77?')
         b.clicked.connect(self.presence)
         bar.addWidget(b)
+        self.rescan_btn = QPushButton('Пересканировать папку…')
+        self.rescan_btn.setToolTip('Подключённый диск: заново прочитать только новые и изменённые файлы выбранных папок '
+                                   '(можно выбрать несколько с Ctrl). Сначала - предпросмотр, затем подтверждение.')
+        self.rescan_btn.clicked.connect(self.rescan)
+        bar.addWidget(self.rescan_btn)
         self.info = QLabel('')
         self.info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.info.setWordWrap(True)
@@ -360,6 +367,25 @@ class DisksPage(QWidget):
                               f'{gib(r["only"])} ГБ. Без хеша (не сравниваются): {r["nohash"]:,}.'.replace(',', ' '))
         self.win.bg.run(sv.folder_presence, self.disk, path, ok=show)
 
+    def rescan(self):
+        """Пересканировать выбранные папки подключённого диска: окно предпросмотра; скан - только по подтверждению."""
+        items = [it for it in self.tree.selectedItems() if it.data(0, Qt.UserRole)]
+        if self.disk is None or not items:
+            QMessageBox.information(self, TITLE, 'Выберите диск и одну или несколько его папок (с Ctrl). '
+                                    'Весь диск целиком - это полное сканирование, его делает сканер дисков.')
+            return
+        row = next((r for r in self.rows if r['disk'] == self.disk), {})
+        if not row.get('letter'):
+            QMessageBox.information(self, TITLE, f'{self.disk} не подключён. Подключите диск и нажмите «Обновить».')
+            return
+        running = getattr(self.win, 'rescan', None)
+        if running is not None and running.running:
+            QMessageBox.information(self, TITLE, 'Уже идёт пересканирование - дождитесь его или остановите.')
+            running.raise_()
+            return
+        self.win.rescan = rescan_dialog.RescanDialog(self.win, self.disk, [it.data(0, Qt.UserRole) for it in items])
+        self.win.rescan.show()
+
     def find(self):
         words = self.search.text().split()
         if not words:
@@ -426,6 +452,10 @@ class Window(QMainWindow):
         if not self.page('Команды').can_close():
             e.ignore()
             return
+        if getattr(self, 'rescan', None) is not None and self.rescan.running:
+            QMessageBox.information(self, TITLE, 'Идёт пересканирование папок. Сначала остановите его.')
+            e.ignore()
+            return
         super().closeEvent(e)
 
     def show_error(self, text):
@@ -442,9 +472,12 @@ class Window(QMainWindow):
             self.apply_new()
         self.sig = sig
 
-    def apply_new(self):
-        """Применить новые модули (журналы, строки таблиц, сканы) - в фоне; затем перечитать экран."""
+    def apply_new(self, then=None):
+        """Применить новые модули (журналы, строки таблиц, сканы) - в фоне; затем перечитать экран.
+        then(результат) - вызвать после применения (окно пересканирования показывает итог приёма)."""
         if self.updating:
+            if then:                                  # идёт другое применение - повторить после него
+                QTimer.singleShot(2000, lambda: self.apply_new(then))
             return
         self.updating = True
         self.statusBar().showMessage('Проверяю новые журналы и записи…')
@@ -456,11 +489,15 @@ class Window(QMainWindow):
             self.statusBar().showMessage(f'{msg}База собрана {gen}.')
             if gen:
                 self.stack.currentWidget().refresh()
+            if then:
+                then(res)
 
         def fail(text):
             self.updating = False
             log_error(text)
             self.statusBar().showMessage('Не удалось обновить базу - подробности в «окно - ошибки.log».')
+            if then:
+                then(None)
         job = Job(hb.update, (None, True), done, fail)
         self.bg.jobs.add(job)
         QThreadPool.globalInstance().start(job)

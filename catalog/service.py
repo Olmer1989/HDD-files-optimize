@@ -423,6 +423,120 @@ def sources_signature():
     return hash(tuple(sorted(sig)))
 
 
+# ---------- пересканирование выбранных папок (сканер 1.4.0) ----------
+
+SCANNER = Path(__file__).resolve().parent.parent / 'scanner'
+
+
+def _scanner():
+    """Модули сканера (rescan - правило доверия прежнему хешу, inventory - сведения о томе)."""
+    if str(SCANNER) not in sys.path:
+        sys.path.insert(0, str(SCANNER))
+    import rescan
+    import inventory
+    return rescan, inventory
+
+
+def disk_letter(disk):
+    """Буква подключённого носителя - по серийному номеру тома из его полной описи. Диск не читается."""
+    serial_of = {v: k for k, v in hb.serial_map(bp.find_jobs()).items()}
+    if disk not in serial_of:
+        raise Refused(f'У {disk} нет полной описи - пересканировать папки нельзя.')
+    try:
+        letter = volumes().get(serial_of[disk])
+    except (OSError, AttributeError):
+        letter = None
+    if not letter:
+        raise Refused(f'{disk} не подключён: подключите диск (буква найдётся сама по серийному номеру тома).')
+    return letter
+
+
+def rescan_plan(disk, folders, rehash_all=False):
+    """Предпросмотр пересканирования по оглавлению диска: сколько файлов прочитать, сколько хешей взять из
+    прежней описи, сколько исчезло. Содержимое файлов не читается."""
+    letter = disk_letter(disk)
+    rescan, inventory = _scanner()
+    try:
+        fs = inventory.volume(letter + '\\')[2]
+        plan = rescan.plan(letter + '\\', disk, list(folders), bp.SCAN_ROOTS, rehash_all, fs)
+    except (ValueError, OSError) as e:
+        raise Refused(str(e))
+    plan.update(letter=letter, filesystem=fs, lines=rescan.plan_text(plan))
+    if fs.upper() != 'NTFS':
+        plan['lines'].insert(1, f'Файловая система {fs}: прежним хешам не доверяем, читается всё.')
+    return plan
+
+
+def rescan_files(disk):
+    """Файлы хода и остановки сканирования - в «_БАЗА\\пересканирование»."""
+    d = hb.BASE_DIR / 'пересканирование'
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f'{disk} ход.json', d / f'{disk} стоп.txt', d / f'{disk} вывод.txt'
+
+
+def scanner_python():
+    exe = Path(sys.executable)
+    return str(exe.with_name('python.exe')) if exe.name.lower() == 'pythonw.exe' and exe.with_name('python.exe').exists() else str(exe)
+
+
+def rescan_argv(disk, letter, folders, rehash_all=False, job=None):
+    """Командная строка сканера (то же можно запустить вручную в консоли). job - продолжить это задание."""
+    progress, stop, _ = rescan_files(disk)
+    argv = [scanner_python(), '-X', 'utf8', '-u', str(SCANNER / 'portable.py'), '--progress-file', str(progress),
+            '--stop-file', str(stop)]
+    if job:
+        return argv + ['resume', str(job)]
+    argv += ['start', '--disk', disk, '--letter', letter.rstrip(':\\')]
+    for f in folders:
+        argv += ['--folder', f]
+    argv += ['--output', str(Path(bp.SCAN_ROOTS[0]) / hb.PARTIAL_DIR), '--yes']
+    for r in bp.SCAN_ROOTS:
+        argv += ['--prior-root', str(r)]
+    return argv + (['--rehash-all'] if rehash_all else [])
+
+
+def rescan_start(disk, letter, folders, rehash_all=False, job=None):
+    """Запуск сканера отдельным процессом без консоли - ТОЛЬКО по кнопке владельца после подтверждения."""
+    progress, stop, log = rescan_files(disk)
+    for p in (progress, stop):
+        if p.exists():
+            p.unlink()
+    out = open(log, 'a' if job else 'w', encoding='utf-8')
+    env = os.environ.copy()
+    env.update(PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1')
+    proc = subprocess.Popen(rescan_argv(disk, letter, folders, rehash_all, job), cwd=str(SCANNER), env=env,
+                            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    out.close()
+    return proc
+
+
+def read_progress(disk):
+    try:
+        import json
+        return json.loads(rescan_files(disk)[0].read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def partial_outcome(job_name):
+    """Итог приёма частичного скана базой: по каждой папке - в скане, стало S, новые, исчезли, хеш не совпал."""
+    c = ro()
+    try:
+        rep = hb.load_report(c)
+    finally:
+        c.close()
+    stats = (rep.get('partial_stats') or {}).get(job_name)
+    warn = sorted(w for w in rep['warn'] if job_name in w) + [x for x in rep['old'] if job_name in x]
+    lines = []
+    for f, k in (stats or {}).items():
+        became = sum(v for key, v in k.items() if key.startswith('было ') and key != 'было S')
+        lines.append(f'{f}: в скане {k.get("файлов", 0)} файлов ({hb.gb(k.get("байт", 0))} ГБ); стало S {became}'
+                     f' (уже было S {k.get("было S", 0)}); '
+                     f'новые {k.get("новые", 0)}; исчезли из базы {k.get("исчезли", 0)}; хеш не совпал {k.get("хеш не совпал", 0)}')
+    return dict(accepted=stats is not None, lines=lines, warn=warn)
+
+
 # ---------- задания: честное состояние ----------
 
 def running_scripts():
@@ -489,3 +603,22 @@ def tasks(root=None):
         if st:
             res.append(st)
     return res
+
+
+MOVE_MARK = 'после копирования.json'
+
+
+def mark_task_move(task, disk, folders=None):
+    """Пометка в папке задания копирования (окно, «Подготовить копирование» с галочкой «разложить»): после
+    копирования разложить файлы на источнике по «ПЕРЕНЕСЕНО → …» (команда mvlist). Сама ничего не перемещает.
+    Файл «после копирования.json»: {"разложить_на_источнике": true, "диск": "HDDxx", "папки": [...] или null,
+    "создано": "ДД.ММ.ГГГГ ЧЧ:ММ"}; null - весь диск."""
+    import json
+    task = Path(task)
+    if not task.is_dir():
+        raise Refused(f'Нет папки задания: {task}')
+    data = {'разложить_на_источнике': True, 'диск': disk, 'папки': list(folders) if folders else None,
+            'создано': time.strftime('%d.%m.%Y %H:%M')}
+    path = task / MOVE_MARK
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    return path
