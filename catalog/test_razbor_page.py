@@ -27,6 +27,7 @@ N1 = 'направление: Н1 Семейный архив'
 N2 = 'направление: Н2 Работа'
 N3 = 'направление: Н3 Без диска'
 MOVED = 'ПЕРЕНЕСЕНО → 45 и 77'
+H50 = f'{50:064x}'
 
 
 def reference_route(model, f, ms):
@@ -200,6 +201,50 @@ class TreeTest(PageBase):
         self.p.apply(['Поход 2010\\Фото'], N2)                                   # исключение в подпапке: своё направление
         self.assertEqual(self.item('Поход 2010\\Фото').text(rp.C_HAVE), '0')
         self.assertEqual(self.item('Поход 2010').text(rp.C_HAVE), '0')
+
+
+class ChoiceTest(PageBase):
+    def test_opens_with_direction_chosen_in_overview(self):
+        """Этап 5, п. 4: «Перейти к написанию команды…» - в «Куда» и «Всё — в» отмеченное в «Обзоре» направление
+        (несколько - первое по номеру), а не первое в списке; сохранённый режим носителя не меняется."""
+        import directions_page as dp
+        dp.save_choice(['Н2'])
+        self.open()
+        self.assertEqual(self.p.apply_box.currentData(), N2)
+        self.assertEqual(self.p.mode_dir.currentData(), N2)
+        self.assertIn('Пишем команды для: Н2 Работа (91)', self.p.choice_line.text())
+        self.assertEqual(self.p.model.drafts, {})                                # ничего не отмечено молча
+        self.p.apply_box.setCurrentIndex(0)                                      # владелец выбрал другое
+        dp.save_choice(['Н2', 'Н1'])                                             # снова из «Обзора»: по номеру - Н1
+        self.p.use_choice()
+        self.assertEqual(self.p.apply_box.currentData(), N1)
+        self.mark(('', 'Н2'))                                                    # сохранённый режим - «всё в Н2»
+        dp.save_choice(['Н1'])
+        self.p.load_disk(SRC, keep=False)
+        self.assertTrue(wait(lambda: self.p.model is not None and self.p.loading is None))
+        self.p.use_choice()
+        self.assertEqual(self.p.apply_box.currentData(), N1)
+        self.assertEqual(self.p.mode_dir.currentData(), N2)                      # сохранённое не перебито
+        self.assertIn('Сохранённый режим этого носителя', self.p.choice_line.text())
+        self.settle()
+
+
+class HaveNearTest(PageBase):
+    def test_have_docs_only_near_matches_planner(self):
+        """Замечание 2: «Уже есть» при «документы только рядом» = ядро: документ без фото рядом - не в «Уже есть»."""
+        make_disk(self.scans, 'HDD64', 'AAAA0064', [('A\\x.doc', 10, S[1]), ('B\\y.doc', 10, S[1]),
+                                                     ('B\\z.jpg', 10, H50)])
+        hb.close_last()
+        self.quiet(hb.connect)
+        self.mark(('', 'Н1'), disk='HDD64')
+        self.p.refresh()
+        self.assertTrue(wait(lambda: any(r['disk'] == 'HDD64' for r in self.p.disk_rows)))
+        self.open('HDD64')
+        self.assertEqual(self.item('A').text(rp.C_HAVE), '0')                    # документ без фото рядом
+        self.assertEqual(self.item('B').text(rp.C_HAVE), '1')                    # y.doc - рядом с z.jpg, есть на 45 и 77
+        P = sv.razbor('HDD64')
+        self.assertEqual(P.part_a[(rz.O_HAVE, 'Н1')][0], int(self.p.items[''].text(rp.C_HAVE)))
+        self.assertEqual(P.part_a[(rz.O_TYPE, 'Н1')][0], 1)
 
 
 class SummaryTest(PageBase):

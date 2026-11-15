@@ -221,41 +221,41 @@ class SectionTest(DirBase):
         dp.choice_path().write_text('не json', encoding='utf-8')
         self.assertEqual(dp.load_choice(), [])
 
-    def test_dialog_preview_then_write(self):
+    def test_dialog_saves_at_once(self):
+        """Этап 5, п. 2: «Проверить» нет, «Сохранить» активна сразу; новое направление - без переспроса."""
         s = self.section()
         dlg = dp.DirectionDialog(s, s.data, None)
+        self.assertFalse(hasattr(dlg, 'b_check'))
+        self.assertEqual(dlg.b_write.text(), 'Сохранить')
+        self.assertTrue(dlg.b_write.isEnabled())
         own = {dlg.disks.item(i).data(Qt.UserRole): dlg.disks.item(i) for i in range(dlg.disks.count())}
         self.assertEqual(own['HDD45'].flags(), Qt.NoItemFlags)                      # диск другого направления недоступен
         self.assertIn('у Н1 «Семейный архив»', own['HDD45'].text())
         self.assertTrue(own['HDD90'].flags() & Qt.ItemIsUserCheckable)
+        asked = []
+        dlg.confirm_hook = lambda lines, ack: asked.append(lines) or (True, False)
         dlg.name.setText('Друзья')
         dlg.desc.setText('фото друзей')
         own['HDD90'].setCheckState(Qt.Checked)
-        self.assertFalse(dlg.b_write.isEnabled())                                   # без предпросмотра записать нельзя
-        dlg.check()
-        self.assertTrue(wait(lambda: dlg.b_write.isEnabled()))
-        self.assertIn('Новое направление Н4 «Друзья»', dlg.view.toPlainText())
-        self.assertIn('фото друзей', dlg.view.toPlainText())
-        dlg.desc.setText('фото друзей и походов')                                   # поменяли поле - снова «Проверить»
-        self.assertFalse(dlg.b_write.isEnabled())
-        dlg.check()
-        self.assertTrue(wait(lambda: dlg.b_write.isEnabled()))
         n = len(self.lines())
         dlg.write()
         self.assertTrue(wait(lambda: len(self.lines()) == n + 1))
+        self.assertEqual(asked, [])                                                  # не переспрашивали
         d = sv.directions()['Н4']
-        self.assertEqual((d.name, d.disks, d.desc), ('Друзья', ('HDD90',), 'фото друзей и походов'))
+        self.assertEqual((d.name, d.disks, d.desc, d.kind), ('Друзья', ('HDD90',), 'фото друзей', hb.KIND_ALL))
         self.assertTrue(wait(lambda: s.t.rowCount() == 4))                          # секция перечитана
-        self.assertIn('Записано', s.hint.text())
+        self.assertIn('Сохранено', s.hint.text())
 
     def test_dialog_refusal_writes_nothing(self):
         s = self.section()
         dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н3'], disks_only=True)
         dlg.name.setText('Сафари')                                                   # прежнее имя другого направления
-        dlg.check()
-        self.assertTrue(wait(lambda: 'Нельзя записать' in dlg.view.toPlainText()))
+        before = hb.DIRECTIONS.read_bytes()
+        dlg.write()
+        self.assertTrue(wait(lambda: 'Нельзя сохранить' in dlg.view.toPlainText()))
         self.assertIn('Сафари', dlg.view.toPlainText())
-        self.assertFalse(dlg.b_write.isEnabled())
+        self.assertTrue(dlg.b_write.isEnabled())
+        self.assertEqual(hb.DIRECTIONS.read_bytes(), before)
         self.assertEqual(self.win.errors, [])                                        # отказ - в диалоге, не ошибкой окна
 
     def test_dialog_ack_for_removed_disk(self):
@@ -270,14 +270,142 @@ class SectionTest(DirBase):
         self.assertEqual(items['HDD91'].checkState(), Qt.Checked)
         items['HDD91'].setCheckState(Qt.Unchecked)
         items['HDD90'].setCheckState(Qt.Checked)
-        dlg.check()
-        self.assertTrue(wait(lambda: dlg.ack.isVisibleTo(dlg)))
-        self.assertIn('не запускалось', dlg.view.toPlainText())                     # журналов нет
-        self.assertFalse(dlg.b_write.isEnabled())                                   # без галочки «Понимаю» - нельзя
-        dlg.ack.setChecked(True)
-        self.assertTrue(dlg.b_write.isEnabled())
+        asked = []
+        dlg.confirm_hook = lambda lines, ack: asked.append((lines, ack)) or (False, False)    # «Отмена»
+        before = hb.DIRECTIONS.read_bytes()
+        dlg.write()
+        self.assertTrue(wait(lambda: asked and dlg.b_write.isEnabled()))
+        lines, ack = asked[0]
+        text = '\n'.join(lines)
+        self.assertEqual(ack, ['HDD91'])                                            # нужна галочка «Понимаю…»
+        self.assertIn('не запускалось', text)                                       # журналов нет
+        self.assertIn('направлению больше не засчитывается', text)                  # п. F
+        self.assertEqual(hb.DIRECTIONS.read_bytes(), before)
+        dlg.confirm_hook = lambda lines, ack: (True, True)                          # «Понимаю…» и «Сохранить»
         dlg.write()
         self.assertTrue(wait(lambda: sv.directions()['Н2'].disks == ('HDD90',)))
+        cd = dp.ConfirmDialog(s, ['строка'], ['HDD91'])                              # окно переспроса: без галочки нельзя
+        self.assertFalse(cd.ok.isEnabled())
+        cd.ack.setChecked(True)
+        self.assertTrue(cd.ok.isEnabled())
+        self.assertIn('больше не засчитывается', cd.ack.text())
+
+    def test_unrecognized_kind_and_change_during_confirm(self):
+        """Замечания 8 и 6: нераспознанное «что копировать» - все галочки сняты и «Сохранить» неактивна; поля
+        поменяли, пока был открыт переспрос, - ничего не сохраняется."""
+        with open(hb.DIRECTIONS, 'a', encoding='utf-8') as f:
+            f.write('Н2\tРабота\tСафари\tHDD91\tчто-то странное\t\n')
+        s = self.section()
+        self.assertIn('не распознано', s.t.item(self.row_of(s, 'Н2'), 5).text())
+        dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н2'])
+        self.assertEqual(dlg.chosen_cats(), frozenset())
+        self.assertFalse(dlg.b_write.isEnabled())
+        dlg.cat_boxes[hb.CAT_PHOTO].setChecked(True)
+        self.assertTrue(dlg.b_write.isEnabled())
+        dlg2 = dp.DirectionDialog(s, s.data, s.data['dirs']['Н1'])
+        items = {dlg2.disks.item(i).data(Qt.UserRole): dlg2.disks.item(i) for i in range(dlg2.disks.count())}
+        items['HDD77'].setCheckState(Qt.Unchecked)                                  # переспрос будет (данные на 77)
+
+        def meddle(lines, ack):
+            dlg2.name.setText('Другое имя')                                         # поменяли поле во время переспроса
+            return True, False
+        dlg2.confirm_hook = meddle
+        before = hb.DIRECTIONS.read_bytes()
+        dlg2.write()
+        self.assertTrue(wait(lambda: 'Значения изменились' in dlg2.view.toPlainText()))
+        QThreadPool.globalInstance().waitForDone(5000)
+        self.assertEqual(hb.DIRECTIONS.read_bytes(), before)
+        self.assertTrue(dlg2.b_write.isEnabled())
+
+    def test_confirm_only_when_disks_change_with_tasks_or_data(self):
+        pv = sv.direction_save_preview(num='Н2', desc='новое описание')            # только описание - сразу
+        self.assertFalse(pv['confirm'])
+        pv = sv.direction_save_preview(num='Н2', disks=['HDD91', 'HDD90'])         # только добавление диска - сразу
+        self.assertFalse(pv['confirm'])
+        pv = sv.direction_save_preview(num='Н2', kind=(frozenset({hb.CAT_PHOTO}), False))
+        self.assertFalse(pv['confirm'])
+        pv = sv.direction_save_preview(num='Н1', disks=['HDD45'])                  # убирается 77, на нём есть файлы
+        self.assertTrue(pv['confirm'])
+        self.assertEqual(pv['needs_ack'], [])                                       # заданий нет - галочка не нужна
+        self.assertIn('направлению больше не засчитывается', '\n'.join(pv['lines']))
+
+    def test_kind_checkboxes(self):
+        """Этап 5, п. 3: галочки «что копировать», «Все файлы», «только рядом»; старые значения читаются."""
+        s = self.section()
+        dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н1'])                  # «фото, видео и документы рядом»
+        on = {c for c, b in dlg.cat_boxes.items() if b.isChecked()}
+        self.assertEqual(on, {hb.CAT_PHOTO, hb.CAT_VIDEO, hb.CAT_DOC})
+        self.assertTrue(dlg.near.isChecked() and dlg.near.isEnabled())
+        self.assertEqual(dlg.all_box.checkState(), Qt.PartiallyChecked)
+        self.assertIn('в её подпапках', dlg.near.toolTip())
+        dlg.cat_boxes[hb.CAT_DOC].setChecked(False)
+        self.assertFalse(dlg.near.isEnabled())                                      # без документов «рядом» не действует
+        self.assertEqual(dlg.values()['kind'], (frozenset({hb.CAT_PHOTO, hb.CAT_VIDEO}), False))
+        dlg.all_box.click()                                                          # не все -> все
+        self.assertEqual(dlg.chosen_cats(), hb.ALL_CATS)
+        self.assertEqual(dlg.all_box.checkState(), Qt.Checked)
+        dlg.all_box.click()                                                          # все -> ничего
+        self.assertEqual(dlg.chosen_cats(), frozenset())
+        self.assertFalse(dlg.b_write.isEnabled())                                   # замечание 8: пустой набор
+        self.assertIn('хотя бы один тип', dlg.b_write.toolTip())
+        with self.assertRaises(sv.Refused):                                         # и сервис отказывает
+            sv.direction_save_preview(num='Н1', kind=(frozenset(), False))
+        dlg.cat_boxes[hb.CAT_PHOTO].setChecked(True)
+        dlg.cat_boxes[hb.CAT_MUSIC].setChecked(True)
+        dlg.confirm_hook = lambda lines, ack: (True, False)
+        dlg.write()
+        self.assertTrue(wait(lambda: sv.directions()['Н1'].kind == 'фото, музыка'))
+        self.assertEqual(self.lines()[-1].split('\t')[4], 'фото, музыка')
+        sv.direction_save(num='Н1', kind=(hb.ALL_CATS, False))                     # набор старого значения - старым текстом
+        self.assertEqual(sv.directions()['Н1'].kind, hb.KIND_ALL)
+        sv.direction_save(num='Н1', kind=(frozenset({hb.CAT_PHOTO, hb.CAT_VIDEO, hb.CAT_DOC}), True))
+        self.assertEqual(sv.directions()['Н1'].kind, hb.KIND_MEDIA)
+        s2 = self.section()
+        self.assertEqual(s2.t.item(self.row_of(s2, 'Н2'), 5).text(), 'все файлы (кроме программ и временных)')
+
+    def test_disk_colors(self):
+        """Этап 5, п. 1: оранжевый - назначен (бледный - не подключён), зелёный - подключён и свободен, серый - нет."""
+        import disk_ui
+        self.assertEqual(disk_ui.disk_color(True, True), (disk_ui.ASSIGNED_ON, True))
+        self.assertEqual(disk_ui.disk_color(False, True), (disk_ui.ASSIGNED_OFF, False))
+        self.assertEqual(disk_ui.disk_color(True, False), ('#1b5e20', True))
+        self.assertEqual(disk_ui.disk_color(False, False), ('#8a8a8a', False))
+        s = self.section()
+        s.data['disks'] = [dict(r, letter='Z:') if r['disk'] in ('HDD45', 'HDD90') else r for r in s.data['disks']]
+        s.data['by'] = {r['disk']: r for r in s.data['disks']}
+        s.render(s.data)
+        html = s.t.cellWidget(self.row_of(s, 'Н1'), 3).text()
+        self.assertIn(f'<b style="color:{disk_ui.ASSIGNED_ON}">● HDD45', html)      # назначен и подключён
+        self.assertIn(f'<span style="color:{disk_ui.ASSIGNED_OFF}">HDD77', html)    # назначен, не подключён
+        dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н2'])
+        it = {dlg.disks.item(i).data(Qt.UserRole): dlg.disks.item(i) for i in range(dlg.disks.count())}
+        color = lambda d: it[d].data(Qt.ForegroundRole).color().name()
+        self.assertEqual(color('HDD45'), disk_ui.ASSIGNED_ON)                       # чужой (Н1), подключён
+        self.assertIn('у Н1 «Семейный архив»', it['HDD45'].text())
+        self.assertEqual(color('HDD77'), disk_ui.ASSIGNED_OFF)                      # чужой, не подключён
+        self.assertEqual(color('HDD91'), disk_ui.ASSIGNED_OFF)                      # свой, не подключён
+        self.assertEqual(color('HDD90'), '#1b5e20')                                 # свободен, подключён
+        self.assertEqual(dlg.disks.item(0).data(Qt.UserRole), 'HDD45')              # подключённые - сверху
+        s.data['disks'] = [dict(r, letter='') if r['disk'] == 'HDD90' else r for r in s.data['disks']]
+        dlg2 = dp.DirectionDialog(s, s.data, s.data['dirs']['Н2'])
+        it2 = {dlg2.disks.item(i).data(Qt.UserRole): dlg2.disks.item(i) for i in range(dlg2.disks.count())}
+        self.assertEqual(it2['HDD90'].data(Qt.ForegroundRole).color().name(), '#8a8a8a')   # свободен, не подключён
+
+    def test_go_opens_razbor_with_chosen(self):
+        """Этап 5, п. 4: кнопка перехода просит экран разбора поставить отмеченное направление."""
+        s = self.section()
+        got = []
+
+        class Page:
+            def use_choice(self):
+                got.append(dp.load_choice())
+        self.win.pages.append((dp.RAZBOR_PAGE, Page()))
+        self.win.page = lambda name: dict(self.win.pages)[name]
+        s.t.item(self.row_of(s, 'Н2'), 0).setCheckState(Qt.Checked)
+        s.update_buttons()
+        s.b_go.click()
+        self.assertEqual(got, [['Н2']])
+        self.assertEqual(self.win.opened, [dp.RAZBOR_PAGE])
 
 
 if __name__ == '__main__':

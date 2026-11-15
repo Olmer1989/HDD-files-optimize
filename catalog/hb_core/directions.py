@@ -16,16 +16,56 @@
 Здесь нет обращений к базе: только таблицы владельца.
 """
 import collections
+import functools
 import hashlib
 from pathlib import Path
 from dataclasses import dataclass, field
 from hb_core import paths
-from hb_core.consts import DIRECTION_HEAD, KIND_ALL, KIND_MEDIA, MARK_DIR, MARK_INHERIT, MARK_SKIP, SEP
+from hb_core.consts import (CAT_DOC, CAT_PHOTO, CAT_VIDEO, COPY_CATS, DIRECTION_HEAD, DOCS_NEAR_WORD, KIND_ALL, KIND_MEDIA,
+                            MARK_DIR, MARK_INHERIT, MARK_SKIP, SEP)
 from hb_core.util import copied_folder, disk_nums, tsv_rows
 
 DIR_NAME_BAD = set('\\/:*?"<>|;')
 DIR_NAME_MAX = 30
 KINDS = (KIND_MEDIA, KIND_ALL)
+ALL_CATS = frozenset(COPY_CATS)
+MEDIA_CATS = frozenset((CAT_PHOTO, CAT_VIDEO, CAT_DOC))
+
+
+@functools.lru_cache(maxsize=256)
+def parse_kind(text):
+    """Колонка «что копировать» -> (набор категорий, документы только рядом, распознано). Старые значения:
+    «все файлы» (и пустое - строка старого вида) = все 7 категорий; «фото, видео и документы рядом» = фото, видео,
+    документы рядом. Новые - слова через запятую из COPY_CATS, «документы рядом» вместо «документы». Неизвестное слово
+    или пустой набор - (пусто, False, False): НИЧЕГО не копируется (Дискуссия этапа 5, п. 1), а не «все файлы»."""
+    t = ' '.join((text or '').split()).lower()
+    if t in ('', KIND_ALL):
+        return ALL_CATS, False, True
+    if t == KIND_MEDIA:
+        return MEDIA_CATS, True, True
+    cats, near = set(), False
+    for w in (x.strip() for x in t.split(',')):
+        if w == DOCS_NEAR_WORD:
+            cats.add(CAT_DOC)
+            near = True
+        elif w in ALL_CATS:
+            cats.add(w)
+        else:
+            return frozenset(), False, False
+    if not cats:
+        return frozenset(), False, False
+    return frozenset(cats), near and CAT_DOC in cats, True
+
+
+def kind_text(cats, near=False):
+    """Набор категорий -> текст колонки. Набор старого значения - старым текстом (совместимость)."""
+    cats = frozenset(cats)
+    near = bool(near) and CAT_DOC in cats
+    if cats == ALL_CATS and not near:
+        return KIND_ALL
+    if cats == MEDIA_CATS and near:
+        return KIND_MEDIA
+    return ', '.join((DOCS_NEAR_WORD if (c == CAT_DOC and near) else c) for c in COPY_CATS if c in cats)
 # состояния маршрута
 R_DIR, R_SKIP, R_UNSET, R_NONE = 'направление', 'не копировать', 'не задано', 'не отмечено'
 
@@ -43,6 +83,19 @@ class Direction:
     @property
     def media_only(self):
         return self.kind == KIND_MEDIA
+
+    @property
+    def cats(self):
+        """Категории «что копировать» (пусто - значение не распознано: ничего не копируется)."""
+        return parse_kind(self.kind)[0]
+
+    @property
+    def docs_near(self):
+        return parse_kind(self.kind)[1]
+
+    @property
+    def kind_ok(self):
+        return parse_kind(self.kind)[2]
 
     def label(self):
         return f'{self.name} ({disk_nums(self.disks)})' if self.disks else f'{self.name} (диск не назначен)'
@@ -99,7 +152,8 @@ def parse_directions(data):
         names_seen[num].append(f[1])
         former = [x.strip() for x in f[2].split(';') if x.strip()]
         disks = tuple(dict.fromkeys(x.strip() for x in f[3].split(',') if x.strip()))
-        kind = f[4] if f[4] in KINDS else KIND_ALL
+        cats, near, ok = parse_kind(f[4])
+        kind = kind_text(cats, near) if ok else f[4]            # нераспознанное - как записано (ничего не копируется)
         cur[num] = (f[1], former, disks, kind, f[5])
         if has_desc:
             descs[num] = f[6]

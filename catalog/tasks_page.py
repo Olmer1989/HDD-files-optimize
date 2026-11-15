@@ -435,7 +435,7 @@ def latest_manifest_groups(root=None):
 
 def move_items(rows, groups=()):
     """Блоки под таблицей: (можно переместить [dict], готово [dict]). Считается заново по файлам заданий."""
-    offers, done = [], []
+    offers, done, waiting = [], [], []
     retries = {}
     moves = {}
     for r in rows:
@@ -450,7 +450,8 @@ def move_items(rows, groups=()):
         v.sort(key=lambda x: x['move_meta'].get('создано_ts', 0))
 
     def done_items(key, disks, labels, folder, src_disk):
-        for mv in moves.get(key, []):
+        keys = key if isinstance(key, list) else [key]
+        for mv in [m for k in keys for m in moves.get(k, [])]:
             mm = mv['move_meta']
             if mv['state'] not in DONE:
                 continue
@@ -464,14 +465,44 @@ def move_items(rows, groups=()):
                 text += f' Не перенесено по ошибке или конфликту: {n(mv["errors"] + mv["skipped"])}.'
             done.append(dict(text=text, task=mv['task'], left=left, reasons=mm.get('остаток') or {}, ok=not left))
 
+    # этап 5: у направления с несколькими дисками (45 и 77) - отдельное задание на каждый диск одной группы («группа» в
+    # разбор.json). Перемещение группы предлагается, только когда закончены ВСЕ её задания; пока нет - строка «на 45
+    # скопировано, на 77 - ждёт». Окончательно решает пофайловая проверка SHA-256 на всех дисках (mvlist).
+    sibs = {}
     for r in rows:
         m = r.get('meta')
         if r['kind'] != 'копирование' or not m or m.get('повтор'):
             continue
+        key = (m.get('носитель', ''), m.get('группа')) if m.get('группа') else ('', r['task'])
+        sibs.setdefault(key, []).append(r)
+
+    def state_word(g):
+        if g['state'] == 'идёт':
+            return 'идёт копирование'
+        if g['state'] == 'готово':
+            return 'скопировано'
+        if g['state'] == 'готово с ошибками':
+            return 'скопировано с ошибками'
+        return {'не запускалось': 'ждёт запуска', 'прервано': 'прервано, ждёт продолжения'}.get(g['state'], g['state'])
+
+    for members in sibs.values():
+        members.sort(key=lambda x: x['task'])
+        r = members[0]                                       # «ведущее» задание группы: им вызывается mvlist
+        m = r['meta']
         labels = r.get('labels') or {}
         folder, disks, src = m.get('папка'), m.get('обязательные диски') or [], m.get('носитель', '')
-        group = [r] + retries.get(r['task'], [])
-        if any(g['state'] == 'идёт' for g in group) or r['state'] not in DONE:
+        group = [g for x in members for g in [x] + retries.get(x['task'], [])]
+        if any(g['state'] == 'идёт' for g in group) and len(members) == 1:
+            continue
+        if any(x['state'] not in DONE for x in members) or any(g['state'] == 'идёт' for g in group):
+            if len(members) > 1:                             # не все диски группы скопированы - перемещать рано
+                parts = []
+                for x in members:
+                    tg = (x['meta'].get('цели') or ['?'])
+                    parts.append(f'на {", ".join(_num(t) for t in tg)} — {state_word(x)}')
+                waiting.append(dict(text=f'Папка «{_folder_word(folder)}»: ' + '; '.join(parts) + '. Переместить на '
+                                         f'носителе можно, когда копии будут на {disks_words(disks, labels)}.',
+                                    task=r['task'], left=0, reasons={}, ok=False))
             continue
         if not m.get('перемещать на носителе', True):
             done.append(dict(text=f'Папка «{_folder_word(folder)}» скопирована на {disks_words(disks, labels)}; '
@@ -479,11 +510,14 @@ def move_items(rows, groups=()):
                              task=r['task'], left=0, reasons={}, ok=True))
             continue
         dest = hb.copied_folder(m.get('имя направления', ''), disks) if disks else '…'
-        mv = moves.get(r['task'], [])
+        # задание переноса могло быть создано по ЛЮБОМУ заданию группы (mvlist --razbor «… — на 77» из командной строки)
+        mv = sorted((x for t in members for x in moves.get(t['task'], [])),
+                    key=lambda x: x['move_meta'].get('создано_ts', 0))
         last = mv[-1] if mv else None
-        left = r.get('left', 0)
-        retry_busy = any(g['state'] not in DONE for g in group[1:])
-        base = dict(copy_task=r['task'], folder=folder, dest=dest, disk=src)
+        left = sum(x.get('left', 0) for x in members)
+        with_left = [x['task'] for x in members if x.get('left', 0)]
+        retry_busy = any(g['state'] not in DONE for x in members for g in retries.get(x['task'], []))
+        base = dict(copy_task=r['task'], folder=folder, dest=dest, disk=src, retry_tasks=with_left or [r['task']])
         if last and last['state'] in ('не запускалось', 'прервано', 'состояние неизвестно'):
             word = 'Запустить перемещение' if last['state'] == 'не запускалось' else 'Продолжить перемещение'
             offers.append(dict(base, kind='run', move_task=last['task'], buttons=[word],
@@ -494,7 +528,7 @@ def move_items(rows, groups=()):
             pass
         else:
             newer = any(g['state'] in DONE and g.get('log_ts', 0) > last['move_meta'].get('создано_ts', 0)
-                        for g in group[1:]) if last else False
+                        for x in members for g in retries.get(x['task'], [])) if last else False
             if (not last or newer) and not retry_busy:
                 if left:
                     offers.append(dict(base, kind='move', buttons=['Переместить скопированное', 'Повторить копирование'],
@@ -510,7 +544,7 @@ def move_items(rows, groups=()):
                 offers.append(dict(base, kind='retry', buttons=['Повторить копирование'],
                                    text=f'Папка «{_folder_word(folder)}»: скопированное перенесено, не скопировано '
                                         f'{n(left)} файлов. Повторить копирование остального?'))
-        done_items(r['task'], disks, labels, folder, src)
+        done_items([x['task'] for x in members], disks, labels, folder, src)
     labels = next((r.get('labels') for r in rows if r.get('labels')), {}) or {}
     for g in groups:
         gr = g['group']
@@ -530,7 +564,7 @@ def move_items(rows, groups=()):
             offers.append(dict(base, kind='run', move_task=mv[-1]['task'], buttons=['Продолжить перемещение'],
                                text=f'Папка «{_folder_word(gr.get("folder"))}»: задание переноса в «{dest}» не закончено.'))
         done_items(key, gr.get('disks') or [], labels, gr.get('folder'), g['disk'])
-    return offers, done
+    return offers + [dict(w, kind='wait', buttons=[]) for w in waiting], done
 
 
 def load_all(root=None, now=None):
@@ -967,12 +1001,15 @@ class TasksPage(QWidget):
                         ok=lambda res: self._after_recheck([({'task': name}, *res)], [{'task': name}], False))
 
     def retry_copy(self, it):
-        left = next((r.get('left', 0) for r in self.rows if r['task'] == it['copy_task']), 0)
-        if not self.ask(f'Создать задание «{it["copy_task"]} — повтор» из {n(left)} не скопированных файлов и запустить '
-                        'его? Старое задание не перезапускается: то, что уже скопировано (и, возможно, перенесено), '
-                        'повторно не читается.'):
+        tasks = it.get('retry_tasks') or [it['copy_task']]
+        left = sum(r.get('left', 0) for r in self.rows if r['task'] in tasks)
+        names = ', '.join(f'«{t} — повтор»' for t in tasks)
+        if not self.ask(f'Создать {"задание" if len(tasks) == 1 else "задания"} {names} из {n(left)} не скопированных '
+                        'файлов и запустить? Старое задание не перезапускается: то, что уже скопировано (и, возможно, '
+                        'перенесено), повторно не читается.'):
             return
-        self.win.bg.run(_retry, it['copy_task'], ok=self._retried)
+        for t in tasks:
+            self.win.bg.run(_retry, t, ok=self._retried)
 
     def _retried(self, res):
         if isinstance(res, str):

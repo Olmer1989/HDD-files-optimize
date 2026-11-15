@@ -16,8 +16,10 @@ import collections
 import time
 from collections import namedtuple
 import build_pilot as bp
-from hb_core.consts import (C_DOC, C_JUNK, EV_COPY, EV_SCAN, EXT_CLASS, F_JUNK, F_OTHER, F_PHOTO, F_TEXT, F_VIDEO,
-                            JUNK_NAMES, MAIN, SEP)
+from hb_core.consts import (C_DOC, C_JUNK, CAT_DOC, CAT_OF_TYPE, EV_COPY, EV_SCAN, EXT_CLASS, F_ARCH, F_JUNK, F_MUSIC,
+                            F_NEVER, F_OTHER, F_PHOTO, F_PROJ, F_TEXT, F_VIDEO, JUNK_NAMES, MAIN, N_TYPES,
+                            NEVER_COPY_EXT, SEP)
+from hb_core.derived import sub_of_other
 from hb_core.util import is_moved_dir, parent_of, prefix_cond
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
 from hb_core.query import _keys
@@ -48,8 +50,9 @@ def inside_cond(col, folder):
     return f'({col} >= ? and {col} < ?)', [f + SEP, f + ']']
 
 
-def fast_folder_type():
-    """То же, что derived.folder_type (тип файла для таблицы folders), но регулярное выражение кэша монтажа
+def fast_folder_type(fine=False):
+    """То же, что derived.folder_type (тип файла для таблицы folders; fine=True - derived.copy_kind, 9 типов с
+    подмножествами «прочих»), но регулярное выражение кэша монтажа
     проверяется по ПАПКЕ один раз, а у файла - только по имени. Совпадение, которое переходит границу папка/имя,
     возможно только у «lightroom.*previews»: в папках со словом lightroom путь проверяется целиком. Тест сверяет с
     folder_type. -> функция (путь, name_lc, размер) -> тип."""
@@ -57,9 +60,13 @@ def fast_folder_type():
     cre = bp.CACHE_RE
 
     def ft(path, nm, size):
-        if not size:
-            return F_OTHER
         nm = nm or ''
+        if not size:
+            if fine:
+                j = nm.rfind('.')
+                if j > 0 and nm[:j].strip('.') and nm[j:] in NEVER_COPY_EXT:
+                    return F_NEVER
+            return F_OTHER
         i = path.rfind(SEP)
         folder = path[:i] if i >= 0 else ''
         fc = cache.get(folder)
@@ -78,7 +85,9 @@ def fast_folder_type():
         t = bp.EXT_TYPE.get(ext)
         if t:
             return F_VIDEO if t == 'Видео' else F_PHOTO
-        return F_TEXT if cls == C_DOC else F_OTHER
+        if cls == C_DOC:
+            return F_TEXT
+        return sub_of_other(ext) if fine else F_OTHER
     return ft
 
 
@@ -166,10 +175,14 @@ def planner(c, disk, dirs, marks, detail=False):
     detail=True - ещё и строки заданий поштучно (подготовка заданий) и тёзки без хеша на дисках направлений."""
     P = Plan(disk, dirs, marks)
     roots = moved_roots(c, disk)
-    cols = 'folder, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(5))
+    cols = 'folder, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(N_TYPES))
     own = {}
     for r in c.execute(f'select {cols} from folders where disk=?', (disk,)):
-        own[r[0]] = (r[1], r[2], [r[3 + 2 * i] for i in range(5)], [r[4 + 2 * i] for i in range(5)])
+        n_ = [r[3 + 2 * i] or 0 for i in range(N_TYPES)]
+        b_ = [r[4 + 2 * i] or 0 for i in range(N_TYPES)]
+        n_[F_OTHER] -= sum(n_[F_ARCH:])                          # «прочие» в folders - все прочие; здесь - только «другие»
+        b_[F_OTHER] -= sum(b_[F_ARCH:])
+        own[r[0]] = (r[1], r[2], n_, b_)
     if not own:
         P.errors.append(f'в базе нет файлов носителя {disk}')
         return P
@@ -185,7 +198,7 @@ def planner(c, disk, dirs, marks, detail=False):
         if f:
             p = parent_of(f)
             if p in dn:
-                for i in range(5):
+                for i in range(N_TYPES):
                     dn[p][i] -= own[f][2][i]
                     db[p][i] -= own[f][3][i]
 
@@ -230,7 +243,7 @@ def planner(c, disk, dirs, marks, detail=False):
     for d in used:
         if d != disk:                                            # сам носитель - бит src_bit
             sets[d] = {s for (s,) in c.execute('select sha from files where disk=? and sha is not null', (d,))}
-    ftype = fast_folder_type()
+    ftype = fast_folder_type(fine=True)
 
     # ---------- поштучные файлы без хеша: длинный путь назначения и занятый путь назначения ----------
     copy_prefix_len = len(f'X:{SEP}{COPY_ROOT}{SEP}{disk}{SEP}')
@@ -332,17 +345,17 @@ def planner(c, disk, dirs, marks, detail=False):
         top = f.split(SEP, 1)[0] if f else ''
         docs_ok[f] = bool(f) and not (top in roots and f == top) and ms[f] > 0
         r = route[f]
-        if (docs_ok[f] and r.state == R_DIR and dirs[r.num].media_only and docs_direct[f][0] > 0
+        if (docs_ok[f] and r.state == R_DIR and dirs[r.num].docs_near and docs_direct[f][0] > 0
                 and not (r.moved and not dirs[r.num].disks)):
             P.docs_near.append((f, docs_direct[f][0], docs_direct[f][1], basis[f]))
 
     # ---------- исход файла ----------
     def eligible(d, k, dok):
-        if k == F_JUNK:
+        """Подходит ли тип направлению: набор категорий «что копировать»; программы и мусор - никогда."""
+        cat = CAT_OF_TYPE.get(k)
+        if cat is None or cat not in d.cats:
             return False
-        if not d.media_only:
-            return True
-        return k in (F_PHOTO, F_VIDEO) or (k == F_TEXT and dok)
+        return not (cat == CAT_DOC and d.docs_near) or dok
 
     def outcome(r, k, mask, dok):
         """-> (исход, номер, недостающие диски)."""
@@ -457,7 +470,7 @@ def planner(c, disk, dirs, marks, detail=False):
     need_files = []                                              # папки, где файлы без хеша пойдут в задания
     for f in folders:
         r = route[f]
-        for k in range(5):
+        for k in range(N_TYPES):
             n, b = dn[f][k], db[f][k]
             if not n:
                 continue
@@ -551,7 +564,7 @@ def planner(c, disk, dirs, marks, detail=False):
                         continue
                     P.rows[(g['key'], d)].append((d, path, size or 0, 'без хеша', ''))
                     P.info.setdefault('nh_keys', collections.defaultdict(set))[d].add((nm, size or 0))
-        expected = sum(dn[f][k] for f in need for k in range(5)
+        expected = sum(dn[f][k] for f in need for k in range(N_TYPES)
                        if outcome(route[f], k, src_bit, docs_ok[f])[0] == O_COPY)
         if seen_rows != expected:
             P.errors.append(f'файлов без хеша к копированию прочитано {seen_rows}, по суммам папок {expected}')
@@ -628,6 +641,16 @@ def group_title(g):
     return ROOT_TITLE if g['folder'] is ROOT_GROUP else g['folder'].rsplit(SEP, 1)[-1]
 
 
+WIN_BAD = set('\\/:*?"<>|') | {chr(i) for i in range(32)}
+
+
+def safe_name(text):
+    """Имя папки задания для Windows: запрещённые знаки -> «_», без точек и пробелов в конце (имя папки носителя
+    могло прийти с другой файловой системы)."""
+    t = ''.join('_' if ch in WIN_BAD else ch for ch in text).rstrip(' .')
+    return t or '_'
+
+
 def summary_lines(P):
     """Короткий итог для экрана (≤ 20 строк) и полный - для файла."""
     L = []
@@ -690,25 +713,33 @@ def group_rows(P):
 
 # ---------- задания (план без записи; записывает service.publish_tasks) ----------
 
+def disk_word(d):
+    return d[3:] if d.startswith('HDD') and d[3:].isdigit() else d
+
+
 def task_specs(P, serials):
-    """Задания по группам: одна группа (решающая отметка + папка) и её направление. -> [dict]."""
+    """Задания по группам: одна группа (решающая отметка + папка) и её направление, и ОДИН диск назначения (этап 5:
+    у «Семейного архива» - отдельное задание на 45 и на 77; что недостающее - своё для каждого диска). Имя у
+    направления с несколькими дисками - «… — на 45». Обязательные диски задания - все диски направления (перемещение
+    требует копий на всех). -> [dict], по группе, затем по диску."""
     specs, used = [], set()
     for gk, g in sorted(P.groups.items(), key=lambda kv: (kv[1]['num'] or '', str(kv[1]['folder']))):
         targets = [d for d in g['disks'] if d != P.disk and P.rows.get((gk, d))]
         if not targets:
             continue
-        base = f'{P.disk} — {group_title(g)[:60]} — {g["direction"]}'
-        name, i = base, 2
-        while name.lower() in used:
-            name, i = f'{base} ({i})', i + 1
-        used.add(name.lower())
-        rows = sorted({r for d in targets for r in P.rows[(gk, d)]}, key=lambda r: (r[0], r[1]))
-        specs.append(dict(name=name, key=[g['row'], g['folder']], folder=g['folder'], num=g['num'],
-                          direction=g['direction'], disks=list(g['disks']), targets=targets, kind=g['kind'],
-                          mark=g['mark'], mark_row=g['row'], rows=rows,
-                          deps={d: P.deps.get((gk, d), []) for d in targets},
-                          files=len(rows), bytes=sum(r[2] for r in rows),
-                          serials={d: serials.get(d, 'НЕТ_СЕРИЙНОГО_НОМЕРА') for d in [P.disk] + targets}))
+        group = safe_name(f'{P.disk} — {group_title(g)[:60]} — {g["direction"]}')
+        for d in targets:
+            base = group + (f' — на {disk_word(d)}' if len(g['disks']) > 1 else '')
+            name, i = base, 2
+            while name.lower() in used:
+                name, i = f'{base} ({i})', i + 1
+            used.add(name.lower())
+            rows = sorted(set(P.rows[(gk, d)]), key=lambda r: (r[0], r[1]))
+            specs.append(dict(name=name, group=group, key=[g['row'], g['folder']], folder=g['folder'], num=g['num'],
+                              direction=g['direction'], disks=list(g['disks']), targets=[d], kind=g['kind'],
+                              mark=g['mark'], mark_row=g['row'], rows=rows, deps={d: P.deps.get((gk, d), [])},
+                              files=len(rows), bytes=sum(r[2] for r in rows),
+                              serials={x: serials.get(x, 'НЕТ_СЕРИЙНОГО_НОМЕРА') for x in (P.disk, d)}))
     return specs
 
 

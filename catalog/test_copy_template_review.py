@@ -233,6 +233,19 @@ class Template24(unittest.TestCase):
         self.assertEqual(self.run_ps()[0].returncode, 5)   # недопустимый путь дубля
         self.assertFalse((self.dst / DEST).exists())
 
+    def test_one_target_of_two_required(self):
+        """Этап 5: задание на один диск «Семейного архива» (цель 45, обязательные 45 и 77) шаблон 2.4 принимает как
+        есть; 77 он не трогает."""
+        line = self.one_file()
+        self.write_task('HDD90\tAAAA0090\nHDD45\tAAAA0045\n', ['HDD45\t' + line],
+                        self.razbor(цели=['HDD45'], группа='HDD90 — A — Семейный архив'))
+        p, rows, out = self.run_ps('-Confirmed', '-Expect', self.fingerprint())
+        self.assertIn(p.returncode, (10, 11), out)
+        self.assertTrue(rows[0][2].startswith('скопирован, размер и SHA-256 совпали'), out)
+        self.assertEqual({r[1] for r in rows}, {'HDD45'})
+        self.assertTrue((self.dst / DEST).exists())
+        self.assertFalse(any(self.dst2.iterdir()))
+
     def test_manifest_only_warns(self):
         line = self.one_file()
         self.write_task(self.TOMA, ['HDD45\t' + line, 'HDD77\t' + line], self.razbor())

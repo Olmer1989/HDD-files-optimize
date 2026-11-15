@@ -5,7 +5,10 @@
 команды копирования» и кнопка «Перейти к написанию команды на копирование →» (экран «Разбор носителя»).
 
 Таблицу направлений пишет только service (direction_save_preview -> direction_save: предпросмотр, затем под замком
-та же проверка и одна строка; копия таблицы - в архив). Галочки - выбор окна, а не таблица владельца: файл
+та же проверка и одна строка; копия таблицы - в архив). Этап 5 (15.11.2026): в диалоге нет «Проверить» - «Сохранить»
+сразу; переспрос (текст предпросмотра) - только при смене или удалении диска у направления, у которого есть задания или
+данные на убираемом диске (service: confirm). «Что копировать» - галочки категорий (hb_core.directions.parse_kind).
+Цвета дисков: оранжевый - назначен направлению, зелёный - подключён и свободен, серый - не подключён (disk_ui). Галочки - выбор окна, а не таблица владельца: файл
 «_БАЗА\\окно - выбор направлений.json». Экран «Разбор носителя» читает выбор через chosen() (один контракт).
 Документ - «Логика_v3_разбор_носителя.md», раздел «Этап 4».
 """
@@ -20,13 +23,22 @@ import disk_ui
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QTableWidget,
-                               QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGridLayout,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+                               QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
 
 CHOICE_NAME = 'окно - выбор направлений.json'
 RAZBOR_PAGE = 'Разбор носителя'
 KINDS = (hb.KIND_MEDIA, hb.KIND_ALL)
+# галочки «Что копировать»: категория ядра -> подпись окна
+CAT_LABELS = ((hb.CAT_PHOTO, 'Фото'), (hb.CAT_VIDEO, 'Видео'), (hb.CAT_DOC, 'Документы (Word, Excel, PDF, тексты)'),
+              (hb.CAT_ARCH, 'Архивы'), (hb.CAT_PROJ, 'Проекты монтажа и графики'), (hb.CAT_MUSIC, 'Музыка'),
+              (hb.CAT_OTHER, 'Другие'))
+NEAR_TEXT = 'Документы — только рядом с фото и видео'
+NEAR_TIP = ('«Рядом» — в той же папке или в её подпапках есть хотя бы одно фото или видео, которое идёт в это же '
+            'направление (подпапки с другой отметкой и корень носителя не считаются).')
+NEVER_TEXT = ('Программы, системные и временные файлы (exe, dll, msi, ini, tmp, Thumbs.db и т. п.) не копируются никогда. '
+              '«Все файлы» — все, кроме них.')
 GO_TEXT = 'Перейти к написанию команды на копирование →'
 HEADERS = ('Пишем команды', 'Направление', 'Что собирается на дисках', 'Диски', 'Свободно', 'Что копировать',
            'Папка на носителе после переноса')
@@ -84,12 +96,14 @@ def section_data():
     return dict(dirs=dirs, disks=rows, by=by, free=free, choice=load_choice())
 
 
-def disk_line(disk, by):
+def disk_line(disk, by, assigned=True):
+    """Диск строки направления - назначен (оранжевый; подключённый - жирный, неподключённый - бледно-оранжевый)."""
     r = by.get(disk) or {'disk': disk, 'label': '', 'letter': ''}
     text = disk_ui.disk_text(r)
-    if r.get('letter'):
-        return f'<b style="color:{ON}">{text}</b>'
-    return f'<span style="color:{OFF}">{text}</span>'
+    color, bold = disk_ui.disk_color(bool(r.get('letter')), assigned)
+    if bold:
+        return f'<b style="color:{color}">{text}</b>'
+    return f'<span style="color:{color}">{text}</span>'
 
 
 def gb(x):
@@ -97,7 +111,13 @@ def gb(x):
 
 
 def kind_text(kind):
-    return kind if kind in KINDS else hb.KIND_ALL
+    """«Что копировать» для таблицы: прежние значения и наборы категорий как записаны; нераспознанное - пометкой."""
+    cats, near, ok = hb.parse_kind(kind)
+    if not ok:
+        return f'не распознано («{kind}») — ничего не копируется'
+    if cats == hb.ALL_CATS and not near:
+        return 'все файлы (кроме программ и временных)'
+    return hb.kind_text(cats, near)
 
 
 # ---------- секция в «Обзоре» ----------
@@ -277,6 +297,9 @@ class DirectionsSection(QWidget):
         if not nums or not self.has_razbor():
             return
         save_choice(nums)
+        page = self.win.page(RAZBOR_PAGE) if hasattr(self.win, 'page') else None
+        if page is not None and hasattr(page, 'use_choice'):
+            page.use_choice()                     # экран уже открывался: списки «Куда» - на отмеченное направление
         self.win.open_page(RAZBOR_PAGE)
 
     # --- запись ---
@@ -300,16 +323,53 @@ def _safe(fn, **kw):
         return False, str(e)
 
 
+class ConfirmDialog(QDialog):
+    """Переспрос перед сохранением: текст предпросмотра сервиса и, если убирается диск с заданиями, галочка «Понимаю…»."""
+
+    def __init__(self, parent, lines, needs_ack):
+        super().__init__(parent)
+        self.setWindowTitle('Сохранить направление?')
+        self.resize(720, 460)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel('<b>Меняются диски направления, у которого уже есть задания или скопированные файлы. '
+                             'Что будет:</b>'))
+        view = QTextBrowser()
+        view.setHtml('<ul>' + ''.join(f'<li>{html_esc(x)}</li>' for x in lines) + '</ul>')
+        lay.addWidget(view, 1)
+        self.ack = QCheckBox(ACK_TEXT)
+        self.ack.setVisible(bool(needs_ack))
+        lay.addWidget(self.ack)
+        self.buttons = QDialogButtonBox()
+        self.ok = self.buttons.addButton('Сохранить', QDialogButtonBox.AcceptRole)
+        self.buttons.addButton('Отмена', QDialogButtonBox.RejectRole)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        lay.addWidget(self.buttons)
+        self.ack.toggled.connect(lambda on: self.ok.setEnabled(on or not needs_ack))
+        self.ok.setEnabled(not needs_ack)
+        self.text = view
+
+
+ACK_TEXT = ('Понимаю: убранный диск перестаёт быть диском направления; скопированное на нём остаётся, но направлению '
+            'больше не засчитывается («уже есть» — только по новым дискам); старые задания по-прежнему требуют его')
+
+
+def html_esc(x):
+    import html
+    return html.escape(str(x))
+
+
 class DirectionDialog(QDialog):
-    """Добавить / изменить направление: имя, описание, диски (носители базы, подключённые сверху), что копировать.
-    «Проверить» - предпросмотр сервиса; «Записать» активна только после предпросмотра ЭТИХ значений."""
+    """Добавить / изменить направление: имя, описание, диски (носители базы, подключённые сверху), что копировать
+    (галочки). «Сохранить» - сразу: предпросмотр сервиса в фоне; переспрос - только если сервис просит подтверждения
+    (меняются диски у направления с заданиями или данными на убираемом диске); затем запись под замком."""
 
     def __init__(self, section, data, cur, disks_only=False):
         super().__init__(section)
-        self.section, self.data, self.cur, self.previewed = section, data, cur, None
+        self.section, self.data, self.cur = section, data, cur
         self.setWindowTitle(('Назначить диск направлению «%s»' % cur.name) if disks_only and cur else
                             (f'Изменить направление {cur.num} «{cur.name}»' if cur else 'Новое направление'))
-        self.resize(760, 640)
+        self.resize(780, 720)
         lay = QVBoxLayout(self)
         form = QFormLayout()
         self.name = QLineEdit(cur.name if cur else '')
@@ -318,14 +378,45 @@ class DirectionDialog(QDialog):
         self.desc = QLineEdit((cur.desc or '') if cur else '')
         self.desc.setMaxLength(sv.DESC_MAX)
         self.desc.setPlaceholderText('что собирается на этих дисках, например: семейные фото и видео всех лет')
-        self.kind = QComboBox()
-        self.kind.addItems(list(KINDS))
-        self.kind.setCurrentText(kind_text(cur.kind) if cur else hb.KIND_ALL)
         form.addRow('Имя направления:', self.name)
         form.addRow('Что собирается:', self.desc)
-        form.addRow('Что копировать:', self.kind)
         lay.addLayout(form)
-        lay.addWidget(QLabel('Диски назначения (подключённые сейчас — сверху и зелёным). Один диск — одному направлению; '
+        # что копировать - галочки
+        lay.addWidget(QLabel('<b>Что копировать:</b>'))
+        grid = QGridLayout()
+        self.all_box = QCheckBox('Все файлы')
+        f = self.all_box.font()
+        f.setBold(True)
+        self.all_box.setFont(f)
+        self.all_box.setToolTip('Поставить или снять все галочки. Программы, системные и временные файлы - никогда.')
+        grid.addWidget(self.all_box, 0, 0)
+        self.cat_boxes = {}
+        for i, (cat, text) in enumerate(CAT_LABELS, start=1):
+            b = QCheckBox(text)
+            self.cat_boxes[cat] = b
+            grid.addWidget(b, i // 4, i % 4)
+        lay.addLayout(grid)
+        self.near = QCheckBox(NEAR_TEXT)
+        self.near.setToolTip(NEAR_TIP)
+        lay.addWidget(self.near)
+        near_hint = QLabel(NEAR_TIP)
+        near_hint.setWordWrap(True)
+        near_hint.setStyleSheet('color:#555; margin-left:22px')
+        lay.addWidget(near_hint)
+        never = QLabel(NEVER_TEXT)
+        never.setWordWrap(True)
+        never.setStyleSheet('color:#777; font-size:8pt')
+        lay.addWidget(never)
+        cats, near, ok = hb.parse_kind(cur.kind) if cur else (hb.ALL_CATS, False, True)
+        for cat, b in self.cat_boxes.items():
+            b.setChecked(cat in cats)
+            b.toggled.connect(self.cats_changed)
+        self.near.setChecked(near)
+        self.all_box.clicked.connect(self.all_clicked)
+        # диски
+        lay.addWidget(QLabel('Диски назначения. <span style="color:#e65100"><b>Оранжевый</b></span> — уже назначен '
+                             'направлению, <span style="color:#1b5e20"><b>зелёный</b></span> — подключён и свободен, '
+                             '<span style="color:#8a8a8a">серый</span> — не подключён. Один диск — одному направлению; '
                              'у «Семейного архива» два диска — две копии:'))
         self.disks = QListWidget()
         owner = {x: d for d in data['dirs'].values() for x in d.disks if not cur or d.num != cur.num}
@@ -334,102 +425,136 @@ class DirectionDialog(QDialog):
             d = r['disk']
             it = QListWidgetItem(disk_ui.disk_text(r))
             it.setData(Qt.UserRole, d)
+            connected = bool(r.get('letter'))
             if d in owner:
                 it.setText(f'{it.text()} — у {owner[d].num} «{owner[d].name}»')
                 it.setFlags(Qt.NoItemFlags)
             else:
                 it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
                 it.setCheckState(Qt.Checked if d in mine else Qt.Unchecked)
-                disk_ui.style_item(it.setData, bool(r.get('letter')))
+                if d in mine:
+                    it.setText(f'{it.text()} — у этого направления')
+            disk_ui.style_disk(it.setData, connected, d in owner or d in mine)
             self.disks.addItem(it)
         lay.addWidget(self.disks, 1)
         self.view = QTextBrowser()
-        self.view.setMinimumHeight(150)
+        self.view.setMaximumHeight(110)
         lay.addWidget(self.view)
-        self.ack = QCheckBox('Понимаю: убранный диск перестаёт быть диском направления, скопированное на нём остаётся; '
-                             'старые задания по-прежнему требуют его')
-        self.ack.setVisible(False)
-        self.ack.toggled.connect(self.update_write)
-        lay.addWidget(self.ack)
         bar = QHBoxLayout()
-        self.b_check = QPushButton('Проверить')
-        self.b_write = QPushButton('Записать')
+        self.b_write = QPushButton('Сохранить')
         self.b_close = QPushButton('Закрыть')
-        self.b_check.clicked.connect(self.check)
+        self.b_write.setDefault(True)
         self.b_write.clicked.connect(self.write)
         self.b_close.clicked.connect(self.reject)
         bar.addStretch()
-        for b in (self.b_check, self.b_write, self.b_close):
+        for b in (self.b_write, self.b_close):
             bar.addWidget(b)
         lay.addLayout(bar)
-        self.needs_ack = []
-        self.name.textChanged.connect(self.changed)
-        self.desc.textChanged.connect(self.changed)
-        self.kind.currentIndexChanged.connect(self.changed)
-        self.disks.itemChanged.connect(self.changed)
-        self.view.setHtml('<p style="color:gray">Заполните поля и нажмите «Проверить»: программа покажет, что будет '
-                          'записано. Таблица направлений только дописывается, прежняя версия сохраняется.</p>')
-        self.update_write()
+        self.view.setHtml('<p style="color:gray">Таблица направлений только дописывается, прежняя версия сохраняется. '
+                          'Если меняются диски у направления, где уже есть задания или скопированные файлы, программа '
+                          'покажет, что будет, и спросит ещё раз.</p>')
+        self.confirm_hook = None          # для тестов: функция (строки, needs_ack) -> (сохранять ли, ack)
+        self.busy = False
+        self.cats_changed()
         if disks_only:
             self.disks.setFocus()
+
+    # --- что копировать ---
+    def chosen_cats(self):
+        return frozenset(c for c, b in self.cat_boxes.items() if b.isChecked())
+
+    def cats_changed(self, *_):
+        cats = self.chosen_cats()
+        self.near.setEnabled(hb.CAT_DOC in cats)
+        self.all_box.blockSignals(True)
+        self.all_box.setTristate(False)
+        self.all_box.setCheckState(Qt.Checked if cats == hb.ALL_CATS else
+                                   (Qt.PartiallyChecked if cats else Qt.Unchecked))
+        self.all_box.blockSignals(False)
+        self.update_write()
+
+    def update_write(self):
+        """«Сохранить» неактивна, пока не выбран ни один тип файлов или идёт сохранение."""
+        empty = not self.chosen_cats()
+        self.b_write.setEnabled(not empty and not self.busy)
+        self.b_write.setToolTip('Выберите хотя бы один тип файлов в «Что копировать».' if empty else '')
+
+    def all_clicked(self, *_):
+        on = self.chosen_cats() != hb.ALL_CATS          # не все - поставить все; все - снять все
+        for b in self.cat_boxes.values():
+            b.blockSignals(True)
+            b.setChecked(on)
+            b.blockSignals(False)
+        self.cats_changed()
 
     def values(self):
         checked = [self.disks.item(i).data(Qt.UserRole) for i in range(self.disks.count())
                    if self.disks.item(i).flags() & Qt.ItemIsUserCheckable and self.disks.item(i).checkState() == Qt.Checked]
         mine = [x for x in (self.cur.disks if self.cur else ()) if x in checked]      # прежний порядок дисков
         disks = mine + [x for x in checked if x not in mine]
+        cats = self.chosen_cats()
+        near = self.near.isChecked() and hb.CAT_DOC in cats
         return dict(num=self.cur.num if self.cur else None, name=self.name.text().strip(), disks=disks,
-                    kind=self.kind.currentText(), desc=self.desc.text().strip())
+                    kind=(cats, near), desc=self.desc.text().strip())
 
-    def changed(self, *_):
-        if self.previewed is not None:
-            self.view.setHtml('<p style="color:#e65100">Значения изменились — нажмите «Проверить».</p>')
-        self.previewed = None
-        self.needs_ack = []
-        self.ack.setVisible(False)
-        self.ack.setChecked(False)
+    # --- сохранение ---
+    def refused(self, text, word='Не сохранено'):
+        self.view.setHtml(f'<p style="color:#c62828"><b>{word}:</b> {html_esc(text)}</p>')
+        self.busy = False
         self.update_write()
 
-    def update_write(self, *_):
-        self.b_write.setEnabled(self.previewed is not None and (not self.needs_ack or self.ack.isChecked()))
+    def changed_meanwhile(self, vals):
+        """Пока считался предпросмотр (или был открыт переспрос), владелец поменял поля: не сохранять то, чего он уже
+        не видит."""
+        if self.values() == vals:
+            return False
+        self.view.setHtml('<p style="color:#e65100">Значения изменились, пока программа проверяла — ничего не '
+                          'сохранено. Нажмите «Сохранить» ещё раз.</p>')
+        self.busy = False
+        self.update_write()
+        return True
 
-    def check(self):
-        vals = self.values()
-        self.b_check.setEnabled(False)
-
-        def done(res):
-            self.b_check.setEnabled(True)
-            if self.values() != vals:                 # пока считали, владелец поменял поля
-                return
-            ok, pv = res
-            if not ok:
-                self.previewed = None
-                self.view.setHtml(f'<p style="color:#c62828"><b>Нельзя записать:</b> {pv}</p>')
-            else:
-                self.previewed = vals
-                self.needs_ack = pv['needs_ack']
-                self.ack.setVisible(bool(self.needs_ack))
-                self.view.setHtml('<p><b>Будет записано:</b></p><ul>' + ''.join(f'<li>{x}</li>' for x in pv['lines'])
-                                  + '</ul>')
-            self.update_write()
-        self.section.win.bg.run(lambda: _safe(sv.direction_save_preview, **vals), ok=done)
+    def ask_confirm(self, lines, needs_ack):
+        if self.confirm_hook is not None:
+            return self.confirm_hook(lines, needs_ack)
+        dlg = ConfirmDialog(self, lines, needs_ack)
+        ok = dlg.exec() == QDialog.Accepted
+        return ok, dlg.ack.isChecked()
 
     def write(self):
         vals = self.values()
-        if vals != self.previewed:
-            self.changed()
+        if not vals['kind'][0]:
+            self.update_write()
             return
-        self.b_write.setEnabled(False)
+        self.busy = True
+        self.update_write()
 
-        def done(res):
+        def previewed(res):
             ok, pv = res
             if not ok:
-                self.previewed = None
-                self.view.setHtml(f'<p style="color:#c62828"><b>Не записано:</b> {pv}</p>')
-                self.update_write()
+                self.refused(pv, 'Нельзя сохранить')
                 return
-            self.section.note = (f'Записано: {pv["direction"].label()} (строка {pv["line"]} таблицы направлений; '
+            if self.changed_meanwhile(vals):
+                return
+            ack = False
+            if pv.get('confirm'):
+                go, ack = self.ask_confirm(pv['lines'], pv['needs_ack'])
+                if not go:
+                    self.view.setHtml('<p style="color:gray">Не сохранено: отменено.</p>')
+                    self.busy = False
+                    self.update_write()
+                    return
+                if self.changed_meanwhile(vals):
+                    return
+            self.section.win.bg.run(lambda: _safe(sv.direction_save, ack=ack, **vals), ok=saved)
+
+        def saved(res):
+            ok, pv = res
+            if not ok:
+                self.refused(pv)
+                return
+            self.section.note = (f'Сохранено: {pv["direction"].label()} (строка {pv["line"]} таблицы направлений; '
                                  'копия таблицы до записи — в «_БАЗА\\архив таблиц»).')
             self.accept()
             self.section.refresh()
-        self.section.win.bg.run(lambda: _safe(sv.direction_save, ack=self.ack.isChecked(), **vals), ok=done)
+        self.section.win.bg.run(lambda: _safe(sv.direction_save_preview, **vals), ok=previewed)

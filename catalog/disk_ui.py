@@ -8,6 +8,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 
 ON_COLOR, OFF_COLOR = QColor('#1b5e20'), QColor('#8a8a8a')
+# Диски направлений (этап 5, 15.11.2026): назначенный направлению диск - оранжевый, это важнее «подключён»
+# (подключённость видна ещё жирным шрифтом, значком «●» и буквой); неподключённый назначенный - бледно-оранжевый.
+ASSIGNED_ON, ASSIGNED_OFF = '#e65100', '#e8a46a'
 SIZE_RE = re.compile(r'^\d[\d,.]*\s*\S+$')
 
 STATUS_RU = {'complete': 'полная',
@@ -85,3 +88,20 @@ def style_item(set_data, connected):
         set_data(Qt.ForegroundRole, QBrush(ON_COLOR))
     else:
         set_data(Qt.ForegroundRole, QBrush(OFF_COLOR))
+
+
+def disk_color(connected, assigned):
+    """Цвет диска в списках направлений: оранжевый - назначен направлению (бледный - не подключён), зелёный -
+    подключён и свободен, серый - не подключён и свободен. -> (цвет '#rrggbb', жирный)."""
+    if assigned:
+        return (ASSIGNED_ON, True) if connected else (ASSIGNED_OFF, False)
+    return (ON_COLOR.name(), True) if connected else (OFF_COLOR.name(), False)
+
+
+def style_disk(set_data, connected, assigned):
+    """То же для пункта списка (QListWidgetItem.setData)."""
+    color, bold = disk_color(connected, assigned)
+    f = QFont()
+    f.setBold(bold)
+    set_data(Qt.FontRole, f)
+    set_data(Qt.ForegroundRole, QBrush(QColor(color)))

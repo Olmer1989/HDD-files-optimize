@@ -408,7 +408,7 @@ def v3_source(task=None, manifest=None, group=None):
         return dict(copy_task=tdir.name, copy_dir=tdir, manifest=m.get('манифест'), disk=m['носитель'],
                     folder=m.get('папка'), key=m.get('ключ'), num=m['направление'], direction=m['имя направления'],
                     disks=list(m['обязательные диски']), mark=m['отметка'], mark_row=m['строка отметки'],
-                    allowed=m.get('перемещать на носителе', True))
+                    allowed=m.get('перемещать на носителе', True), group=m.get('группа'))
     mp = Path(manifest)
     if not mp.is_absolute():
         mp = paths.RAZBORY / manifest
@@ -432,7 +432,7 @@ def v3_title(src):
 
 
 def v3_task_name(src):
-    base = src['copy_task'] or f'{src["disk"]} — {v3_title(src)[:60]} — {src["direction"]}'
+    base = src.get('group') or src['copy_task'] or rz.safe_name(f'{src["disk"]} — {v3_title(src)[:60]} — {src["direction"]}')
     return base + V3_SUFFIX
 
 
@@ -447,12 +447,20 @@ def _decisive(ms, path):
 
 
 def _copy_tasks(src, serials, jobs):
-    """Задание копирования и все его повторы (тот же носитель и ключ группы) -> [task_info]."""
-    res = []
+    """Задание копирования, его «соседи» (этап 5: задания той же группы на другие диски направления - на 45 и на 77
+    отдельно; тот же носитель, ключ, направление и поле «группа») и все их повторы -> [task_info]."""
+    metas = []
     for d in _task_dirs():
         m = _json(d / COPY_META) if (d / COPY_META).exists() else None
-        if m and m.get('носитель') == src['disk'] and m.get('ключ') == src['key'] and \
-                (d.name == src['copy_task'] or m.get('повтор') == src['copy_task']):
+        if m and m.get('носитель') == src['disk'] and m.get('ключ') == src['key']:
+            metas.append((d, m))
+    names = {src['copy_task']}
+    if src.get('group'):
+        names |= {d.name for d, m in metas if not m.get('повтор') and m.get('группа') == src['group']
+                  and m.get('направление') == src['num']}
+    res = []
+    for d, m in metas:
+        if d.name in names or m.get('повтор') in names:
             info = task_info(d, serials, jobs)
             if info:
                 res.append(info)
@@ -635,6 +643,7 @@ def _write_task_v3(name, res, serial):
         'версия': 3, 'носитель': src['disk'], 'задание копирования': src['copy_task'], 'манифест': src['manifest'],
         'папка': src['folder'], 'ключ': src['key'], 'направление': src['num'], 'имя направления': src['direction'],
         'обязательные диски': src['disks'], 'отметка': src['mark'], 'строка отметки': src['mark_row'],
+        'группа': src.get('group'),
         'перемещать на носителе': src['allowed'], 'куда': res['dest'], 'целиком': bool(res['whole']),
         'файлов': len(res['lines']), 'байт': sum(r[1] for r in res['lines']), 'всего в папке': res['total'],
         'остаток': res['stays'], 'создано': time.strftime('%d.%m.%Y %H:%M'), 'создано_ts': time.time()})
@@ -668,7 +677,7 @@ def recheck_v3(c, jobs, task, meta):
     src = dict(copy_task=meta.get('задание копирования'), copy_dir=None, manifest=meta.get('манифест'),
                disk=meta['носитель'], folder=meta.get('папка'), key=meta.get('ключ'), num=meta['направление'],
                direction=meta['имя направления'], disks=list(meta['обязательные диски']), mark=meta['отметка'],
-               mark_row=meta['строка отметки'], allowed=meta.get('перемещать на носителе', True))
+               mark_row=meta['строка отметки'], allowed=meta.get('перемещать на носителе', True), group=meta.get('группа'))
     rows = [f for f in read_tsv(task / 'перемещение.tsv') if len(f) >= 4]
     res = plan_v3(c, jobs, src, only={f[0] for f in rows})
     ok = {r[0] for r in res['lines']}

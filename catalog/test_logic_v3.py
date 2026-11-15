@@ -297,17 +297,22 @@ class TasksTest(V3Base):
         res = sv.razbor_tasks(SRC, dry=True)
         self.assertFalse(hb.TASKS.exists() and any(hb.TASKS.iterdir()))
         names = {s['name'] for s in res['specs']}
-        self.assertEqual(names, {'HDD60 — Поход 2010 — Семейный архив', 'HDD60 — Работа — Работа',
-                                 'HDD60 — (файлы в корне) — Семейный архив', 'HDD60 — Смешанная — Семейный архив'})
+        fam = [f'HDD60 — {x} — Семейный архив — на {d}' for x in ('Поход 2010', '(файлы в корне)', 'Смешанная')
+               for d in (45, 77)]
+        self.assertEqual(names, set(fam) | {'HDD60 — Работа — Работа'})          # этап 5: на 45 и на 77 - отдельно
         res = sv.razbor_tasks(SRC, dry=False)
-        t = hb.TASKS / 'HDD60 — Поход 2010 — Семейный архив'
-        rows = [x.split('\t') for x in (t / 'список.tsv').read_text(encoding='utf-8').splitlines()]
+        rows = []
+        for d in ('45', '77'):
+            t = hb.TASKS / f'HDD60 — Поход 2010 — Семейный архив — на {d}'
+            got = [x.split('\t') for x in (t / 'список.tsv').read_text(encoding='utf-8').splitlines()]
+            self.assertEqual({r[0] for r in got}, {'HDD' + d})                   # в задании - только свой диск
+            self.assertEqual((t / 'тома.tsv').read_text(encoding='utf-8').splitlines(),
+                             ['HDD60\tAAAA0060', f'HDD{d}\tAAAA00{d}'])
+            rows += got
         self.assertEqual(sorted((r[0], r[1]) for r in rows), [
             ('HDD45', 'Поход 2010\\Монтаж\\clip копия.mp4'), ('HDD45', 'Поход 2010\\описание.doc'),
             ('HDD77', 'Поход 2010\\Монтаж\\clip копия.mp4'), ('HDD77', 'Поход 2010\\Фото\\2.jpg'),
             ('HDD77', 'Поход 2010\\описание.doc')])
-        self.assertEqual((t / 'тома.tsv').read_text(encoding='utf-8').splitlines(),
-                         ['HDD60\tAAAA0060', 'HDD45\tAAAA0045', 'HDD77\tAAAA0077'])
         meta = json.loads((t / 'разбор.json').read_text(encoding='utf-8'))
         self.assertEqual(meta['обязательные диски'], ['HDD45', 'HDD77'])
         self.assertEqual(meta['что копировать'], hb.KIND_MEDIA)
@@ -463,6 +468,154 @@ class SignatureTest(V3Base):
         s2 = self.plan().info['signature']
         self.assertNotEqual(s1, s2)
         self.assertEqual(s2, self.plan().info['signature'])
+
+
+CAT_FILES = [                                                # носитель HDD63: все категории «что копировать»
+    ('Р\\Фото\\1.jpg', 11, H[41]), ('Р\\clip.MP4', 12, None), ('Р\\отчёт.docx', 13, None), ('Р\\a.zip', 14, None),
+    ('Р\\b.mp3', 15, None), ('Р\\c.prproj', 16, None), ('Р\\d.exe', 17, None), ('Р\\e.dll', 18, H[42]),
+    ('Р\\f.html', 19, None), ('Р\\g', 20, None), ('Р\\h.jpg.exe', 21, None), ('Р\\i.tmp', 22, None),
+    ('Р\\Thumbs.db', 23, None), ('Р\\j.ini', 24, None), ('Р\\k.ZIP', 25, None), ('Р\\пусто.zip', 0, None),
+    ('Р\\Без фото\\письмо.doc', 26, None)]
+
+
+class CategoriesTest(V3Base):
+    """Этап 5 (15.11.2026): «что копировать» - набор категорий; программы, системные и временные - никогда."""
+
+    def test_copy_kind_rules(self):
+        from hb_core.derived import copy_kind
+        from hb_core import consts as K
+        cases = {'a.JPG': K.F_PHOTO, 'b.MOV': K.F_VIDEO, 'c.DOCX': K.F_TEXT, 'd.7z': K.F_ARCH, 'e.psd': K.F_PROJ,
+                 'f.flac': K.F_MUSIC, 'file.jpg.exe': K.F_NEVER, 'g.DLL': K.F_NEVER, 'h.py': K.F_NEVER,
+                 'readme': K.F_OTHER, 'i.html': K.F_OTHER, 'j.sqlite': K.F_OTHER, 'k.qwerty': K.F_OTHER,
+                 '.htaccess': K.F_OTHER, 'l.tmp': K.F_JUNK, 'thumbs.db': K.F_JUNK, '~$m.docx': K.F_JUNK}
+        ft = rz.fast_folder_type(fine=True)
+        for nm, k in cases.items():
+            self.assertEqual(copy_kind('П\\' + nm, nm.lower(), 10), k, nm)
+            self.assertEqual(ft('П\\' + nm.lower(), nm.lower(), 10), k, nm)          # быстрая - та же логика
+            self.assertEqual(folder_type('П\\' + nm, nm.lower(), 10), min(k, K.F_OTHER) if k != K.F_JUNK else k, nm)
+        self.assertEqual(copy_kind('П\\x.exe', 'x.exe', 0), K.F_NEVER)               # пустая программа - тоже никогда
+        import build_pilot as bp
+        never = K.NEVER_COPY_EXT
+        self.assertFalse(never & set(bp.EXT_TYPE))                                   # фото и видео - не программы
+        self.assertFalse(never & {e for e, c in K.EXT_CLASS.items() if c in (K.C_DOC, K.C_JUNK, K.C_ARCH, K.C_MUSIC,
+                                                                             K.C_PROJ)})
+
+    def test_kind_values_compatible(self):
+        A, M = hb.ALL_CATS, hb.MEDIA_CATS
+        self.assertEqual(hb.parse_kind('все файлы'), (A, False, True))
+        self.assertEqual(hb.parse_kind(''), (A, False, True))                         # старая строка без колонки
+        self.assertEqual(hb.parse_kind('фото, видео и документы рядом'), (M, True, True))
+        self.assertEqual(hb.parse_kind('Фото,  музыка'), (frozenset({hb.CAT_PHOTO, hb.CAT_MUSIC}), False, True))
+        self.assertEqual(hb.parse_kind('ерунда'), (frozenset(), False, False))      # неизвестное - НЕ «все файлы»
+        self.assertEqual(hb.kind_text(A), hb.KIND_ALL)
+        self.assertEqual(hb.kind_text(M, True), hb.KIND_MEDIA)
+        self.assertEqual(hb.kind_text(M, False), 'фото, видео, документы')
+        self.assertEqual(hb.kind_text({hb.CAT_DOC, hb.CAT_ARCH}, True), 'документы рядом, архивы')
+        with open(hb.DIRECTIONS, 'a', encoding='utf-8') as f:
+            f.write('Н2\tРабота\tСафари\tHDD91\tчто-то странное\t\n')
+        d = sv.directions()['Н2']
+        self.assertFalse(d.kind_ok)
+        self.assertEqual(d.cats, frozenset())
+        for bad in ('', 'ерунда', (frozenset(), False)):
+            with self.assertRaises(sv.Refused):
+                sv.direction_preview(num='Н2', kind=bad or 'x y')
+        self.assertEqual(sv.direction_preview(num='Н2', kind='все')['direction'].kind, hb.KIND_ALL)
+
+    def make_cat_disk(self):
+        make_disk(self.scans, 'HDD63', 'AAAA0063', [(p, s_, h) for p, s_, h in CAT_FILES if h],
+                  unhashed=[(p, s_) for p, s_, h in CAT_FILES if not h])
+        hb.close_last()
+        self.quiet(hb.connect)
+
+    def reference(self, d):
+        from hb_core.derived import copy_kind
+        from hb_core import consts as K
+        ref = collections.Counter()
+        for p, size, h in CAT_FILES:
+            k = copy_kind(p, p.rsplit('\\', 1)[-1].lower(), size)
+            if k == K.F_JUNK:
+                ref[(rz.O_JUNK, None)] += 1
+                continue
+            cat = K.CAT_OF_TYPE.get(k)
+            near = p.startswith('Р\\') and not p.startswith('Р\\Без фото\\')        # фото - в «Р\Фото», видео - в «Р»
+            ok = cat in d.cats and (cat != K.CAT_DOC or not d.docs_near or near)
+            ref[(rz.O_COPY if ok else rz.O_TYPE, d.num)] += 1
+        return dict(ref)
+
+    def test_planner_follows_set(self):
+        self.make_cat_disk()
+        c = self.db()
+        n = c.execute('select n3, n5, n6, n7, n8 from folders where disk=? and folder=?', ('HDD63', 'Р')).fetchone()
+        self.assertEqual(n, (11, 2, 1, 1, 4))         # прочие всего (с пустым); архивы, проекты, музыка, программы
+        self.mark(('', 'Н2'), disk='HDD63')
+        for kind in ('фото', (frozenset({hb.CAT_ARCH, hb.CAT_MUSIC}), False), (frozenset({hb.CAT_OTHER, hb.CAT_DOC}), True),
+                     (frozenset({hb.CAT_PROJ, hb.CAT_DOC}), False), 'все'):
+            sv.add_direction(num='Н2', kind=kind)
+            d = sv.directions()['Н2']
+            P = self.plan('HDD63')
+            got = {k: v[0] for k, v in P.part_a.items() if v[0]}
+            self.assertEqual(got, self.reference(d), kind)
+            self.assertEqual(sum(got.values()), len(CAT_FILES))
+            Pd = self.plan('HDD63', detail=True)                         # строки задания - те же файлы
+            rows = {r[1] for v in Pd.rows.values() for r in v}
+            self.assertEqual(len(rows), got.get((rz.O_COPY, 'Н2'), 0))
+            self.assertFalse({'Р\\d.exe', 'Р\\e.dll', 'Р\\h.jpg.exe', 'Р\\j.ini'} & rows)   # программы - никогда
+        self.assertEqual(P.part_a[(rz.O_TYPE, 'Н2')][0], 4)              # «все файлы» = все, кроме программ
+
+    def test_never_at_any_size(self):
+        """Замечание 1: программа - «никогда» при любом размере (пустой x.exe тоже), в обеих функциях типа."""
+        from hb_core.derived import copy_kind
+        from hb_core import consts as K
+        ft = rz.fast_folder_type(fine=True)
+        for ext in sorted(K.NEVER_COPY_EXT):
+            nm = 'файл' + ext
+            for size in (0, 1, 10 ** 6):
+                self.assertEqual(copy_kind('П\\' + nm, nm, size), K.F_NEVER, (nm, size))
+                self.assertEqual(ft('П\\' + nm, nm, size), K.F_NEVER, (nm, size))
+                self.assertEqual(folder_type('П\\' + nm, nm, size), K.F_OTHER, (nm, size))   # прежний столбец - как был
+        self.assertEqual(copy_kind('П\\x.zip', 'x.zip', 0), K.F_OTHER)              # пустой не-программа - «другие»
+        self.assertEqual(copy_kind('П\\x.tmp', 'x.tmp', 5), K.F_JUNK)               # временные - мусор (тоже никогда)
+
+    def test_same_task_and_names(self):
+        """Замечания 3 и 7: старый разбор.json без «что копировать» не считается подготовленным; имя задания -
+        допустимое имя папки Windows."""
+        s_ = dict(key=[1, 'A'], num='Н1', kind=hb.KIND_MEDIA, targets=['HDD45'])
+        meta = {'носитель': SRC, 'ключ': [1, 'A'], 'направление': 'Н1', 'цели': ['HDD45', 'HDD77']}
+        self.assertFalse(sv.same_task(meta, SRC, s_))                                  # без ключа - «не совпадает»
+        self.assertTrue(sv.same_task(dict(meta, **{'что копировать': hb.KIND_MEDIA}), SRC, s_))
+        self.assertFalse(sv.same_task(dict(meta, **{'что копировать': hb.KIND_ALL}), SRC, s_))
+        self.assertEqual(rz.safe_name('HDD60 — Что? <a|b>: "c"/d\\e. '), 'HDD60 — Что_ _a_b__ _c__d_e')
+        make_disk(self.scans, 'HDD64', 'AAAA0064', [('Что?*\\1.jpg', 10, H[51])])
+        hb.close_last()
+        self.quiet(hb.connect)
+        self.mark(('', 'Н2'), disk='HDD64')
+        res = sv.razbor_tasks('HDD64', dry=True)
+        self.assertEqual([x['name'] for x in res['specs']], ['HDD64 — Что__ — Работа'])
+
+    def test_disk_data_error_asks(self):
+        """Замечание 4: ошибка чтения базы при снятии диска - переспросить; «базы ещё нет» - данных нет."""
+        import sqlite3
+        from unittest import mock
+
+        def broken():
+            raise sqlite3.OperationalError('database is locked')
+        with mock.patch.object(sv, 'ro', broken):
+            self.assertTrue(sv._disk_has_data('HDD45'))
+
+        def nodb():
+            raise sv.Refused('База ещё собирается - подождите.')
+        with mock.patch.object(sv, 'ro', nodb):
+            self.assertFalse(sv._disk_has_data('HDD45'))
+        self.assertTrue(sv._disk_has_data('HDD45'))
+        self.assertFalse(sv._disk_has_data('HDD99'))
+
+    def test_source_is_family_disk(self):
+        """B: источник - сам 45: у «Семейного архива» задание только на 77, на себя не копирует."""
+        self.mark(('', 'Н1'), disk='HDD45')
+        res = sv.razbor_tasks('HDD45', dry=True)
+        self.assertTrue(res['specs'])
+        self.assertTrue(all(x['targets'] == ['HDD77'] and x['name'].endswith('— на 77') for x in res['specs']))
+        self.assertNotIn('HDD45', res['plan'].part_b)
 
 
 if __name__ == '__main__':

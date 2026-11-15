@@ -32,8 +32,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox, QDial
 
 from hb_core import api as hb
 from hb_core import razbor as rz
-from hb_core.consts import F_PHOTO, F_TEXT, F_VIDEO
+from hb_core.consts import CAT_OF_TYPE, N_TYPES
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
+import directions_page
 import disk_ui
 import service as sv
 
@@ -301,6 +302,28 @@ class Model:
             tips.append('Та же отметка действует и на: ' + '; '.join(f'«{x}»' for x in others[:3]) + '.')
         return dict(text=text, kind=kind, dirty=dirty, tip=' '.join(tips))
 
+    def docs_near_map(self):
+        """Папки, где документы «рядом с фото и видео» - те же правила, что в ядре (razbor.planner, «документы
+        рядом»): фото или видео в самой папке или в подпапках с той же решающей отметкой; корень носителя и сама
+        служебная папка - нет. Отметки отдельных файлов (только из командной строки) здесь не учитываются."""
+        direct = {}
+        for f in self.order:
+            n = self.folders[f][2]
+            direct[f] = n[0] + n[1]
+        for f in self.order:
+            if f and hb.parent_of(f) in direct:
+                n = self.folders[f][2]
+                direct[hb.parent_of(f)] -= n[0] + n[1]
+        ident = lambda r: (r.mark.row if r.mark else None, r.moved, r.state, r.num)
+        ms = {}
+        for f in reversed(self.order):
+            k = direct[f]
+            for ch in self.children.get(f, ()):
+                if ident(self.route[ch]) == ident(self.route[f]):
+                    k += ms[ch]
+            ms[f] = k
+        return {f: bool(f) and not self.is_service(f) and ms[f] > 0 for f in self.order}
+
     # --- «Уже есть» ---
     def set_have(self, have, disks_):
         self.have, self.have_disks = have, list(disks_)
@@ -311,6 +334,7 @@ class Model:
         направление копирует, есть на всех его дисках), затем сумма детей. None - ещё не посчитано."""
         if self.have is None:
             return None
+        near = self.docs_near_map()
         own = {}
         for f, masks in self.have.items():
             r = self.route.get(f)
@@ -320,12 +344,13 @@ class Model:
             if d is None or not d.disks or any(x not in self.have_disks for x in d.disks):
                 continue
             need = sum(1 << self.have_disks.index(x) for x in d.disks)
-            types = (F_PHOTO, F_VIDEO, F_TEXT) if d.media_only else (0, 1, 2, 3)
+            types = [k for k, cat in CAT_OF_TYPE.items() if cat in d.cats       # что копирует направление;
+                     and not (cat == hb.CAT_DOC and d.docs_near and not near.get(f))]  # документы - только «рядом»
             n = b = 0
             for mask, c in masks.items():
                 if mask & need == need:
                     n += sum(c[k] for k in types)
-                    b += sum(c[5 + k] for k in types)
+                    b += sum(c[N_TYPES + k] for k in types)
             if n:
                 own[f] = (n, b)
         sub = collections.defaultdict(lambda: [0, 0])
@@ -536,6 +561,7 @@ class RazborPage(QWidget):
         self.plan = None                                  # последний принятый итог: (план, свободно, время)
         self.plan_rev = -1                                # его ревизия (равна self.rev - итог актуален)
         self.loading = None                               # носитель, данные которого читаются
+        self.want_choice = True                           # поставить в списки направление, отмеченное в «Обзоре»
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
         top.addWidget(QLabel('<b>Разбор носителя</b>'))
@@ -558,6 +584,10 @@ class RazborPage(QWidget):
         self.banner.setStyleSheet(f'background:#fff3e0; color:{ORANGE}; padding:6px; border:1px solid #ffcc80')
         self.banner.hide()
         lay.addWidget(self.banner)
+        self.choice_line = QLabel('')                     # «Пишем команды для: …» - выбор «Обзора» (этап 5, п. 4)
+        self.choice_line.setWordWrap(True)
+        self.choice_line.setStyleSheet('font-size:11pt; font-weight:bold; color:#1b5e20')
+        lay.addWidget(self.choice_line)
         # шаг 1 - режим
         g1 = QGroupBox('Шаг 1. Что делать со всем носителем')
         l1 = QHBoxLayout(g1)
@@ -907,20 +937,52 @@ class RazborPage(QWidget):
         res = [(d.label(), d.verdict()) for d in m.dirs.values()] if m else []
         return res + [('не копировать', SKIP), ('как у родителя (снять свою отметку)', INHERIT)]
 
+    def preferred(self):
+        """Направления, отмеченные галочкой в «Обзоре» (directions_page.chosen: есть сейчас и с диском), по номеру."""
+        if self.model is None:
+            return []
+        return sorted(directions_page.chosen(self.model.dirs), key=lambda d: hb.num_key(d.num))
+
+    def use_choice(self):
+        """Переход из «Обзора» («Перейти к написанию команды…»): в списки «Куда» и «Всё — в» - первое по номеру
+        отмеченное направление (сохранённый режим носителя не меняется - это запись владельца)."""
+        self.want_choice = True
+        if self.model is not None:
+            self.fill_choices()
+
     def fill_choices(self):
-        cur = self.apply_box.currentData()
+        pref = self.preferred()
+        force = self.want_choice and bool(pref)
+        self.want_choice = False
+        cur = pref[0].verdict() if force else self.apply_box.currentData()
         self.apply_box.clear()
         for text, v in self.choices():
             self.apply_box.addItem(text, v)
         i = self.apply_box.findData(cur)
         self.apply_box.setCurrentIndex(max(i, 0))
-        cur = self.mode_dir.currentData()
         self.mode_dir.blockSignals(True)
         self.mode_dir.clear()
         for d in self.model.dirs.values():
             self.mode_dir.addItem(d.label(), d.verdict())
+        if force:
+            self.mode_dir.setCurrentIndex(max(0, self.mode_dir.findData(pref[0].verdict())))
         self.sync_mode()
         self.mode_dir.blockSignals(False)
+        self.show_choice(pref)
+
+    def show_choice(self, pref=None):
+        pref = self.preferred() if pref is None else pref
+        if not pref:
+            self.choice_line.setText('')
+            self.choice_line.hide()
+            return
+        text = 'Пишем команды для: ' + '; '.join(f'{d.num} {d.label()}' for d in pref) + '.'
+        r = self.model.route.get('', rz.NONE_ROUTE) if self.model else rz.NONE_ROUTE
+        if r.mark is not None and r.state == R_DIR and r.num not in {d.num for d in pref} and r.num in self.model.dirs:
+            text += (f' Сохранённый режим этого носителя — «Всё — в {self.model.dirs[r.num].label()}»; '
+                     'отметки не изменены.')
+        self.choice_line.setText(text)
+        self.choice_line.show()
 
     def sync_mode(self):
         """Радиокнопки по действующей (с черновиком) отметке всего носителя."""
@@ -949,6 +1011,8 @@ class RazborPage(QWidget):
             d = m.drafts.get('')
             self.mode_hint.setText('• не сохранено' if d else '')
             self.mode_hint.setStyleSheet(f'color:{BLUE}')
+        if self.choice_line.text():
+            self.show_choice()
 
     def mode_changed(self):
         if self.model is None:

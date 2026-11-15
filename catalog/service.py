@@ -800,10 +800,25 @@ def _ensure_directions():
 
 
 def _norm_kind(kind):
-    k = (kind or '').strip().lower()
-    if k not in KIND_WORDS:
-        raise Refused('Что копировать: «фото» (фото, видео и документы рядом) или «все» (все файлы).')
-    return KIND_WORDS[k]
+    """«Что копировать» -> текст колонки. Принимает старые слова («фото», «все» …), текст набора категорий («фото,
+    видео, документы рядом, архивы») или (набор, рядом). Пустой набор и неизвестное слово - отказ (этап 5)."""
+    if isinstance(kind, (tuple, list)) and len(kind) == 2 and not isinstance(kind[0], str):
+        cats, near = kind
+        if not cats:
+            raise Refused('Что копировать: отметьте хотя бы одну категорию файлов.')
+        bad = set(cats) - set(hb.COPY_CATS)
+        if bad:
+            raise Refused('Что копировать: неизвестная категория ' + ', '.join(sorted(bad)) + '.')
+        return hb.kind_text(cats, near)
+    k = ' '.join((kind or '').split()).lower()
+    if k in KIND_WORDS:
+        return KIND_WORDS[k]
+    cats, near, ok = hb.parse_kind(k)
+    if not k or not ok:
+        raise Refused('Что копировать: «фото» (фото, видео и документы рядом), «все» (все файлы, кроме программ, '
+                      'системных и временных) или категории через запятую: ' + ', '.join(hb.COPY_CATS) +
+                      f' («{hb.DOCS_NEAR_WORD}» - документы только рядом с фото и видео).')
+    return hb.kind_text(cats, near)
 
 
 def direction_preview(num=None, name=None, disks=None, add_disks=(), kind=None, former=(), note=None, dirs=None, c=None):
@@ -1053,9 +1068,17 @@ def _write_json(path, data):
     os.replace(tmp, path)
 
 
+def same_task(meta, disk, s):
+    """Задание разбора meta уже покрывает spec s: тот же носитель, ключ группы, направление и набор «что копировать»
+    (смена набора - новое задание, Дискуссия этапа 5, п. 11), и диск s среди его целей (старое общее задание на 45 и
+    77 покрывает оба)."""
+    return (meta.get('носитель') == disk and meta.get('ключ') == s['key'] and meta.get('направление') == s['num']
+            and meta.get('что копировать') == s['kind'] and set(s['targets']) <= set(meta.get('цели') or []))
+
+
 def razbor_tasks(disk, dry=True):
-    """Задания копирования по отметкам: одно задание - одна группа (решающая отметка + папка) и её направление.
-    Всё под замком таблиц: снимок, расчёт, проверка имён, публикация (два генератора одновременно не работают).
+    """Задания копирования по отметкам: одно задание - одна группа (решающая отметка + папка), её направление и ОДИН
+    диск назначения (этап 5: на 45 и на 77 - отдельные задания одной группы, поле «группа» в разбор.json). Всё под замком таблиц: снимок, расчёт, проверка имён, публикация (два генератора одновременно не работают).
     Публикация: манифест «создаётся» -> папки собираются в «_БАЗА\\разборы\\<…>.tmp» и переносятся в «Запускаемые
     скрипты» -> манифест «готово». Повтор после сбоя: задание с тем же ключом уже есть - «уже подготовлено»,
     создаются только недостающие. Ничего не копирует и не запускает. -> dict."""
@@ -1066,13 +1089,20 @@ def razbor_tasks(disk, dry=True):
         serials = {v: k for k, v in hb.serial_map(bp.find_jobs()).items()}
         specs = hb.task_specs(P, serials)
         states = hb.group_states(P)
+        made = [(t.name, _task_meta(t)) for t in (sorted(hb.TASKS.iterdir()) if hb.TASKS.exists() else ())
+                if t.is_dir() and (t / 'разбор.json').exists()]
+        made = [(n_, m) for n_, m in made if m and not m.get('повтор')]
         for s in specs:
+            old = next((n_ for n_, m in made if same_task(m, disk, s)), None)
+            if old:                                              # уже подготовлено (в том числе общим заданием на
+                s['exists'], s['name'] = True, old               # 45 и 77 прежнего вида - под своим именем)
+                continue
             base, i = s['name'], 2
             while True:
                 meta = _task_meta(hb.TASKS / s['name']) if (hb.TASKS / s['name']).exists() else None
                 if not (hb.TASKS / s['name']).exists():
                     break
-                if meta and meta.get('носитель') == disk and meta.get('ключ') == s['key'] and meta.get('направление') == s['num']:
+                if meta and same_task(meta, disk, s):
                     s['exists'] = True
                     break
                 s['name'], i = f'{base} ({i})', i + 1
@@ -1087,7 +1117,8 @@ def razbor_tasks(disk, dry=True):
                'носитель - диск направления': P.info.get('is_target') or [],
                'перемещать на носителе': not P.info.get('is_target'),
                'отметки': [dict(путь=m.path, решение=m.verdict, строка=m.row) for m in P.marks.by_key.values()],
-               'задания': [dict(имя=s['name'], папка=s['folder'], направление=s['num'], диски=s['disks'], цели=s['targets'],
+               'задания': [dict(имя=s['name'], группа=s['group'], папка=s['folder'], направление=s['num'], диски=s['disks'],
+                                цели=s['targets'],
                                 файлов=s['files'], байт=s['bytes'], уже_было=bool(s.get('exists'))) for s in specs],
                'группы': states}
         _write_json(manifest, man)
@@ -1111,6 +1142,7 @@ def razbor_tasks(disk, dry=True):
             _write_json(t / 'разбор.json', {
                 'носитель': disk, 'ключ': s['key'], 'папка': s['folder'], 'направление': s['num'],
                 'имя направления': s['direction'], 'обязательные диски': s['disks'], 'цели': s['targets'],
+                'группа': s['group'],
                 'что копировать': s['kind'], 'отметка': s['mark'], 'строка отметки': s['mark_row'],
                 'подпись входов': P.info['signature'], 'дата': man['дата'], 'манифест': manifest.name,
                 'перемещать на носителе': not P.info.get('is_target'),
@@ -1167,14 +1199,14 @@ def razbor_have(disk, disks_):
     таблице presence, у других дисков - множество их SHA-256 (как в итоге разбора; поиск по индексу на каждый файл был
     в 4 раза медленнее). Сам носитель среди disks_ считается имеющим файл (как в итоге разбора). Один проход по файлам
     с хешем носителя; ничего не пишет. Замер на настоящей базе: HDD45 (567 тыс. файлов с хешем) - около 5 с.
-    -> {папка: {маска: [n0..n4, b0..b4]}}, бит i маски - диск disks_[i]."""
+    -> {папка: {маска: [n0..n8, b0..b8]}} (9 типов derived.copy_kind), бит i маски - диск disks_[i]."""
     disks_ = list(disks_)
     main = [(i, d) for i, d in enumerate(disks_) if d in hb.MAIN and d != disk]
     base = sum(1 << i for i, d in enumerate(disks_) if d == disk)
     sel = ''.join(f", coalesce(p.e{d[3:]} in ('S','C'), 0)" for _, d in main)
     q = (f'select f.path, f.size, f.name_lc, f.sha{sel} from files f ' +
          ('left join presence p on p.sha=f.sha ' if main else '') + 'where f.disk=? and f.sha is not null')
-    ft = hb.fast_folder_type()
+    ft = hb.fast_folder_type(fine=True)
     res = collections.defaultdict(dict)
     c = ro()
     try:
@@ -1193,9 +1225,9 @@ def razbor_have(disk, disks_):
             k = ft(path, r[2], size)
             cell = res[hb.parent_of(path)].get(mask)
             if cell is None:
-                cell = res[hb.parent_of(path)][mask] = [0] * 10
+                cell = res[hb.parent_of(path)][mask] = [0] * (2 * hb.N_TYPES)
             cell[k] += 1
-            cell[5 + k] += size
+            cell[hb.N_TYPES + k] += size
     finally:
         c.close()
     return dict(res)
@@ -1261,8 +1293,27 @@ def copied_name(d):
     return d.folder() or f'Скопировано на {d.name} (диск не назначен)'
 
 
-def _usage_lines(cur, nd, dirs, root=None):
-    """Строки предпросмотра смены дисков. -> (строки, убранные диски, на которые у направления есть задания)."""
+def _disk_has_data(disk, c=None):
+    """Есть ли в базе файлы на диске (подтверждённые копии могли попасть туда и без папок заданий). Только чтение."""
+    own = c is None
+    try:
+        c = c or ro()
+        try:
+            return c.execute('select 1 from files where disk=? limit 1', (disk,)).fetchone() is not None
+        finally:
+            if own:
+                c.close()
+    except Refused:                                      # базы ещё нет (ro): данных о диске нет
+        return False
+    except Exception:                                    # noqa: BLE001 - ошибка чтения базы: переспросить на всякий случай
+        return True
+
+
+def _usage_lines(cur, nd, dirs, root=None, c=None):
+    """Строки предпросмотра смены дисков. -> (строки, убранные диски, на которые у направления есть задания,
+    нужно ли переспросить владельца). Переспрос (этап 5, п. 2): убирается или заменяется диск, а у направления есть
+    задания или на убираемом диске есть данные в базе (Дискуссия этапа 5, п. 9: копии могли лечь туда и без заданий).
+    Только добавление диска - без переспроса."""
     use = direction_usage(cur.num, dirs, root)
     old, new = list(cur.disks), list(nd.disks)
     removed, added = [d for d in old if d not in new], [d for d in new if d not in old]
@@ -1284,26 +1335,32 @@ def _usage_lines(cur, nd, dirs, root=None):
         lines.append('Прежние копии на новый диск сами не попадут: что не хватает на новом диске, покажет итог разбора '
                      'носителя (строка «копировать на …»).')
         lines.append(f'Папки «{copied_name(cur)}» на носителях не переименовываются; новые будут «{copied_name(nd)}».')
-    risky = []
+    risky, confirm = [], False
     for d in removed:
         n = sum(1 for t in use['tasks'] if d in t['targets'] or d in t['disks'])
-        lines.append(f'Диск {d} перестаёт быть диском направления; всё, что на нём уже скопировано, остаётся на нём.'
-                     + (f' На этот диск у направления заданий: {n} - нужно подтверждение.' if n else ''))
+        data = _disk_has_data(d, c)
+        lines.append(f'Диск {d} перестаёт быть диском направления; всё, что на нём уже скопировано, остаётся на нём, '
+                     'но направлению больше не засчитывается: «уже есть» для новых заданий считается только по новым '
+                     'дискам. Для перемещения файлов, которые прежние задания ставили на этот диск, он остаётся '
+                     'обязательным.' + (f' На этот диск у направления заданий: {n} - нужно подтверждение.' if n else ''))
         if n:
             risky.append(d)
+        if n or use['tasks'] or data:
+            confirm = True
     for d in added:
         busy = [f'{x.num} «{x.name}»' for x in dirs.values() if x.num != cur.num
                 and any(d in t['targets'] for t in direction_usage(x.num, dirs, root)['tasks'])]
         if busy:
             lines.append(f'На диск {d} раньше шли задания направлений {", ".join(busy)}: их копии остаются там.')
-    return lines, risky
+    return lines, risky, confirm
 
 
 def direction_save_preview(num=None, name=None, disks=None, kind=None, desc=None, dirs=None, c=None, root=None):
     """Окно «Направления»: новое направление (num=None) или полная новая версия: имя, диски (ПОЛНЫЙ список; None -
     оставить), что копировать, описание (None - оставить). Проверки - ядро direction_preview (имя, прежние имена,
     один диск - одному направлению, диск есть в базе). Одна строка таблицы.
-    -> dict(fields, lines, direction, needs_ack=[убранные диски, на которые есть задания])."""
+    -> dict(fields, lines, direction, needs_ack=[убранные диски, на которые есть задания], confirm - окну переспросить
+    владельца перед записью (этап 5: только смена/удаление диска у направления с заданиями или данными))."""
     import dataclasses
     dirs = directions() if dirs is None else dirs
     d_txt = None if desc is None else ' '.join(str(desc).split())
@@ -1328,11 +1385,11 @@ def direction_save_preview(num=None, name=None, disks=None, kind=None, desc=None
         lines = list(pv['lines'])
     if d_txt is not None and d_txt != ((cur.desc or '') if cur else ''):
         lines.append(f'Что собирается на дисках: «{d_txt}».' if d_txt else 'Описание будет стёрто.')
-    risky = []
+    risky, confirm = [], False
     if cur and list(cur.disks) != list(nd.disks):
-        more, risky = _usage_lines(cur, nd, dirs, root)
+        more, risky, confirm = _usage_lines(cur, nd, dirs, root, c)
         lines += more
-    return dict(fields=hb.direction_row(nd), lines=lines, direction=nd, needs_ack=risky)
+    return dict(fields=hb.direction_row(nd), lines=lines, direction=nd, needs_ack=risky, confirm=confirm or bool(risky))
 
 
 def direction_save(ack=False, **kw):
@@ -1342,7 +1399,7 @@ def direction_save(ack=False, **kw):
         pv = direction_save_preview(dirs=hb.parse_directions(snap['directions']), **kw)
         if pv['needs_ack'] and not ack:
             raise Refused('Диск ' + ', '.join(pv['needs_ack']) + ' убирается из направления, у которого есть задания на '
-                          'него. Поставьте галочку «Понимаю…» и запишите снова.')
+                          'него. Поставьте галочку «Понимаю…» и сохраните снова.')
         _ensure_directions()
         backup(hb.DIRECTIONS)
         pv['line'] = append_row(hb.DIRECTIONS, pv['fields'])

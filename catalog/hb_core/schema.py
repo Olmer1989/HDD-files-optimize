@@ -1,4 +1,5 @@
 """Устройство базы: таблицы, индексы, триггеры, что сравнивает самопроверка."""
+from hb_core.consts import N_TYPES
 # Перенесено из hashbase.py механически 15.11.2026 (разбивка на модули); логика не менялась.
 
 
@@ -36,7 +37,7 @@ DIGEST_TABLES = {          # что сравнивается при самопр
 DERIVED_SCHEMA = [
     'create table if not exists presence(sha text primary key, e45 text, e77 text, ndisks integer, ncopies integer) without rowid',
     'create table if not exists folders(disk text not null, folder text not null, depth integer, folder_lc text, '
-    'files integer, bytes integer, ' + ', '.join(f'n{i} integer, b{i} integer' for i in range(5)) +
+    'files integer, bytes integer, ' + ', '.join(f'n{i} integer, b{i} integer' for i in range(N_TYPES)) +
     ', primary key(disk, folder)) without rowid',
 ]
 TRIGGERS = [
@@ -60,5 +61,5 @@ TRIGGERS = [
 ]
 DIGEST_TABLES.update({
     'presence': 'sha, e45, e77, ndisks, ncopies',
-    'folders': 'disk, folder, depth, folder_lc, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(5)),
+    'folders': 'disk, folder, depth, folder_lc, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(N_TYPES)),
 })

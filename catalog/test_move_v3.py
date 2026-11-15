@@ -32,7 +32,8 @@ OK = 'скопирован, размер и SHA-256 совпали'
 OK_NOHASH = 'скопирован, размер совпал'
 DOC1, DOC2 = 'd1' * 32, 'd2' * 32                           # хеш прочитанного у документов без хеша в описи
 WORK = 'HDD60 — Работа — Работа'
-HIKE = 'HDD60 — Поход 2010 — Семейный архив'
+HIKE = 'HDD60 — Поход 2010 — Семейный архив'            # группа; задания этапа 5 - отдельно на 45 и на 77
+HIKE45, HIKE77 = HIKE + ' — на 45', HIKE + ' — на 77'
 WORK_ROOT = 'Скопировано на Работа (91)'
 FAMILY_ROOT = 'Скопировано на Семейный архив (45 и 77)'
 REAL_TPL = Path(__file__).resolve().parents[1] / 'Каталог дисков' / '_ШАБЛОН перемещения'
@@ -193,23 +194,25 @@ class PartialCopyTest(MoveBase):
     def hike(self):
         self.mark(('', 'Н1'), ('Работа', 'Н2'), ('Друзья', 'не копировать'))
         sv.razbor_tasks(SRC, dry=False)
-        lst = (hb.TASKS / HIKE / 'список.tsv').read_text(encoding='utf-8')
+        lst = (hb.TASKS / HIKE45 / 'список.tsv').read_text(encoding='utf-8')
         self.assertIn('Поход 2010\\Монтаж\\clip копия.mp4', lst)
-        self.copy_log(HIKE, '2025-01-01 10-00-00', [
+        self.assertFalse((hb.TASKS / HIKE).exists())                                        # общего задания нет
+        self.copy_log(HIKE45, '2025-01-01 10-00-00', [
             ('HDD45', OK_NOHASH, 10, DOC1, 'Поход 2010\\описание.doc'),
-            ('HDD45', OK, 600, H[20], 'Поход 2010\\Монтаж\\clip копия.mp4'),
+            ('HDD45', OK, 600, H[20], 'Поход 2010\\Монтаж\\clip копия.mp4')])
+        self.copy_log(HIKE77, '2025-01-01 11-00-00', [
             ('HDD77', OK, 200, S[2], 'Поход 2010\\Фото\\2.jpg'),
             ('HDD77', OK, 600, H[20], 'Поход 2010\\Монтаж\\clip копия.mp4'),
             ('HDD77', 'ОШИБКА: устройство не готово', 10, '', 'Поход 2010\\описание.doc')])
 
     def test_move_copied_then_retry_rest(self):
         self.hike()
-        text = self.mv(razbor=HIKE, dry=True)
+        text = self.mv(razbor=HIKE45, dry=True)
         self.assertIn('по файлам', text)
         self.assertIn(f'Остаются на месте - {mv.R_ERR}: 1 файлов', text)                    # описание.doc на 77
         self.assertIn(f'Остаются на месте - {mv.R_NOHASH}: 1 файлов', text)                 # проект монтажа - не копировался
         self.assertIn('Можно перенести: 5 файлов', text)        # 1.jpg и 2.jpg (уже были / докопирован), 2 клипа, Thumbs.db
-        self.mv(razbor=HIKE)
+        self.mv(razbor=HIKE45)
         task = hb.TASKS / (HIKE + mv.V3_SUFFIX)
         self.assertEqual((task / 'папки целиком.tsv').read_text(encoding='utf-8'), '')
         self.files(('Поход 2010\\Фото\\1.jpg', 100), ('Поход 2010\\Фото\\2.jpg', 200), ('Поход 2010\\Фото\\Thumbs.db', 5),
@@ -226,27 +229,68 @@ class PartialCopyTest(MoveBase):
         # «Задания»: скопированное перенесено, осталось повторить копирование
         rows = self.page_rows()
         offers, done = tp.move_items(rows)
-        mine = [o for o in offers if o.get('copy_task') == HIKE]
+        mine = [o for o in offers if o.get('copy_task') == HIKE45]
         self.assertEqual([o['buttons'] for o in mine], [['Повторить копирование']])
+        self.assertEqual(mine[0]['retry_tasks'], [HIKE77])                                   # повтор - у задания на 77
         self.assertTrue(any('перенесена в «' + FAMILY_ROOT in d['text'] and 'осталось 2 файлов' in d['text'] for d in done))
         # повтор: новое задание только из того, что не скопировано
-        res = sv.retry_copy_task(HIKE)
-        self.assertEqual(res['task'].name, HIKE + ' — повтор 1')
+        res = sv.retry_copy_task(HIKE77)
+        self.assertEqual(res['task'].name, HIKE77 + ' — повтор 1')
         self.assertEqual([x.split('\t')[:2] for x in (res['task'] / 'список.tsv').read_text(encoding='utf-8').splitlines()],
                          [['HDD77', 'Поход 2010\\описание.doc']])
-        self.assertEqual(json.loads((res['task'] / 'разбор.json').read_text(encoding='utf-8'))['повтор'], HIKE)
+        self.assertEqual(json.loads((res['task'] / 'разбор.json').read_text(encoding='utf-8'))['повтор'], HIKE77)
         with self.assertRaises(SystemExit):
             self.mv(razbor=res['task'].name, dry=True)         # повтор переносится по исходному заданию
         self.copy_log(res['task'].name, '2025-01-02 10-00-00', [('HDD77', OK_NOHASH, 10, DOC1, 'Поход 2010\\описание.doc')])
         with self.assertRaises(sv.Refused):
-            sv.retry_copy_task(HIKE)                           # всё скопировано
+            sv.retry_copy_task(HIKE77)                           # всё скопировано
         rows = self.page_rows()
         offers, _done = tp.move_items(rows)
-        self.assertEqual([o['buttons'] for o in offers if o.get('copy_task') == HIKE], [['Переместить']])
-        text = self.mv(razbor=HIKE, dry=True)
+        self.assertEqual([o['buttons'] for o in offers if o.get('copy_task') == HIKE45], [['Переместить']])
+        text = self.mv(razbor=HIKE45, dry=True)
         self.assertIn('Можно перенести: 1 файлов', text)                                     # описание.doc
-        self.mv(razbor=HIKE)
+        self.mv(razbor=HIKE45)
         self.assertTrue((hb.TASKS / (HIKE + mv.V3_SUFFIX + ' 2')).exists())
+
+    def test_two_disks_move_waits_for_both(self):
+        """Этап 5: на 45 скопировано, на 77 - нет: перемещение не предлагается, строка «на 45 - скопировано, на 77 -
+        ждёт запуска»; mvlist по заданию на 45 отказывает, пока задание на 77 не закончено."""
+        self.mark(('', 'Н1'), ('Работа', 'Н2'), ('Друзья', 'не копировать'))
+        res = sv.razbor_tasks(SRC, dry=False)
+        hike = [x for x in res['specs'] if x['group'] == HIKE]
+        self.assertEqual([(x['name'], x['targets'], x['disks']) for x in hike],
+                         [(HIKE45, ['HDD45'], ['HDD45', 'HDD77']), (HIKE77, ['HDD77'], ['HDD45', 'HDD77'])])
+        meta = json.loads((hb.TASKS / HIKE77 / 'разбор.json').read_text(encoding='utf-8'))
+        self.assertEqual((meta['цели'], meta['обязательные диски'], meta['группа']), (['HDD77'], ['HDD45', 'HDD77'], HIKE))
+        self.assertEqual((hb.TASKS / HIKE77 / 'тома.tsv').read_text(encoding='utf-8').splitlines(),
+                         ['HDD60\tAAAA0060', 'HDD77\tAAAA0077'])
+        self.copy_log(HIKE45, '2025-01-01 10-00-00', [
+            ('HDD45', OK_NOHASH, 10, DOC1, 'Поход 2010\\описание.doc'),
+            ('HDD45', OK, 600, H[20], 'Поход 2010\\Монтаж\\clip копия.mp4')])
+        offers, _done = tp.move_items(self.page_rows())
+        mine = [o for o in offers if 'Поход 2010' in o['text']]
+        self.assertEqual(len(mine), 1)
+        self.assertEqual((mine[0]['kind'], mine[0]['buttons']), ('wait', []))
+        self.assertIn('на 45 — скопировано; на 77 — ждёт запуска', mine[0]['text'])
+        with self.assertRaises(SystemExit) as e:
+            self.mv(razbor=HIKE45, dry=True)
+        self.assertIn(f'«{HIKE77}» ещё не закончено', str(e.exception))
+        again = sv.razbor_tasks(SRC, dry=False)                      # повтор: оба уже подготовлены
+        self.assertTrue(all(x.get('exists') for x in again['specs']))
+        # замечание 5: перенос создан по ВТОРОМУ заданию группы (из командной строки) - окно его видит
+        self.copy_log(HIKE77, '2025-01-01 11-00-00', [
+            ('HDD77', OK, 200, S[2], 'Поход 2010\\Фото\\2.jpg'),
+            ('HDD77', OK, 600, H[20], 'Поход 2010\\Монтаж\\clip копия.mp4'),
+            ('HDD77', OK_NOHASH, 10, DOC1, 'Поход 2010\\описание.doc')])
+        offers, _done = tp.move_items(self.page_rows())
+        mine = [o for o in offers if 'Поход 2010' in o['text']]
+        self.assertEqual([o['buttons'] for o in mine], [['Переместить']])
+        self.mv(razbor=HIKE77)
+        self.assertTrue((hb.TASKS / (HIKE + mv.V3_SUFFIX)).exists())                 # имя - по группе
+        offers, _done = tp.move_items(self.page_rows())
+        mine = [o for o in offers if 'Поход 2010' in o['text']]
+        self.assertEqual([(o['kind'], o['buttons']) for o in mine], [('run', ['Запустить перемещение'])])
+        self.assertEqual(mine[0]['move_task'], HIKE + mv.V3_SUFFIX)
 
     def test_unfinished_copy_refused(self):
         self.mark(('', 'Н1'), ('Работа', 'Н2'))

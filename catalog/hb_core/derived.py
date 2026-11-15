@@ -3,7 +3,8 @@
 import collections
 import os
 import build_pilot as bp
-from hb_core.consts import C_DOC, C_JUNK, EV_RANK, EXT_CLASS, F_JUNK, F_OTHER, F_PHOTO, F_TEXT, F_VIDEO, MAIN, SEP
+from hb_core.consts import (C_ARCH, C_DOC, C_JUNK, C_MUSIC, C_PROJ, EV_RANK, EXT_CLASS, F_ARCH, F_JUNK, F_MUSIC, F_NEVER,
+                            F_OTHER, F_PHOTO, F_PROJ, F_TEXT, F_VIDEO, MAIN, N_TYPES, NEVER_COPY_EXT, SEP)
 from hb_core.schema import DERIVED_SCHEMA, TRIGGERS
 from hb_core.util import class_of, parent_of
 
@@ -30,14 +31,42 @@ def presence_touched(c):
 
 
 def folder_type(path, name_lc, size):
+    """Один из 5 прежних типов таблицы folders (фото, видео, тексты, прочие, мусор)."""
+    k = copy_kind(path, name_lc, size)
+    return F_OTHER if k > F_JUNK else k
+
+
+OTHER_SUB = {C_ARCH: F_ARCH, C_PROJ: F_PROJ, C_MUSIC: F_MUSIC}
+
+
+def sub_of_other(ext):
+    """Подмножество «прочих» по расширению: архивы, проекты, музыка, программы (никогда) или F_OTHER («другие»)."""
+    if ext in NEVER_COPY_EXT:
+        return F_NEVER
+    return OTHER_SUB.get(EXT_CLASS.get(ext), F_OTHER)
+
+
+def copy_kind(path, name_lc, size):
+    """Тип файла для «что копировать» (этап 5): 0..4 - прежние типы folders, 5..8 - подмножества «прочих» (архивы,
+    проекты монтажа и графики, музыка, программы и системное). Расширение - последнее, без учёта регистра (имя в базе -
+    в нижнем регистре): «file.jpg.exe» - программа; без расширения и неизвестное - «другие»; пустой файл - «другие»,
+    но пустая программа (x.exe, 0 байт) - всё равно программа: «никогда» не зависит от размера. Прежний тип таблицы
+    folders от этого не меняется (программа и пустой файл - оба «прочие»).
+    Единственное место правила; fast_folder_type в razbor.py - та же логика быстрее (тест сверяет)."""
     if not size:
-        return F_OTHER
+        return F_NEVER if os.path.splitext((name_lc or '').lower())[1] in NEVER_COPY_EXT else F_OTHER
     if class_of(path, name_lc or '', size) == C_JUNK:
         return F_JUNK
-    t = bp.EXT_TYPE.get(os.path.splitext(name_lc or '')[1])
+    ext = os.path.splitext((name_lc or '').lower())[1]
+    t = bp.EXT_TYPE.get(ext)
     if t:
         return F_VIDEO if t == 'Видео' else F_PHOTO
-    return F_TEXT if EXT_CLASS.get(os.path.splitext(name_lc or '')[1]) == C_DOC else F_OTHER
+    if EXT_CLASS.get(ext) == C_DOC:
+        return F_TEXT
+    return sub_of_other(ext)
+
+
+W = 2 + 2 * N_TYPES             # файлов, байт, затем (число, байт) по каждому типу
 
 
 def roll_up(agg):
@@ -48,11 +77,11 @@ def roll_up(agg):
             f = parent_of(f)
             if f in total:
                 break
-            total[f] = [0] * 12
+            total[f] = [0] * W
     for f in sorted(total, key=lambda x: -(x.count(SEP) + 1 if x else 0)):
         if f:
             p, v = total[parent_of(f)], total[f]
-            for i in range(12):
+            for i in range(W):
                 p[i] += v[i]
     return total
 
@@ -60,10 +89,13 @@ def roll_up(agg):
 def add_file(agg, path, size, name_lc, sign=1):
     a = agg.get(parent_of(path))
     if a is None:
-        a = agg[parent_of(path)] = [0] * 12
-    k = folder_type(path, name_lc, size)
+        a = agg[parent_of(path)] = [0] * W
+    k = copy_kind(path, name_lc, size)
     size = (size or 0) * sign
-    a[0] += sign; a[1] += size; a[2 + 2 * k] += sign; a[3 + 2 * k] += size
+    base = F_OTHER if k > F_JUNK else k
+    a[0] += sign; a[1] += size; a[2 + 2 * base] += sign; a[3 + 2 * base] += size
+    if k > F_JUNK:                                          # подмножество «прочих» - ещё и в свой столбец
+        a[2 + 2 * k] += sign; a[3 + 2 * k] += size
 
 
 def folder_row(d, f, v):
@@ -77,7 +109,7 @@ def folders_full(c, disks=None):
         agg = {}
         for path, size, nm in c.execute('select path, size, name_lc from files where disk=?', (d,)):
             add_file(agg, path, size, nm)
-        c.executemany(f'insert into folders values ({",".join("?" * 16)})',
+        c.executemany(f'insert into folders values ({",".join("?" * (4 + W))})',
                       (folder_row(d, f, v) for f, v in roll_up(agg).items()))
 
 
@@ -87,10 +119,10 @@ def folders_delta(c):
     for d, path, size, nm, sign in c.execute('select disk, path, size, name_lc, sign from temp.delta'):
         add_file(by_disk[d], path, size, nm, sign)
     c.execute('delete from temp.delta')
-    upd = ', '.join(f'{x}={x}+excluded.{x}' for x in ['files', 'bytes'] + [f'{p}{i}' for i in range(5) for p in 'nb'])
+    upd = ', '.join(f'{x}={x}+excluded.{x}' for x in ['files', 'bytes'] + [f'{p}{i}' for i in range(N_TYPES) for p in 'nb'])
     for d, agg in by_disk.items():
         rows = [folder_row(d, f, v) for f, v in roll_up(agg).items() if any(v)]
-        c.executemany(f'insert into folders values ({",".join("?" * 16)}) on conflict(disk, folder) do update set {upd}', rows)
+        c.executemany(f'insert into folders values ({",".join("?" * (4 + W))}) on conflict(disk, folder) do update set {upd}', rows)
     c.execute('delete from folders where files <= 0')
 
 
