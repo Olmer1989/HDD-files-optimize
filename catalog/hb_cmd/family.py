@@ -18,6 +18,8 @@ def cmd_family_check(a):
 NAMES = ('family-plan', 'family-check')
 HELP = {'family-plan': 'план семейного копирования и проверки HDD51', 'family-check': 'журнал и фактические пути/размеры двух копий; без хеширования целей'}
 
+GUI = False      # в окне не показывается (ручной режим владельца / разовые команды), в командной строке есть
+
 
 def add_args(p, name):
     if name == 'family-plan':

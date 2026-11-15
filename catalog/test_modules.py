@@ -4,6 +4,8 @@
 Запуск из корня проекта:  py -m unittest catalog\\test_modules.py
 """
 import ast
+import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -73,9 +75,51 @@ class ModulesTest(unittest.TestCase):
                 self.assertNotIn(top(mod), {'hb_cmd', 'hb_cli', 'hashbase', 'app'}, f'{f.name} импортирует {mod}')
 
     def test_upper_layers(self):
-        for name in ('service', 'app', 'recovery_staging_audit', 'recovery_plan', 'copy_workflow'):
+        for name in ('service', 'app', 'recovery_staging_audit', 'recovery_plan', 'copy_workflow', 'commands_page'):
+            banned = {'hashbase', 'hb_cmd'} | ({'hb_cli'} if name != 'commands_page' else set())
             for mod, _ in imports(CAT / f'{name}.py'):
-                self.assertNotIn(top(mod), {'hashbase', 'hb_cmd', 'hb_cli'}, f'{name}.py импортирует {mod}')
+                self.assertNotIn(top(mod), banned, f'{name}.py импортирует {mod}')
+
+    def test_window_never_runs_commands_in_its_process(self):
+        # раздел «Команды» берёт у hb_cli только описание (commands()); выполняет команды отдельный процесс
+        tree = ast.parse((CAT / 'commands_page.py').read_text(encoding='utf-8'))
+        used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Name) and n.value.id == 'hb_cli'}
+        self.assertEqual(used, {'commands'})
+        self.assertNotIn('_run', {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)})
+
+    def test_gui_attribute(self):
+        hidden = set()
+        for mod in hb_cli.command_modules():
+            gui = getattr(mod, 'GUI', True)
+            self.assertIsInstance(gui, (bool, dict), mod.__name__)
+            if isinstance(gui, dict):
+                self.assertTrue(set(gui) <= set(mod.NAMES), mod.__name__)
+        for name, hlp, show, p in hb_cli.commands():
+            self.assertTrue(hlp, name)
+            if not show:
+                hidden.add(name)
+        self.assertEqual(hidden, {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check'})
+
+    def test_hb_root_from_environment(self):
+        # окно передаёт подпроцессу свои корни: подпроцесс не должен видеть настоящие таблицы владельца
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix='hb_root_'))
+        try:
+            env = dict(os.environ, HB_ROOT=str(tmp / 'Каталог'), HB_SCAN_ROOTS=str(tmp / 'scans'))
+            code = ('import build_pilot as bp; from hb_core import paths as p; print(*[p.DB, p.MANUAL, p.DECISIONS, '
+                    'p.EXCLUSIONS, p.ANSWERS, p.TEMPLATE, p.TASKS, bp.OUT_DIR, *bp.SCAN_ROOTS], sep="\\n"); '
+                    'print(p.child_env()["HB_ROOT"])')
+            r = subprocess.run([sys.executable, '-X', 'utf8', '-c', code], cwd=str(CAT), env=env, capture_output=True,
+                               text=True, encoding='utf-8', timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            lines = r.stdout.splitlines()
+            self.assertEqual(len(lines), 10)
+            for x in lines:
+                self.assertTrue(Path(x).is_relative_to(tmp), x)
+            self.assertEqual(Path(lines[-1]), tmp / 'Каталог')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_paths_are_read_as_attributes(self):
         # «from hb_core.paths import DB» сохранил бы старый путь после set_root(); соединение - только в db

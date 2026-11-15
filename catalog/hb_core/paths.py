@@ -2,11 +2,12 @@
 Читать только как атрибут модуля: paths.DB (после set_root() в тестах значение меняется)."""
 # Перенесено из hashbase.py механически 15.11.2026 (разбивка на модули); логика не менялась.
 import glob
+import os
 from pathlib import Path
 import build_pilot as bp
 
 
-__all__ = ['set_root', 'journal_paths']   # пути не копируются через import *: читать paths.X
+__all__ = ['set_root', 'journal_paths', 'child_env']   # пути не копируются через import *: читать paths.X
 
 
 def set_root(out_dir):
@@ -32,4 +33,20 @@ def journal_paths():
     return res
 
 
+def child_env():
+    """Корни для подпроцесса (окно запускает команды отдельным процессом): он видит те же данные, что и окно.
+    В работе это значения по умолчанию, в тестах - временные папки."""
+    return {'HB_ROOT': str(BASE_DIR.parent), 'HB_SCAN_ROOTS': os.pathsep.join(str(x) for x in bp.SCAN_ROOTS)}
+
+
+def _from_env():
+    """HB_ROOT - папка «Каталог дисков» (база, таблицы, задачи), HB_SCAN_ROOTS - папки описей через «;».
+    Добавлено 15.11.2026 для окна и тестов; без переменных всё как раньше."""
+    if os.environ.get('HB_ROOT'):
+        bp.OUT_DIR = Path(os.environ['HB_ROOT'])
+    if os.environ.get('HB_SCAN_ROOTS'):
+        bp.SCAN_ROOTS = [Path(x) for x in os.environ['HB_SCAN_ROOTS'].split(os.pathsep) if x]
+
+
+_from_env()
 set_root(bp.OUT_DIR)

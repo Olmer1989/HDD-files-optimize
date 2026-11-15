@@ -1,4 +1,4 @@
-"""«Архив дисков» - окно программы (этап 1): Обзор, Задания, Диски и папки.
+"""«Архив дисков» - окно программы: Обзор, Задания, Диски и папки, Команды (этап 1 переноса команд, 15.11.2026).
 
 Запуск: ярлык на рабочем столе или  pythonw catalog\\app.py
 Окно - оболочка над тем же ядром: считает hashbase.py, данные даёт service.py, копируют и перемещают те же
@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hb_core import api as hb  # noqa: E402  (ядро; hashbase.py - только обёртка командной строки)
 import service as sv           # noqa: E402
+import commands_page           # noqa: E402
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal   # noqa: E402
 from PySide6.QtGui import QColor, QFont, QGuiApplication                                  # noqa: E402
@@ -385,7 +386,8 @@ class Window(QMainWindow):
         self.resize(1250, 800)
         self.bg = Background(self)
         self.updating, self.sig = False, None
-        self.pages = [('Обзор', OverviewPage(self)), ('Задания', TasksPage(self)), ('Диски и папки', DisksPage(self))]
+        self.pages = [('Обзор', OverviewPage(self)), ('Задания', TasksPage(self)), ('Диски и папки', DisksPage(self)),
+                      ('Команды', commands_page.CommandsPage(self))]
         self.nav = QListWidget()
         self.nav.setFixedWidth(170)
         f = QFont()
@@ -413,6 +415,18 @@ class Window(QMainWindow):
             self.statusBar().showMessage('База собирается - экран откроется, когда она будет готова (при первом запуске - несколько минут).')
             return
         self.pages[i][1].refresh()
+
+    def page(self, name):
+        return next(p for n, p in self.pages if n == name)
+
+    def open_page(self, name):
+        self.nav.setCurrentRow([n for n, _ in self.pages].index(name))
+
+    def closeEvent(self, e):                                  # noqa: N802
+        if not self.page('Команды').can_close():
+            e.ignore()
+            return
+        super().closeEvent(e)
 
     def show_error(self, text):
         short = text.strip().splitlines()[-1] if text.strip() else 'ошибка'

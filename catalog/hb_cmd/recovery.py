@@ -18,6 +18,8 @@ def cmd_recovery_staging(a):
 NAMES = ('recovery-plan', 'recovery-staging')
 HELP = {'recovery-plan': 'разбор оглавления восстановленной папки, без чтения содержимого', 'recovery-staging': 'остаток восстановлений К/Н вне F, 45 и 77; только метаданные'}
 
+GUI = False      # в окне не показывается (ручной режим владельца / разовые команды), в командной строке есть
+
 
 def add_args(p, name):
     if name == 'recovery-plan':

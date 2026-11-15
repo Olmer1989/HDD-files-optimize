@@ -37,6 +37,7 @@
 # новая команда = новый файл с NAMES, HELP, add_args(p, name), run(a); здесь ничего дописывать не надо.
 import argparse
 import importlib
+import os
 import pkgutil
 import sys
 import time
@@ -65,6 +66,20 @@ def parser():
     return ap
 
 
+def commands():
+    """Для окна «Архив дисков»: [(имя, описание, показывать ли в окне, подпарсер)] - то же описание argparse,
+    что у командной строки. Ничего не выполняет. GUI = False (или dict имя -> bool) в файле команды - не в окне."""
+    ap = parser()
+    sub = next(x for x in ap._actions if isinstance(x, argparse._SubParsersAction))
+    res = []
+    for mod in command_modules():
+        gui = getattr(mod, 'GUI', True)
+        for name in mod.NAMES:
+            hlp = mod.HELP.get(name) if isinstance(mod.HELP, dict) else mod.HELP
+            res.append((name, hlp, bool(gui.get(name, True) if isinstance(gui, dict) else gui), sub.choices[name]))
+    return res
+
+
 def main(argv=None):
     for s in (sys.stdout, sys.stderr):
         try:
@@ -73,6 +88,10 @@ def main(argv=None):
             pass
     a = parser().parse_args(argv)
     t0 = time.time()
+    if os.environ.get('HB_FULL_OUTPUT') == '1':     # окно: весь ответ без сокращения до 20 строк, окно покажет его само
+        a._run(a)
+        out(f'[{time.time() - t0:.1f} с]')
+        return
     real, ans = sys.stdout, ShortAnswer(sys.stdout, paths.ANSWERS / 'последний ответ.txt')
     sys.stdout = ans
     try:
