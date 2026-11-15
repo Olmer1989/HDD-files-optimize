@@ -19,12 +19,16 @@ import hb_cli        # noqa: E402
 # Уровни ядра снизу вверх: модуль может импортировать из ядра только модули СТРОГО ниже себя.
 LEVELS = {'paths': 0, 'consts': 0, 'schema': 1, 'util': 1, 'report': 2, 'sources': 3, 'apply_common': 4,
           'apply_disk': 5, 'apply_log': 5, 'apply_manual': 5, 'apply_partial': 5, 'apply_excl': 5,
-          'derived': 6, 'builder': 7, 'db': 8, 'query': 9, 'short': 10, 'api': 11}
+          'derived': 6, 'builder': 7, 'db': 8, 'query': 9, 'short': 10, 'api': 11,
+          'directions': 4, 'razbor': 10}          # логика v3 (15.11.2026): направления и отметки; расчёт разбора
 COMMANDS = {'missing', 'only', 'cmp', 'where', 'candel', 'mklist', 'mvlist', 'manual', 'fix-manual', 'decide',
             'exclude', 'tasks', 'stats', 'build', 'folders', 'find', 'rebuild', 'family-plan', 'family-check',
-            'recovery-plan', 'recovery-staging', 'rescan-plan'}
+            'recovery-plan', 'recovery-staging', 'rescan-plan',
+            'directions', 'direction-add', 'direction-edit', 'directions-default', 'mark', 'razbor', 'razbor-tasks',
+            'contested'}
 UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего ядро не импортирует никогда
-PATHVARS = {'BASE_DIR', 'DB', 'SNAP', 'MANUAL', 'DECISIONS', 'EXCLUSIONS', 'ANSWERS', 'TEMPLATE', 'MOVE_TEMPLATE', 'TASKS'}
+PATHVARS = {'BASE_DIR', 'DB', 'SNAP', 'MANUAL', 'DECISIONS', 'EXCLUSIONS', 'ANSWERS', 'TEMPLATE', 'MOVE_TEMPLATE', 'TASKS',
+            'DIRECTIONS', 'RAZBORY'}
 
 
 def imports(path):

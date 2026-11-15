@@ -1,7 +1,7 @@
 """Применение модуля «журнал скрипта» (копирование, перемещение, корзина)."""
 # Перенесено из hashbase.py механически 15.11.2026 (разбивка на модули); логика не менялась.
 from pathlib import Path
-from hb_core.consts import EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, OLD_LOGS, SEP
+from hb_core.consts import COPIED_PREFIX, EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, OLD_LOGS, SEP
 from hb_core.util import moved_rel, prefix_cond, rel_of
 from hb_core.sources import log_time, read_tsv
 from hb_core.apply_common import put_row
@@ -124,6 +124,9 @@ def apply_log(c, log, jobs, serials, report, seen, rows=None, start=0):
                 continue                                # уже учтено (повторный запуск) или файла нет в базе
             c.execute('delete from files where disk=? and path=?', (disk, ra))
             put_row(c, disk, rb, got[1], got[0], got[2], got[4], got[3], origin)     # тот же файл на том же диске
+            root = rb.split(SEP, 1)[0]
+            if root.startswith(COPIED_PREFIX):          # логика v3: служебная папка - только созданная журналом
+                c.execute('insert or ignore into moved_roots values (?, ?)', (disk, root))
             moved += 1
     elif task.name in FOLDER_MOVES and head[:3] == ['время', 'результат', 'папка']:
         disk, src_base, dst_base = FOLDER_MOVES[task.name]

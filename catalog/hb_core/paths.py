@@ -12,13 +12,15 @@ __all__ = ['set_root', 'journal_paths', 'child_env']   # пути не копи�
 
 def set_root(out_dir):
     """Где лежат база и таблицы поправок (в тестах - временная папка)."""
-    global BASE_DIR, DB, SNAP, MANUAL, DECISIONS, EXCLUSIONS, ANSWERS, TEMPLATE, MOVE_TEMPLATE, TASKS
+    global BASE_DIR, DB, SNAP, MANUAL, DECISIONS, EXCLUSIONS, ANSWERS, TEMPLATE, MOVE_TEMPLATE, TASKS, DIRECTIONS, RAZBORY
     BASE_DIR = Path(out_dir) / '_БАЗА'
     DB = BASE_DIR / 'хеши.sqlite'          # рабочая база: снимок описей + поправки
     SNAP = BASE_DIR / 'описи.sqlite'       # снимок описей; пересобирается, только если изменились сами описи
     MANUAL = BASE_DIR / 'ручные операции.tsv'
     DECISIONS = BASE_DIR / 'решения.tsv'
     EXCLUSIONS = BASE_DIR / 'исключения.tsv'   # папки, которые база не учитывает (временные копии владельца)
+    DIRECTIONS = BASE_DIR / 'направления.tsv'  # направления разбора (логика v3): номер, имя, диски, что копировать
+    RAZBORY = BASE_DIR / 'разборы'             # манифесты разборов носителей (логика v3)
     ANSWERS = BASE_DIR / 'ответы'
     TEMPLATE = Path(out_dir) / '_ШАБЛОН копирования'
     MOVE_TEMPLATE = Path(out_dir) / '_ШАБЛОН перемещения'

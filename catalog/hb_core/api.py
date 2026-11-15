@@ -15,11 +15,14 @@ from hb_core.apply_excl import *          # noqa: F401,F403
 from hb_core.derived import *          # noqa: F401,F403
 from hb_core.builder import *          # noqa: F401,F403
 from hb_core.db import *          # noqa: F401,F403
+from hb_core.directions import *          # noqa: F401,F403
 from hb_core.query import *          # noqa: F401,F403
+from hb_core.razbor import *          # noqa: F401,F403
 from hb_core.short import *          # noqa: F401,F403
 from hb_core import paths as _paths, db as _db
 
-_PATHS = {'BASE_DIR', 'EXCLUSIONS', 'SNAP', 'DECISIONS', 'TASKS', 'DB', 'MOVE_TEMPLATE', 'MANUAL', 'TEMPLATE', 'ANSWERS'}
+_PATHS = {'BASE_DIR', 'EXCLUSIONS', 'SNAP', 'DECISIONS', 'TASKS', 'DB', 'MOVE_TEMPLATE', 'MANUAL', 'TEMPLATE', 'ANSWERS',
+          'DIRECTIONS', 'RAZBORY'}
 
 
 def __getattr__(name):

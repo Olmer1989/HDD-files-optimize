@@ -15,6 +15,8 @@ SCHEMA = [
     'checksum text, rows integer, applied_at text, changed integer)',
     'create table if not exists scan_folders(disk text not null, folder text not null, time real, primary key(disk, folder))',
     EXCLUDED_DDL,
+    # служебные папки «Скопировано на …», созданные журналом перемещения (логика v3, BUILD_VERSION 8)
+    'create table if not exists moved_roots(disk text not null, folder text not null, primary key(disk, folder)) without rowid',
 ]
 INDEXES = [
     'create index if not exists files_sha on files(sha, disk) where sha is not null',
@@ -29,6 +31,7 @@ DIGEST_TABLES = {          # что сравнивается при самопр
     'issues': 'disk, path, kind, note',
     'excluded': 'disk, path, size, sha, name_lc, origin',
     'scan_folders': 'disk, folder, time',
+    'moved_roots': 'disk, folder',
 }
 DERIVED_SCHEMA = [
     'create table if not exists presence(sha text primary key, e45 text, e77 text, ndisks integer, ncopies integer) without rowid',

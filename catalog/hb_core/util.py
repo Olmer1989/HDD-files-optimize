@@ -9,7 +9,8 @@ import re
 import unicodedata
 from pathlib import Path
 import build_pilot as bp
-from hb_core.consts import C_BIGMEDIA, C_EMPTY, C_JUNK, C_MEDIA, C_OTHER, EXT_CLASS, GIB, JUNK_NAMES, MAIN, MOVED_PREFIX, SEP, TRASH_DIR
+from hb_core.consts import (C_BIGMEDIA, C_EMPTY, C_JUNK, C_MEDIA, C_OTHER, COPIED_PREFIX, EXT_CLASS, GIB, JUNK_NAMES, MAIN,
+                            MARK_DIR, MARK_INHERIT, MARK_SKIP, MOVED_PREFIX, SEP, TRASH_DIR)
 
 
 def name_key(path):
@@ -115,6 +116,28 @@ def is_moved_dir(part):
     return part.startswith(MOVED_PREFIX) or part == TRASH_DIR
 
 
+def is_v3_mark(verdict):
+    """Отметка разбора v3 («направление: Нх …», «не копировать», «как у родителя»). Старые команды её не видят."""
+    v = (verdict or '').strip().lower()
+    return v.startswith(MARK_DIR) or v == MARK_SKIP or v == MARK_INHERIT
+
+
+def disk_nums(disks):
+    """Номера дисков для имени папки: {HDD45, HDD77} -> «45 и 77», {HDD78} -> «78», три -> «45, 77 и 78»."""
+    ts = sorted(set(disks), key=_disk_order)
+    nums = [d[3:] if d.upper().startswith('HDD') and d[3:].isdigit() else d for d in ts]
+    if not nums:
+        return ''
+    return nums[0] if len(nums) == 1 else ', '.join(nums[:-1]) + ' и ' + nums[-1]
+
+
+def copied_folder(name, disks):
+    """Папка на носителе после переноса (логика v3): «Скопировано на Семейный архив (45 и 77)»."""
+    if not disks:
+        raise ValueError('у направления нет дисков')
+    return f'{COPIED_PREFIX}{name} ({disk_nums(disks)})'
+
+
 def _disk_order(disk):
     m = re.match(r'^(\D*)(\d+)(.*)$', disk)
     return (m.group(1).upper(), int(m.group(2)), m.group(3)) if m else (disk.upper(), 0, '')
@@ -144,10 +167,11 @@ def original_path(path):
 
 def moved_rel(src, dst):
     """Строка журнала перемещения -> (путь от корня до, путь от корня после). Корень находится по папке
-    «ПЕРЕНЕСЕНО → …» или «МУСОР» в пути назначения, поэтому годится любая буква диска и тестовая папка."""
+    «ПЕРЕНЕСЕНО → …», «МУСОР» или (логика v3) «Скопировано на …» в пути назначения, поэтому годится любая буква
+    диска и тестовая папка. «Скопировано на …» принимается только здесь - в строке журнала перемещения."""
     parts = dst.split(SEP)
     for i, part in enumerate(parts):
-        if is_moved_dir(part):
+        if is_moved_dir(part) or part.startswith(COPIED_PREFIX):
             root = SEP.join(parts[:i])
             rel = SEP.join(parts[i + 1:])
             if rel and src == root + SEP + rel:

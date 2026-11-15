@@ -238,8 +238,12 @@ def fix_manual(line_no, fields, reason):
 
 def decision_preview(disk, path, verdict):
     verdict = (verdict or '').strip()
+    if hb.is_v3_mark(verdict):                    # отметки разбора v3 - та же проверка, что у пакета отметок
+        pv = marks_preview(disk, [(path, verdict)])
+        return dict(fields=pv['fields'][0], lines=pv['lines'])
     if not VERDICT_RE.match(verdict):
-        raise Refused('Решение: «не нужно», «раздел: <название>» или «пока не трогаем».')
+        raise Refused('Решение: «не нужно», «раздел: <название>», «пока не трогаем» или (разбор v3) '
+                      '«направление: <номер или имя>», «не копировать», «как у родителя».')
     c = db()
     if disk != '*':
         check_disk(c, disk)
@@ -259,6 +263,10 @@ def decision_preview(disk, path, verdict):
 
 
 def add_decision(disk, path, verdict, note=''):
+    if hb.is_v3_mark(verdict):
+        pv = add_marks_batch(disk, [(path, verdict)], note)
+        pv['fields'] = pv['fields'][0]
+        return pv
     with TableLock():
         pv = decision_preview(disk, path, verdict)
         hb.ensure_tables()
@@ -748,3 +756,380 @@ def mark_task_move(task, disk, folders=None):
     path = task / MOVE_MARK
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     return path
+
+
+# ---------- логика v3: направления, отметки разбора, задания по отметкам (15.11.2026) ----------
+# Документ - «Проверка Архитектуры сортировки файлов\Логика_v3_разбор_носителя.md». Направления - «_БАЗА\направления.tsv»
+# (только дописывание, действует последняя строка номера), отметки - строки «решения.tsv» новых видов. Расчёт - ядро
+# (hb_core/razbor.py), здесь - снимок входов под замком, проверки, запись и публикация заданий.
+
+KIND_WORDS = {'фото': hb.KIND_MEDIA, 'фото, видео и документы рядом': hb.KIND_MEDIA, 'медиа': hb.KIND_MEDIA,
+              'все': hb.KIND_ALL, 'все файлы': hb.KIND_ALL}
+DEFAULT_DIRECTIONS = [    # ответы владельца 15.11.2026 (В4, В5): у «Семейного архива» 45 и 77, у остальных - свой диск
+    dict(name='Семейный архив', disks=['HDD45', 'HDD77'], kind=hb.KIND_MEDIA, former=[],
+         note='две копии; фото, видео и документы рядом'),
+    dict(name='Работа и Сафари', disks=['HDD78'], kind=hb.KIND_ALL, former=['Сафари', 'Работа'],
+         note='диск 78 «Работа Сафари 6ТБ»; одно направление (В4)'),
+    dict(name='Фильмы', disks=['HDD55'], kind=hb.KIND_ALL, former=[], note='диск 55 My Book 2 ТБ (В5)'),
+    dict(name='Оцифрованные источники', disks=[], kind=hb.KIND_ALL, former=[], note='диск пока не назначен (В5)'),
+    dict(name='Саша, Таня, Наташа', disks=[], kind=hb.KIND_ALL, former=[], note='диск пока не назначен (В5)'),
+    dict(name='Разные', disks=[], kind=hb.KIND_ALL, former=[], note='диск пока не назначен (В5)'),
+]
+
+
+def _read_snapshot():
+    """Обе таблицы целиком в память; подпись - по тем же байтам (спор с GPT, раунд 2, п. 4). Без замка."""
+    dec, dirs = hb.table_bytes(hb.DECISIONS), hb.table_bytes(hb.DIRECTIONS)
+    return dict(decisions=dec, directions=dirs, sig=hb.signature(dec, dirs))
+
+
+def snapshot():
+    """Согласованный снимок таблиц владельца: читается под замком таблиц (никто не пишет в это время)."""
+    with TableLock():
+        return _read_snapshot()
+
+
+def directions(snap=None):
+    return hb.parse_directions((snap or _read_snapshot())['directions'])
+
+
+def _ensure_directions():
+    hb.BASE_DIR.mkdir(parents=True, exist_ok=True)
+    if not hb.DIRECTIONS.exists():
+        hb.DIRECTIONS.write_text(hb.DIRECTION_HEAD + '\n', encoding='utf-8-sig')
+
+
+def _norm_kind(kind):
+    k = (kind or '').strip().lower()
+    if k not in KIND_WORDS:
+        raise Refused('Что копировать: «фото» (фото, видео и документы рядом) или «все» (все файлы).')
+    return KIND_WORDS[k]
+
+
+def direction_preview(num=None, name=None, disks=None, add_disks=(), kind=None, former=(), note=None, dirs=None, c=None):
+    """Новое направление (num=None) или новая версия направления num. Проверки - логика v3, 1.1 и 2.1.
+    disks - заменить список дисков (None - оставить); add_disks - добавить. -> dict(fields, lines, direction)."""
+    dirs = directions() if dirs is None else dirs
+    cur = None
+    if num:
+        n = hb.norm_num(num)
+        cur = dirs.get(n) or hb.find_direction(dirs, num)
+        if not cur:
+            raise Refused(f'Нет направления «{num}». Есть: ' + (', '.join(f'{d.num} {d.name}' for d in dirs.values()) or 'никаких'))
+        num = cur.num
+    else:
+        if not (name or '').strip():
+            raise Refused('Нужно имя нового направления.')
+        num = f'Н{max([hb.num_key(x) for x in dirs] + [0]) + 1}'
+    new_name = (name or (cur.name if cur else '')).strip()
+    err = hb.check_name(new_name)
+    if err:
+        raise Refused(err)
+    for d in dirs.values():
+        if d.num != num and new_name.casefold() in {x.casefold() for x in (d.name,) + d.former}:
+            raise Refused(f'Имя «{new_name}» уже занято направлением {d.num} «{d.name}» (как имя или прежнее имя).')
+    fm = list(cur.former) if cur else []
+    for x in list(former) + ([cur.name] if cur and cur.name != new_name else []):
+        x = x.strip()
+        if x and x.casefold() != new_name.casefold() and x.casefold() not in {y.casefold() for y in fm}:
+            for d in dirs.values():
+                if d.num != num and x.casefold() in {y.casefold() for y in (d.name,) + d.former}:
+                    raise Refused(f'Прежнее имя «{x}» уже у направления {d.num} «{d.name}».')
+            fm.append(x)
+    dl = list(cur.disks) if (cur and disks is None) else list(disks or [])
+    for x in add_disks or ():
+        if x not in dl:
+            dl.append(x)
+    dl = list(dict.fromkeys(x.strip() for x in dl if x.strip()))
+    c = c or db()
+    for x in dl:
+        check_disk(c, x)
+        other = hb.direction_of_disk({k: v for k, v in dirs.items() if k != num}, x)
+        if other:
+            raise Refused(f'Диск {x} уже у направления {other.num} «{other.name}»: один диск - одному направлению.')
+    k = _norm_kind(kind) if kind else (cur.kind if cur else hb.KIND_ALL)
+    nd = hb.Direction(num, new_name, tuple(fm), tuple(dl), k, (note if note is not None else (cur.note if cur else '')).strip())
+    if cur and nd == cur:
+        raise Refused('Ничего не меняется.')
+    lines = [f'{"Изменить" if cur else "Новое направление"} {num} «{nd.name}»: диски {", ".join(nd.disks) or "не назначены"}; '
+             f'что копировать: {nd.kind}.',
+             f'Папка на носителе после переноса: «{nd.folder()}».' if nd.disks else
+             'Без диска: отмечать папки можно, задания не создаются, пока не назначен диск.']
+    if nd.former:
+        lines.append('Прежние имена (старые «раздел: …» с ними сразу относятся к этому направлению): ' + ', '.join(nd.former))
+    if cur and set(cur.disks) != set(nd.disks):
+        lines.append('Смена дисков касается только НОВЫХ заданий; уже созданные требуют свои прежние диски.')
+    return dict(fields=hb.direction_row(nd), lines=lines, direction=nd)
+
+
+def add_direction(note=None, **kw):
+    with TableLock():
+        snap = _read_snapshot()
+        pv = direction_preview(note=note, dirs=hb.parse_directions(snap['directions']), **kw)
+        _ensure_directions()
+        backup(hb.DIRECTIONS)
+        pv['line'] = append_row(hb.DIRECTIONS, pv['fields'])
+    return pv
+
+
+def directions_batch_preview(items, dirs=None):
+    """Несколько направлений одним пакетом: всё или ничего (directions-default)."""
+    dirs = dict(directions() if dirs is None else dirs)
+    c = db()
+    res, lines = [], []
+    for it in items:
+        cur = hb.find_direction(dirs, it['name'], by_num=False)
+        if cur and cur.name == it['name'] and set(cur.disks) >= set(it['disks']):
+            lines.append(f'{cur.num} «{cur.name}» уже есть - пропускаю.')
+            continue
+        pv = direction_preview(num=cur.num if cur else None, name=it['name'], disks=it['disks'] if not cur else None,
+                               add_disks=it['disks'] if cur else (), kind=it['kind'], former=it.get('former', ()),
+                               note=it.get('note', ''), dirs=dirs, c=c)
+        dirs[pv['direction'].num] = pv['direction']
+        res.append(pv['fields'])
+        lines += pv['lines']
+    if not res:
+        raise Refused('Все направления по умолчанию уже заведены - записывать нечего.')
+    return dict(fields=res, lines=lines)
+
+
+def add_directions_batch(items):
+    with TableLock():
+        snap = _read_snapshot()
+        pv = directions_batch_preview(items, hb.parse_directions(snap['directions']))
+        _ensure_directions()
+        backup(hb.DIRECTIONS)
+        pv['line'] = append_rows(hb.DIRECTIONS, pv['fields'])
+    return pv
+
+
+def mark_verdict(text, dirs):
+    """Текст отметки владельца -> (решение для решения.tsv, направление или None)."""
+    t = (text or '').strip()
+    low = t.lower()
+    if low == hb.MARK_SKIP:
+        return hb.MARK_SKIP, None
+    if low == hb.MARK_INHERIT:
+        return hb.MARK_INHERIT, None
+    if low.startswith(hb.MARK_DIR):
+        t = t.split(':', 1)[1].strip()
+    d = hb.find_direction(dirs, t)
+    if not d:
+        raise Refused(f'Нет направления «{t}». Есть: ' + (', '.join(f'{x.num} {x.name}' for x in dirs.values()) or
+                                                          'никаких (заведите: directions-default или direction-add)')
+                      + '; или «не копировать», «как у родителя».')
+    return d.verdict(), d
+
+
+def _real_path(c, disk, path, roots=()):
+    """Путь как в базе: точный, иначе - папка без учёта регистра (folders.folder_lc), иначе - тот же исходный путь
+    внутри служебной папки переноса (папка уже перенесена, владелец назвал её исходный путь)."""
+    for cand in [path] + [r + SEP + path for r in sorted(roots)]:
+        if files_under(c, disk, cand, 1)[0]:
+            return cand
+        r = c.execute('select folder from folders where disk=? and folder_lc=?', (disk, cand.lower())).fetchone()
+        if r:
+            return r[0]
+    raise Refused(f'В базе нет файлов по пути {disk}\\{path}. Проверьте путь (папку можно выбрать по дереву базы).')
+
+
+def marks_preview(disk, rows, c=None, snap=None):
+    """Отметки разбора одним пакетом: rows - [(путь, отметка)], путь '' - весь носитель (режим разбора).
+    Отметка: направление (номер или имя), «не копировать», «как у родителя». Путь проверяется физически (есть в базе),
+    затем пишется ИСХОДНЫМ (без «ПЕРЕНЕСЕНО → …» / «Скопировано на …»). Совпадает с действующей - пропускается."""
+    c = c or db()
+    check_disk(c, disk)
+    snap = snap or _read_snapshot()
+    dirs = hb.parse_directions(snap['directions'])
+    ms = hb.MarkSet.build(hb.mark_rows(disk, snap['decisions']), dirs)
+    roots = hb.moved_roots(c, disk)
+    fields, lines, skipped, seen = [], [], [], set()
+    for path, text in rows:
+        path = (path or '').strip().strip(SEP)
+        if path:
+            real = _real_path(c, disk, check_rel(path), roots)
+            orig, inside = hb.original_of(real, roots)
+            if not orig:
+                raise Refused(f'«{real}» - служебная папка переноса; отметьте папки внутри неё.')
+        else:
+            real, orig, inside = '', '', False
+        verdict, d = mark_verdict(text, dirs)
+        if orig.lower() in seen:
+            raise Refused(f'{disk}\\{orig or "(весь носитель)"}: отмечено в пакете дважды. Ничего не записано.')
+        seen.add(orig.lower())
+        cur = ms.get(orig)
+        where = f'{disk}\\{orig}' if orig else f'{disk} (весь носитель)'
+        if verdict == hb.MARK_INHERIT:
+            if cur is None:
+                skipped.append(f'{where}: своей отметки нет - уже «как у родителя»')
+                continue
+        elif cur is not None and hb.parse_verdict(verdict, dirs)[:2] == (cur.kind, cur.num):
+            skipped.append(f'{where}: уже отмечено так ({hb.mark_text(cur, dirs)})')
+            continue
+        n, size, _ = files_under(c, disk, real)
+        what = hb.mark_text(None if verdict == hb.MARK_INHERIT else hb.Mark(*hb.parse_verdict(verdict, dirs)[:3]), dirs)
+        line = f'{where} → {what}: {n} файлов, {hb.gb(size)} ГБ' + (' (папка уже перенесена; отметка - по исходному пути)'
+                                                                    if inside else '')
+        if d and disk in d.disks:
+            line += f' - {disk} сам диск этого направления: копируется на остальные его диски, перемещать нельзя'
+        if verdict == hb.MARK_INHERIT and cur and cur.legacy:
+            line += f' (старое решение «{cur.verdict}» для старых команд остаётся в силе)'
+        lines.append(line)
+        fields.append([disk, orig, verdict])
+    if not fields:
+        raise Refused('Записывать нечего: ' + '; '.join(skipped))
+    lines.insert(0, f'Будет записано отметок: {len(fields)}.')
+    if skipped:
+        lines.append('Пропущено (уже так): ' + '; '.join(skipped))
+    return dict(fields=fields, lines=lines, skipped=skipped)
+
+
+def add_marks_batch(disk, rows, note=''):
+    """Запись отметок пакетом, всё или ничего (как add_manual_batch): под замком - снова все проверки, копия таблицы,
+    одна запись на диск. Решения в базу не применяются (читаются при каждом ответе)."""
+    with TableLock():
+        pv = marks_preview(disk, rows, snap=_read_snapshot())
+        hb.ensure_tables()
+        backup(hb.DECISIONS)
+        first = append_rows(hb.DECISIONS, [f + [note or ''] for f in pv['fields']])
+    pv['line'] = first
+    return pv
+
+
+def _plan(disk, drafts=(), detail=False, snap=None):
+    """Снимок таблиц + одно соединение с одним поколением базы (транзакция чтения) -> ядро planner."""
+    snap = snap or snapshot()
+    c = db()
+    check_disk(c, disk)
+    c.execute('begin')                                  # всё дальнейшее чтение - одно состояние базы
+    try:
+        dirs = hb.parse_directions(snap['directions'])
+        ms = hb.MarkSet.build(hb.mark_rows(disk, snap['decisions']), dirs, drafts)
+        P = hb.planner(c, disk, dirs, ms, detail)
+        gen = (c.execute("select value from meta where key='built'").fetchone() or [''])[0]
+    finally:
+        c.rollback()
+    P.info['signature'] = hb.signature(snap['sig'].encode(), str(gen).encode())
+    P.info['built'] = gen
+    return P
+
+
+def razbor(disk, drafts=()):
+    """Итог разбора носителя (без записи). drafts - несохранённые отметки окна [(путь, отметка)]: только для показа."""
+    return _plan(disk, drafts)
+
+
+def free_space(disks_):
+    """Свободное место подключённых дисков: {диск: (буква, ГиБ)}. Диски не читаются (только размер тома)."""
+    serial_of = {v: k for k, v in hb.serial_map(bp.find_jobs()).items()}
+    try:
+        vols = volumes()
+    except (OSError, AttributeError):
+        vols = {}
+    res = {}
+    for d in disks_:
+        letter = vols.get(serial_of.get(d, '?'))
+        if letter:
+            try:
+                res[d] = (letter, shutil.disk_usage(letter + '\\').free / hb.GIB)
+            except OSError:
+                pass
+    return res
+
+
+def _task_meta(task):
+    import json
+    try:
+        return json.loads((Path(task) / 'разбор.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path, data):
+    """Целиком и заменой файла: читатель видит либо старое, либо новое содержимое."""
+    import json
+    tmp = Path(str(path) + '.tmp')
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1) + '\n', encoding='utf-8')
+    os.replace(tmp, path)
+
+
+def razbor_tasks(disk, dry=True):
+    """Задания копирования по отметкам: одно задание - одна группа (решающая отметка + папка) и её направление.
+    Всё под замком таблиц: снимок, расчёт, проверка имён, публикация (два генератора одновременно не работают).
+    Публикация: манифест «создаётся» -> папки собираются в «_БАЗА\\разборы\\<…>.tmp» и переносятся в «Запускаемые
+    скрипты» -> манифест «готово». Повтор после сбоя: задание с тем же ключом уже есть - «уже подготовлено»,
+    создаются только недостающие. Ничего не копирует и не запускает. -> dict."""
+    with TableLock():
+        P = _plan(disk, detail=True, snap=_read_snapshot())
+        if P.errors:
+            raise Refused('Итог разбора не сходится (' + '; '.join(P.errors) + ') - задания не создаются.')
+        serials = {v: k for k, v in hb.serial_map(bp.find_jobs()).items()}
+        specs = hb.task_specs(P, serials)
+        states = hb.group_states(P)
+        for s in specs:
+            base, i = s['name'], 2
+            while True:
+                meta = _task_meta(hb.TASKS / s['name']) if (hb.TASKS / s['name']).exists() else None
+                if not (hb.TASKS / s['name']).exists():
+                    break
+                if meta and meta.get('носитель') == disk and meta.get('ключ') == s['key'] and meta.get('направление') == s['num']:
+                    s['exists'] = True
+                    break
+                s['name'], i = f'{base} ({i})', i + 1
+        res = dict(plan=P, specs=specs, states=states, dry=dry, manifest=None)
+        if dry or not [s for s in specs if not s.get('exists')]:
+            return res
+        stamp = time.strftime('%Y-%m-%d %H-%M-%S')
+        hb.RAZBORY.mkdir(parents=True, exist_ok=True)
+        manifest = hb.RAZBORY / f'{disk} {stamp}.json'
+        man = {'носитель': disk, 'дата': time.strftime('%d.%m.%Y %H:%M'), 'статус': 'создаётся',
+               'подпись входов': P.info['signature'], 'поколение базы': P.info.get('built'),
+               'носитель - диск направления': P.info.get('is_target') or [],
+               'перемещать на носителе': not P.info.get('is_target'),
+               'отметки': [dict(путь=m.path, решение=m.verdict, строка=m.row) for m in P.marks.by_key.values()],
+               'задания': [dict(имя=s['name'], папка=s['folder'], направление=s['num'], диски=s['disks'], цели=s['targets'],
+                                файлов=s['files'], байт=s['bytes'], уже_было=bool(s.get('exists'))) for s in specs],
+               'группы': states}
+        _write_json(manifest, man)
+        stage = hb.RAZBORY / f'{disk} {stamp}.tmp'
+        stage.mkdir()
+        hb.TASKS.mkdir(parents=True, exist_ok=True)
+        for s in specs:
+            if s.get('exists'):
+                continue
+            t = stage / s['name']
+            t.mkdir()
+            with io.open(t / 'список.tsv', 'w', encoding='utf-8', newline='\n') as f:
+                for r in s['rows']:
+                    f.write('\t'.join(map(str, r)) + '\n')
+            with io.open(t / 'тома.tsv', 'w', encoding='utf-8', newline='\n') as f:
+                f.write(f'{disk}\t{s["serials"][disk]}\n')
+                for d in s['targets']:
+                    f.write(f'{d}\t{s["serials"][d]}\n')
+            for name in ('Копировать.ps1', 'Запустить.cmd'):
+                shutil.copy2(hb.TEMPLATE / name, t / name)
+            _write_json(t / 'разбор.json', {
+                'носитель': disk, 'ключ': s['key'], 'папка': s['folder'], 'направление': s['num'],
+                'имя направления': s['direction'], 'обязательные диски': s['disks'], 'цели': s['targets'],
+                'что копировать': s['kind'], 'отметка': s['mark'], 'строка отметки': s['mark_row'],
+                'подпись входов': P.info['signature'], 'дата': man['дата'], 'манифест': manifest.name,
+                'перемещать на носителе': not P.info.get('is_target'),
+                'зависимые': {d: [list(x) for x in v] for d, v in s['deps'].items() if v}})
+            os.replace(t, hb.TASKS / s['name'])
+        try:
+            stage.rmdir()
+        except OSError:
+            pass
+        man['статус'] = 'готово'
+        _write_json(manifest, man)
+        res['manifest'] = manifest
+    return res
+
+
+def contested(disk, folder):
+    """«Пересчитать хеши спорных файлов»: папки по дискам и подключён ли диск. -> [(диск, буква или '', [(папка, n)])]."""
+    c = db()
+    check_disk(c, disk)
+    got = hb.contested(c, disk, folder)
+    free = free_space(list(got))
+    return [(d, free.get(d, ('', 0))[0], got[d]) for d in sorted(got)]

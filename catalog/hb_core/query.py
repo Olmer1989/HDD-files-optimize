@@ -8,7 +8,7 @@ from pathlib import Path
 from hb_core import paths
 from hb_core.paths import journal_paths
 from hb_core.consts import CLASS_ORDER, C_EMPTY, C_JUNK, MAIN, NOHASH_NOTE, SEP, SIGNIFICANT
-from hb_core.util import class_of, gb, original_path, out, prefix_cond, rel_of
+from hb_core.util import class_of, gb, is_v3_mark, original_path, out, prefix_cond, rel_of
 from hb_core.report import save, table
 from hb_core.sources import log_time, read_table, read_tsv, serial_map
 
@@ -18,8 +18,8 @@ def decisions_for(disk):
     res = []
     for f in read_table(paths.DECISIONS)[1:]:
         f = [x.strip() for x in f] + [''] * 4
-        if f[0] in (disk, '*') and f[2] and not f[1].lower().startswith('класс:'):
-            res.append((f[1].rstrip(SEP), f[2]))
+        if f[0] in (disk, '*') and f[2] and not f[1].lower().startswith('класс:') and not is_v3_mark(f[2]):
+            res.append((f[1].rstrip(SEP), f[2]))        # отметки разбора v3 старые команды не видят (логика v3, 1.3)
     return res
 
 
