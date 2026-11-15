@@ -44,6 +44,8 @@ from pathlib import Path
 import hb_cli                                   # только описание команд (commands()); main/_run не вызываются
 from hb_core import api as hb
 import service as sv
+from disk_ui import (ON_COLOR, OFF_COLOR, SIZE_RE, as_row, disk_key, disk_text, disk_title,  # noqa: F401
+                     split_disks, style_item)   # общее с разделом «Диски и папки»
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QGuiApplication
@@ -78,8 +80,6 @@ CHOOSE_DISK = '— выберите носитель —'
 ALL_DISKS = 'Все носители'
 DEPTHS = [(1, '1 — только папки первого уровня'), (2, '2 — и их подпапки'), (3, '3 уровня'), (4, '4 уровня'),
           (5, '5 уровней'), (6, '6 уровней'), (7, '7 уровней'), (0, 'Все уровни вложенности')]   # 0 - все уровни
-ON_COLOR, OFF_COLOR = QColor('#1b5e20'), QColor('#8a8a8a')
-SIZE_RE = re.compile(r'^\d[\d,.]*\s*\S+$')
 
 
 def python_exe():
@@ -190,59 +190,6 @@ def gray(text, small=True):
 
 
 # ---------- носители: подключённые сверху ----------
-
-def as_row(r):
-    return r if isinstance(r, dict) else {'disk': str(r), 'label': '', 'letter': ''}
-
-
-def disk_key(d):
-    m = re.match(r'(\D*)(\d*)', d)
-    return (0 if m.group(1) == 'HDD' else 1, m.group(1), int(m.group(2) or 0), d)     # диски, потом флешки
-
-
-def disk_title(r):
-    """Понятное название из описи: «метка тома (марка, объём)»; без метки - модель и объём."""
-    parts = [x.strip() for x in (r.get('label') or '').split(' - ') if x.strip()]
-    if not parts:
-        return ''
-    model = parts[0]
-    size = parts[1] if len(parts) > 1 and SIZE_RE.match(parts[1]) else ''
-    vol = ' - '.join(parts[2:] if size else parts[1:])
-    brand = model.split()[0] if model.split() else ''
-    brand = brand if (brand.isalpha() or '_' in brand) and not any(ch.isdigit() for ch in brand) else ''
-    brief = ' '.join(x for x in (brand, size) if x)
-    if vol:
-        return f'{vol} ({brief})' if brief else vol
-    return ', '.join(x for x in (model, size) if x)
-
-
-def disk_text(r):
-    """«● HDD54 — E: — Исходники (ADATA 2 ТБ)» или «HDD61 — ACASIS EC-7352, 750 ГБ — не подключён»."""
-    r = as_row(r)
-    name = disk_title(r)
-    if r.get('letter'):
-        return ' — '.join(x for x in (f'● {r["disk"]}', r['letter'], name) if x)
-    return ' — '.join(x for x in (r['disk'], name, 'не подключён') if x)
-
-
-def split_disks(rows):
-    """(подключённые сейчас, остальные), каждые по номеру носителя."""
-    rows = [as_row(r) for r in rows]
-    on = sorted((r for r in rows if r.get('letter')), key=lambda r: disk_key(r['disk']))
-    off = sorted((r for r in rows if not r.get('letter')), key=lambda r: disk_key(r['disk']))
-    return on, off
-
-
-def style_item(set_data, connected):
-    """Подключённый - жирным и зелёным, отключённый - серым (для пунктов списка, дерева и галочек)."""
-    if connected:
-        f = QFont()
-        f.setBold(True)
-        set_data(Qt.FontRole, f)
-        set_data(Qt.ForegroundRole, QBrush(ON_COLOR))
-    else:
-        set_data(Qt.ForegroundRole, QBrush(OFF_COLOR))
-
 
 class DiskCombo(QComboBox):
     """Выбор одного носителя: подключённые сверху (●, жирным), разделитель, отключённые серым.

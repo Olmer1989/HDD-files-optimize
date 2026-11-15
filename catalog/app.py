@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hb_core import api as hb  # noqa: E402  (ядро; hashbase.py - только обёртка командной строки)
 import service as sv           # noqa: E402
 import commands_page           # noqa: E402
+import disk_ui                 # noqa: E402  (порядок и оформление носителей - общее с «Командами»)
 import rescan_dialog           # noqa: E402
 import explorer_page           # noqa: E402
 
@@ -260,12 +261,12 @@ class TasksPage(QWidget):
 # ---------- Диски и папки ----------
 
 class DisksPage(QWidget):
-    HEAD = ['Диск', 'Метка', 'Сейчас', 'Файлов', 'ГБ', 'Опись', 'Состояние описи', 'Частичных сканов']
+    HEAD = ['Диск', 'Название', 'Сейчас', 'Файлов', 'ГБ', 'Опись', 'Состояние описи', 'Частичных сканов']
     TREE = ['Папка', 'Файлов', 'ГБ', 'фото', 'видео', 'тексты', 'прочие', 'мусор', 'Решение владельца']
 
     def __init__(self, win):
         super().__init__()
-        self.win, self.rows, self.disk = win, [], None
+        self.win, self.rows, self.disk, self.found = win, [], None, False   # found - показаны найденные папки
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
         top.addWidget(QLabel('<b>Диски и папки</b>'))
@@ -315,20 +316,48 @@ class DisksPage(QWidget):
         lay.addWidget(split)
 
     def refresh(self):
+        """При каждом показе раздела и по «Обновить»: носители и какие из них подключены сейчас."""
         self.win.bg.run(sv.disks, ok=self.render)
 
     def render(self, rows):
+        """Подключённые сейчас - первыми (● жирным, зелёным), затем HDD по номеру, флешки в конце.
+        Выбор сохраняется; если ничего не выбрано - выбирается первый подключённый и показываются его папки."""
+        rows = disk_ui.ordered(rows)
         self.rows = rows
+        self.t.blockSignals(True)
+        self.t.clearSelection()
         self.t.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            vals = [r['disk'], r['label'], r['letter'] or '—', f'{r["files"]:,}'.replace(',', ' '), gib(r['gib']),
-                    r['scanned'], r['status'], r['partial'] or '']
+            on = bool(r.get('letter'))
+            name = disk_ui.disk_title(r) or '—'
+            vals = [f'● {r["disk"]}' if on else r['disk'], name, r['letter'] or '—',
+                    f'{r["files"]:,}'.replace(',', ' '), gib(r['gib']), r['scanned'],
+                    disk_ui.status_text(r['status']), r['partial'] or '']
+            tips = {1: f'{r["disk"]}: {r["label"]}' if r.get('label') else '',
+                    6: f'В описи: {r["status"]}' if r.get('status') else ''}
             for j, v in enumerate(vals):
-                self.t.setItem(i, j, cell(v, right=j in (3, 4, 7), color='#2e7d32' if j == 2 and r['letter'] else None))
+                it = cell(v, right=j in (3, 4, 7))
+                it.setData(Qt.UserRole, r['disk'])
+                if tips.get(j):
+                    it.setToolTip(tips[j])
+                if on:
+                    disk_ui.style_item(it.setData, True)
+                self.t.setItem(i, j, it)
+        self.t.blockSignals(False)
+        disks = [r['disk'] for r in rows]
+        if self.disk in disks:                   # тот же носитель: дерево папок не перестраивать
+            self.t.blockSignals(True)
+            self.t.setCurrentCell(disks.index(self.disk), 0)
+            self.t.blockSignals(False)
+        elif not self.found:
+            first = next((i for i, r in enumerate(rows) if r.get('letter')), None)
+            if first is not None:
+                self.t.setCurrentCell(first, 0)  # -> pick(): папки верхнего уровня
 
     def pick(self):
         i = self.t.currentRow()
         if 0 <= i < len(self.rows):
+            self.found = False
             self.disk = self.rows[i]['disk']
             self.tree.clear()
             self.info.setText('')
@@ -416,7 +445,10 @@ class DisksPage(QWidget):
 
         def show(rows):
             self.tree.clear()
-            self.disk = None
+            self.disk, self.found = None, True
+            self.t.blockSignals(True)
+            self.t.clearSelection()
+            self.t.blockSignals(False)
             for r in rows:
                 it = QTreeWidgetItem([f'{r["disk"]}\\{r["path"]}', f'{r["files"]:,}'.replace(',', ' '), gib(r['gib'])])
                 it.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
