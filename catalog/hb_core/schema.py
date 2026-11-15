@@ -20,6 +20,7 @@ INDEXES = [
     'create index if not exists files_sha on files(sha, disk) where sha is not null',
     'create index if not exists files_exp on files(sha_exp, disk) where sha_exp is not null',
     'create index if not exists files_name on files(name_lc, size, disk)',
+    'create index if not exists files_sizetime on files(size, mtime) where size >= 1048576',   # «возможно, переименована»
     'create index if not exists issues_disk on issues(disk)',
 ]
 DIGEST_TABLES = {          # что сравнивается при самопроверке rebuild (служебные applied и meta - нет)

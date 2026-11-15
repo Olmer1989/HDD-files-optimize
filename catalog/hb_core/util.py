@@ -5,10 +5,11 @@ import csv
 import hashlib
 import io
 import os
+import re
 import unicodedata
 from pathlib import Path
 import build_pilot as bp
-from hb_core.consts import C_BIGMEDIA, C_EMPTY, C_JUNK, C_MEDIA, C_OTHER, EXT_CLASS, GIB, JUNK_NAMES, MOVED_PREFIX, SEP, TRASH_DIR
+from hb_core.consts import C_BIGMEDIA, C_EMPTY, C_JUNK, C_MEDIA, C_OTHER, EXT_CLASS, GIB, JUNK_NAMES, MAIN, MOVED_PREFIX, SEP, TRASH_DIR
 
 
 def name_key(path):
@@ -112,6 +113,27 @@ def is_drop(verdict):
 
 def is_moved_dir(part):
     return part.startswith(MOVED_PREFIX) or part == TRASH_DIR
+
+
+def _disk_order(disk):
+    m = re.match(r'^(\D*)(\d+)(.*)$', disk)
+    return (m.group(1).upper(), int(m.group(2)), m.group(3)) if m else (disk.upper(), 0, '')
+
+
+def moved_folder(targets):
+    """Папка переноса на источнике по набору дисков, где копии подтверждены (15.11.2026, любые цели):
+    «ПЕРЕНЕСЕНО → 78», «ПЕРЕНЕСЕНО → 45 и 78», «ПЕРЕНЕСЕНО → 45, 77 и 78». Номер - имя диска без «HDD»
+    (Flash05 - как есть). Прежние имена сохранены: {45, 77} - «45 и 77», {45} - «только 45», {77} - «только 77».
+    Метка диска в имя не входит: она меняется, а у одного набора целей папка должна быть одна."""
+    ts = sorted(set(targets), key=_disk_order)
+    if not ts:
+        raise ValueError('нет дисков-целей')
+    if ts == list(MAIN):
+        return MOVED_PREFIX + '45 и 77'
+    if len(ts) == 1 and ts[0] in MAIN:
+        return MOVED_PREFIX + 'только ' + ts[0][3:]
+    nums = [d[3:] if d.upper().startswith('HDD') and d[3:].isdigit() else d for d in ts]
+    return MOVED_PREFIX + (nums[0] if len(nums) == 1 else ', '.join(nums[:-1]) + ' и ' + nums[-1])
 
 
 def original_path(path):

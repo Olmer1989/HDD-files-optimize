@@ -1,7 +1,7 @@
 """Применение модуля «журнал скрипта» (копирование, перемещение, корзина)."""
 # Перенесено из hashbase.py механически 15.11.2026 (разбивка на модули); логика не менялась.
 from pathlib import Path
-from hb_core.consts import EV_COPY, EV_SIZE, FOLDER_MOVES, OLD_LOGS, SEP
+from hb_core.consts import EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, OLD_LOGS, SEP
 from hb_core.util import moved_rel, prefix_cond, rel_of
 from hb_core.sources import log_time, read_tsv
 from hb_core.apply_common import put_row
@@ -52,9 +52,18 @@ def apply_log(c, log, jobs, serials, report, seen, rows=None, start=0):
                 # скрипт сам прочитал и записал эти байты и посчитал их хеш
                 put_row(c, disk, rel_of(f[i_dst])[1], int(f[i_s]), log_sha, got[2] if got else None, EV_COPY, None, origin)
             else:
-                # «уже есть» или копия, сверенная только по размеру: содержимое приёмника никто не читал
-                put_row(c, disk, rel_of(f[i_dst])[1], int(f[i_s]), None, got[2] if got else None, EV_SIZE,
-                        log_sha or src_sha, origin)
+                # «уже есть» или копия, сверенная только по размеру: содержимое приёмника никто не читал.
+                # Но если по этому пути цели уже есть ПОДТВЕРЖДЁННАЯ запись (S/C) того же содержимого (тот же хеш, а
+                # если хеш неизвестен - тот же размер) - например, копирование остановили клавишей Q и запустили
+                # снова, - «уже есть» её не понижает до Z (15.11.2026).
+                dst = rel_of(f[i_dst])[1]
+                want = log_sha or src_sha
+                have = c.execute('select sha, size, ev from files where disk=? and path=?', (disk, dst)).fetchone()
+                if have and have[2] in (EV_SCAN, EV_COPY) and have[0] and \
+                        (have[0] == want if want else have[1] == int(f[i_s])):
+                    added += 1
+                    continue
+                put_row(c, disk, dst, int(f[i_s]), None, got[2] if got else None, EV_SIZE, want, origin)
                 weak += 1
             added += 1
     elif task.name in OLD_LOGS and 'откуда' in head and 'куда' in head:

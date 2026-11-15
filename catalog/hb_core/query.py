@@ -75,6 +75,95 @@ def presence(c, disk, prefix, exclude=None, weak=False):
     return c.execute(q, params + ([MAIN[0], MAIN[1]] if weak else []) + [disk] + args).fetchall()
 
 
+def _probe(c, disk, paths_):
+    """Файлы диска по списку путей: {путь: (name_lc, size, mtime, sha)}. Порядок соединения задан явно (CROSS JOIN):
+    список снаружи, files - по первичному ключу (disk, path). Без этого SQLite (без ANALYZE) выбирает внешним циклом
+    files диска - миллионы строк - и ответ идёт десятки минут."""
+    c.execute('create temp table if not exists probe_p(path text primary key)')
+    c.execute('delete from probe_p')
+    c.executemany('insert or ignore into probe_p values (?)', ((x,) for x in paths_))
+    return {r[0]: r[1:] for r in c.execute('select f.path, f.name_lc, f.size, f.mtime, f.sha from probe_p q '
+                                           'cross join files f on f.disk=? and f.path=q.path where f.size>0', (disk,))}
+
+
+def _scope_sql(disk, targets, exclude, col='g', others=False):
+    sql, args = '', []
+    if others:                                   # только ДРУГИЕ диски (only: «больше нигде»)
+        sql += f' and {col}.disk<>?'
+        args.append(disk)
+    if targets:
+        sql += f' and {col}.disk in ({",".join("?" * len(targets))})'
+        args += list(targets)
+    if exclude:
+        ec, ea = prefix_cond(f'{col}.path', exclude[1])
+        sql += f' and not ({col}.disk=? and {ec})'
+        args += [exclude[0]] + ea
+    return sql, args
+
+
+def _keys(c, name, cols, values):
+    c.execute(f'create temp table if not exists {name}({", ".join(cols)}, primary key({", ".join(cols)}))')
+    c.execute(f'delete from {name}')
+    c.executemany(f'insert or ignore into {name} values ({",".join("?" * len(cols))})', values)
+
+
+def candidates(c, disk, paths_, targets=None, exclude=None, others=False):
+    """Совпадение по имени и размеру для файлов С хешем там, где подтверждённой копии нет: файл с тем же именем
+    (без регистра, NFC) и размером, у которого хеш НЕ СЧИТАЛСЯ (ev='N'). Строки Z/U/X (ожидаемый хеш) сюда не входят:
+    о них говорит sha_exp; строка S/C с другим sha - другое содержимое. «По хешу или по имени» решает наличие хеша у
+    ОБЕИХ сторон, а не класс файла (раздел 11 правил сборки). Копией совпадение не считается.
+    paths_ - пути файлов диска disk; targets - только эти диски (иначе любые); exclude=(диск, папка) - не считать то,
+    что само собираются удалить. Счёт по ключам (имя, размер): каждый ключ перебирается по индексу один раз.
+    -> {путь: {диск: путь кандидата}}."""
+    files = _probe(c, disk, list(paths_))
+    if not files:
+        return {}
+    _keys(c, 'cand_k', ('name_lc', 'size'), {(v[0], v[1]) for v in files.values()})
+    sql, args = _scope_sql(disk, targets, exclude, others=others)
+    per_key = {}
+    q = f"""select k.name_lc, k.size, g.disk, min(g.path) from cand_k k cross join files g indexed by files_name
+                on g.name_lc=k.name_lc and g.size=k.size
+            where g.ev='N' and g.sha is null and g.sha_exp is null{sql} group by 1, 2, 3"""
+    for nm, s, gd, gp in c.execute(q, args):
+        per_key.setdefault((nm, s), {})[gd] = gp
+    return {p: per_key[(v[0], v[1])] for p, v in files.items() if (v[0], v[1]) in per_key}
+
+
+RENAMED_MIN = 1048576       # подсказка «возможно, переименована» - только для файлов от 1 МБ
+
+
+def renamed(c, disk, paths_, targets=None, exclude=None, others=False):
+    """Подсказка «возможно, переименована»: файл того же размера и той же даты изменения (mtime, секунды) с ДРУГИМ
+    именем; только от 1 МБ. Не копия и не довод: итоги и вердикты не меняет, последнее слово - за хешем. Пара, где у
+    обоих файлов есть подтверждённый хеш и он разный, подсказкой не бывает. Индекс files_sizetime (size, mtime)
+    where size >= 1 МБ; счёт по ключам (размер, дата). -> {путь: {диск: путь кандидата}}."""
+    files = {p: v for p, v in _probe(c, disk, list(paths_)).items() if v[1] >= RENAMED_MIN and v[2] is not None}
+    if not files:
+        return {}
+    _keys(c, 'ren_k', ('size', 'mtime'), {(v[1], v[2]) for v in files.values()})
+    sql, args = _scope_sql(disk, targets, exclude, others=others)
+    per_key = {}
+    q = f"""select k.size, k.mtime, g.disk, g.name_lc, g.sha, min(g.path) from ren_k k
+                cross join files g indexed by files_sizetime on g.size=k.size and g.mtime=k.mtime
+            where g.size >= {RENAMED_MIN}{sql} group by 1, 2, 3, 4, 5"""
+    for s, mt, gd, nm, sha, gp in c.execute(q, args):
+        per_key.setdefault((s, mt), []).append((gd, nm, sha, gp))
+    res = {}
+    for p, (nm, s, mt, sha) in files.items():
+        for gd, gnm, gsha, gp in per_key.get((s, mt), ()):
+            if gnm == nm or (sha and gsha and sha != gsha):
+                continue
+            res.setdefault(p, {}).setdefault(gd, gp)
+    return res
+
+
+NAME_ONLY = 'сравнение только по имени и размеру'
+CAND_NOTE = (NAME_ONLY + ': у копии хеш не считался, копией не считается; подтвердить - пересканировать папку с копией '
+             '(хеш считается у всех файлов)')
+RENAMED_NOTE = ('возможно, переименована: на другом диске есть файл того же размера и той же даты изменения с другим '
+                'именем; совпадают только размер и дата - копией не считается, проверит только хеш')
+
+
 def issues_for(c, disk, folder):
     """Места, которые сканер не смог прочитать и которые задевают папку (внутри неё или выше неё)."""
     base = (folder or '').rstrip(SEP)
@@ -105,15 +194,26 @@ def folder_key(path, prefix, depth):
 def unhashed(c, disk, prefix):
     """Файлы без хеша: (path, size, name_lc, класс, на скольких ДРУГИХ дисках есть файл с тем же именем и размером,
     есть ли второй такой же на этом диске)."""
-    cond, args = prefix_cond('f.path', prefix)
-    q = f'''select f.path, f.size, f.name_lc,
-                   (select count(distinct g.disk) from files g
-                     where g.name_lc=f.name_lc and g.size=f.size and g.disk<>f.disk),
-                   exists(select 1 from files g
-                     where g.name_lc=f.name_lc and g.size=f.size and g.disk=f.disk and g.path<>f.path)
-            from files f where f.disk=? and f.sha is null and {cond}'''
-    return [(p, s or 0, nm or '', class_of(p, nm or '', s or 0), others, dup)
-            for p, s, nm, others, dup in c.execute(q, [disk] + args)]
+    # Счёт по КЛЮЧАМ (имя, размер), а не по файлам: раньше подзапрос на каждый файл перебирал всех его тёзок, и у
+    # диска с миллионами одинаковых служебных файлов (кэш монтажа) ответ шёл минутами (only HDD09 - 7 минут).
+    # Теперь каждый ключ считается один раз: строки файлов-тёзок перебираются по индексу files_name один раз.
+    cond, args = prefix_cond('path', prefix)
+    c.execute('create temp table if not exists uh_keys(name_lc text, size integer, others integer, here integer, '
+              'primary key(name_lc, size))')
+    c.execute('delete from uh_keys')
+    c.execute(f'insert or ignore into uh_keys(name_lc, size) select name_lc, size from files '
+              f'where disk=? and sha is null and {cond}', [disk] + args)
+    c.execute('''update uh_keys set
+                   others = (select count(distinct g.disk) from files g indexed by files_name
+                             where g.name_lc=uh_keys.name_lc and g.size=uh_keys.size and g.disk<>?),
+                   here = (select count(*) from files g indexed by files_name
+                           where g.name_lc=uh_keys.name_lc and g.size=uh_keys.size and g.disk=?)''', (disk, disk))
+    keys = {(nm, s): (o, h) for nm, s, o, h in c.execute('select name_lc, size, others, here from uh_keys')}
+    res = []
+    for p, s, nm in c.execute(f'select path, size, name_lc from files where disk=? and sha is null and {cond}', [disk] + args):
+        others, here = keys.get((nm, s), (0, 1))
+        res.append((p, s or 0, nm or '', class_of(p, nm or '', s or 0), others, here > 1))
+    return res
 
 
 def namesakes(c, disk, names):
@@ -165,6 +265,11 @@ def unhashed_report(c, disk, prefix, decs, save_name):
             root_unf += not parts
             detail.append([p, s, k, nm, 'есть второй такой же файл на этом диске' if dup else ''])
     other_version = namesakes(c, disk, {d[3] for d in detail}) if detail else set()
+    hint = renamed(c, disk, [d[0] for d in detail], others=True)
+    for d in detail:
+        if d[0] in hint:
+            d[4] = (d[4] + '; ' if d[4] else '') + 'возможно, переименована: ' + ', '.join(
+                f'{k}: {v}' for k, v in sorted(hint[d[0]].items()))
     for d in detail:
         if d[3] in other_version:
             d[4] = (d[4] + '; ' if d[4] else '') + 'на других дисках есть файл с тем же именем, но другого размера'
@@ -196,6 +301,9 @@ def unhashed_report(c, disk, prefix, decs, save_name):
     n_ver = sum(1 for d in detail if d[3] in other_version)
     if n_ver:
         out(f'Из ненайденных у {n_ver} файлов на других дисках есть тёзка другого размера - возможно, другая версия.')
+    if hint:
+        out(f'Подсказка: у {len(hint)} ненайденных файлов от 1 МБ на других дисках есть файл того же размера и даты с другим '
+            f'именем ({RENAMED_NOTE}).')
     if decided:
         out(f'Не показано по решениям пользователя: {decided} файлов.')
     path = save(save_name, ('путь', 'размер', 'класс', 'пометка'), sorted((d[0], d[1], d[2], d[4]) for d in detail))
@@ -234,20 +342,41 @@ def where_unhashed(c, disk, path, has_hashed):
             out('В базе нет файлов по этому пути (проверьте написание пути и номер диска).')
         return
     found, same_date, sample, hit = collections.defaultdict(set), collections.Counter(), {}, set()
-    q = f'''select f.path, g.disk, g.path, g.mtime from files f join files g on g.name_lc=f.name_lc and g.size=f.size
-            where f.disk=? and f.sha is null and f.size>0 and {cond} and not (g.disk=f.disk and g.path=f.path)'''
-    for p, gd, gp, gmt in c.execute(q, [disk] + args):
-        if p not in mine or p in found[gd]:
-            continue
-        found[gd].add(p); hit.add(p)
-        same_date[gd] += bool(gmt and gmt == mine[p][2])
-        sample.setdefault(gd, gp)
+    # По ключам (имя, размер, диск), а не по парам файлов: у папки с тысячами одинаковых файлов (кэш монтажа) пары
+    # файл x тёзка - квадрат. Каждый ключ перебирается по индексу files_name один раз.
+    c.execute('create temp table if not exists wu_keys(name_lc text, size integer, primary key(name_lc, size))')
+    c.execute('delete from wu_keys')
+    c.executemany('insert or ignore into wu_keys values (?, ?)', ((v[1], v[0]) for v in mine.values() if v[0]))
+    per_disk, dates = {}, collections.Counter()
+    for nm, s, gd, n, gp in c.execute('''select k.name_lc, k.size, g.disk, count(*), min(g.path)
+                                          from wu_keys k cross join files g indexed by files_name
+                                            on g.name_lc=k.name_lc and g.size=k.size group by 1, 2, 3'''):
+        per_disk.setdefault((nm, s), []).append((gd, n, gp))
+    for nm, s, gd, mt, n in c.execute('''select k.name_lc, k.size, g.disk, g.mtime, count(*)
+                                          from wu_keys k cross join files g indexed by files_name
+                                            on g.name_lc=k.name_lc and g.size=k.size
+                                          where g.mtime is not null group by 1, 2, 3, 4'''):
+        dates[(nm, s, gd, mt)] = n
+    for p in sorted(mine):
+        s, nm, mt = mine[p]
+        for gd, n, gp in per_disk.get((nm, s), ()):
+            if gd == disk and n < 2:                   # на этом же диске - только он сам
+                continue
+            found[gd].add(p); hit.add(p)
+            same_date[gd] += bool(mt) and dates.get((nm, s, gd, mt), 0) > (1 if gd == disk else 0)
+            sample.setdefault(gd, gp if not (gd == disk and gp == p) else p)
     out(f'{disk}\\{path}: файлов без SHA-256 (кроме служебных и пустых) {len(mine)}, '
         f'{gb(sum(v[0] for v in mine.values()))} ГБ. Где есть файлы с тем же именем и размером:')
     rows = [(d + (' (тот же диск, другое место)' if d == disk else ''), len(found[d]), f'{100 * len(found[d]) // len(mine)}%',
              same_date[d], sample[d][-70:]) for d in sorted(found, key=lambda d: -len(found[d]))]
     table(('диск', 'файлов', 'доля', 'из них с той же датой', 'пример пути'), rows or [('нигде больше', 0, '0%', 0, '')])
-    out(f'Копия не найдена нигде: {len(mine) - len(hit)} файлов. Совпадение имени и размера - вероятная копия, не доказательство.')
+    out(f'Копия не найдена нигде: {len(mine) - len(hit)} файлов. Сравнение только по имени и размеру: совпадение - не '
+        f'доказательство копии.')
+    hint = renamed(c, disk, [p for p in mine if p not in hit])
+    if hint:
+        by = collections.Counter(d for v in hint.values() for d in v)
+        out(f'Подсказка: у {len(hint)} из них есть файл того же размера и даты с другим именем: '
+            + ', '.join(f'{d} - {n}' for d, n in by.most_common()) + f' ({RENAMED_NOTE}).')
     if has_hashed:
         out('')
 

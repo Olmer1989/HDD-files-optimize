@@ -37,7 +37,7 @@ def excluded_unique(c, report):
             kind = bp.file_type(p, size or 0) or 'Видео'
             by_disk[disk].append((p, size, kind, 'есть файл с тем же именем и размером' if probable else '', sha))
     for disk, rr in sorted(by_disk.items()):
-        path = save(f'исключения - больше нигде нет - {disk}', ('путь', 'размер', 'тип', 'вероятная копия', 'SHA-256'),
+        path = save(f'исключения - больше нигде нет - {disk}', ('путь', 'размер', 'тип', 'сравнение только по имени и размеру', 'SHA-256'),
                     sorted(rr))
         small = sum(1 for r in rr if r[2] == bp.T_SMALL)
         nohash = sum(1 for r in rr if os.path.splitext(r[0])[1].lower() in NOHASH_VIDEO)

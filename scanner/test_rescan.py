@@ -114,8 +114,9 @@ class RescanTests(unittest.TestCase):
         portable.JOB_LOG = None
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def start(self, folders=('котуй 2026',), rehash_all=False):
-        args = Namespace(disk='HDD03', letter='Z', folder=list(folders), rehash_all=rehash_all, prior_root=None, yes=True)
+    def start(self, folders=('котуй 2026',), rehash_all=False, hash_all_types=False):
+        args = Namespace(disk='HDD03', letter='Z', folder=list(folders), rehash_all=rehash_all, prior_root=None, yes=True,
+                         hash_all_types=hash_all_types)
         with redirect_stdout(io.StringIO()):
             code = portable.start_partial(args, dict(self.record), self.out.resolve())
         job = max((p for p in self.out.glob('*/*') if p.is_dir()), key=lambda p: (p / 'job.json').stat().st_mtime_ns)
@@ -166,6 +167,27 @@ class RescanTests(unittest.TestCase):
             info = {p: fj for p, fj in c.execute('select path, from_job from hash_info')}
         self.assertEqual(info['Котуй 2026\\a.jpg'], self.full.name)
         self.assertEqual(info['Котуй 2026\\e.jpg'], job.name)
+
+    def test_summary_for_owner_and_hash_types(self):
+        code, job, res = self.start(hash_all_types=True)
+        self.assertEqual(res['hash_types'], 'all')
+        manifest = json.loads((job / 'job.json').read_text(encoding='utf-8'))
+        self.assertEqual((manifest['hash_types'], manifest['hash_all_types_flag']), ('all', True))
+        text = rescan.summary_text(res)
+        # прочитано 3 = новые 1 + изменились 1 (ChangeTime) + прежде без хеша 1; взято 2 - с даты прежней описи
+        self.assertTrue(text.startswith('Прочитано заново: 3 (новые 1, изменились 1, в прежней описи без хеша'), text)
+        day = rescan.date_ru(res['reused_measured_utc'][0])
+        self.assertIn(f'файлы не менялись с {day}): 2.', text)
+        self.assertIn(rescan.summary_text(res), (job / 'log.txt').read_text(encoding='utf-8'))
+        self.assertIn('Перечитано всё', rescan.summary_text({**res, 'rehash_all': True}))
+
+    def test_m2t_and_dv_are_video(self):
+        import build_selection
+        for name in ('a.m2t', 'b.DV'):
+            self.assertTrue(build_selection.select('x\\' + name, 1, build_selection.THRESHOLDS_V2))
+        self.assertEqual(portable.policy_version(portable.POLICY_V2), 2)        # старые задания узнаются
+        self.assertNotIn('.m2t', portable.POLICY_V2['video_extensions'])
+        self.assertIn('.m2t', portable.POLICY_V3['video_extensions'])
 
     def test_rehash_all_reads_everything(self):
         code, job, res = self.start(rehash_all=True)
@@ -221,6 +243,7 @@ class RescanTests(unittest.TestCase):
         text = '\n'.join(rescan.plan_text(p))
         self.assertIn('Прочитать с диска: 3 файлов', text)
         self.assertIn('Взять хеш из прежней описи (без чтения): 2', text)
+        self.assertEqual(p['read_nonmedia'], [2, 270])     # b.jpg, e.jpg меньше 50 КБ: полная опись их не хешировала бы
         self.assertEqual(self.reads, [])                                               # содержимое не читалось
         # переименование: тот же номер файла - помечается, но хеш не наследуется
         os.rename(self.root / 'Котуй 2026\\a.jpg', self.root / 'Котуй 2026\\a2.jpg')

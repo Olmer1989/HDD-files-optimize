@@ -77,10 +77,12 @@ class RescanBaseTest(Base):
         self.assertNotIn(job.name, origin['Прочее\\x.jpg'])
         res = sv.partial_outcome(job.name)
         self.assertTrue(res['accepted'], res)
-        self.assertIn('новые 1', res['lines'][0])
-        self.assertIn('исчезли из базы 1', res['lines'][0])
-        self.assertIn('хеш не совпал 1', res['lines'][0])                              # b.jpg: прежний хеш другой
-        self.assertIn('стало S 0 (уже было S 1)', res['lines'][0])
+        self.assertTrue(res['lines'][0].startswith('Прочитано заново: '), res['lines'][0])  # итог сканера для владельца
+        self.assertIn('Хеш взят из прежнего скана', res['lines'][0])
+        self.assertIn('новые 1', res['lines'][1])
+        self.assertIn('исчезли из базы 1', res['lines'][1])
+        self.assertIn('хеш не совпал 1', res['lines'][1])                              # b.jpg: прежний хеш другой
+        self.assertIn('стало S 0 (уже было S 1)', res['lines'][1])
 
     def test_preview_in_service(self):
         with mock.patch.object(sv, 'volumes', return_value={SERIAL: str(self.root)}), \
@@ -93,6 +95,8 @@ class RescanBaseTest(Base):
             argv = sv.rescan_argv('HDD92', 'F:', p['folders'])
             self.assertEqual(argv[argv.index('--folder') + 1], 'Котуй')
             self.assertTrue(argv[argv.index('--output') + 1].endswith(hb.PARTIAL_DIR))
+            self.assertIn('--hash-all-types', argv)                                     # хеш у всех файлов - явно
+            self.assertIn('не фото и не видео', '\n'.join(p['lines']))                  # сколько ГБ - документы и пр.
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 import hb_cmd.rescan as cmd

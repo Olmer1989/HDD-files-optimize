@@ -35,6 +35,16 @@ class RescanDialog(QDialog):
         self.rehash = QCheckBox('Перечитать всё (прежние хеши не брать; дольше - для проверки сохранности)')
         self.rehash.toggled.connect(self.preview)
         lay.addWidget(self.rehash)
+        # Сканер с 1.4.0 при пересканировании папок всегда считает хеш у всех обычных файлов; режима «только фото и
+        # видео» нет намеренно: приём такого скана стёр бы подтверждённые хеши документов в этих папках (Дискуссия
+        # 15.11.2026). Галочка показывает это владельцу и передаёт сканеру явный --hash-all-types.
+        self.all_types = QCheckBox('Посчитать хеш у всех файлов (документы, проекты, архивы — для точного ответа '
+                                   '«можно ли удалять»)')
+        self.all_types.setChecked(True)
+        self.all_types.setEnabled(False)
+        self.all_types.setToolTip('Всегда включено: при пересканировании папок хеш считается у всех файлов. '
+                                  'Сколько из этого — не фото и не видео, видно в предпросмотре.')
+        lay.addWidget(self.all_types)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.hide()
@@ -93,8 +103,10 @@ class RescanDialog(QDialog):
         if resume:
             q = f'Продолжить сканирование {self.disk}? Готовые хеши сохранены, дочитаются остальные файлы.'
         else:
+            nm = p.get('read_nonmedia') or [0, 0]
             q = (f'Начать сканирование {self.disk} ({p["letter"]})?\n\nПрочитать с диска: {p["read"][0]} файлов, '
-                 f'{gb(p["read"][1])} ГБ. Хеш из прежней описи: {p["reuse"][0]} файлов.\n\nСканер только читает диск. '
+                 f'{gb(p["read"][1])} ГБ (из них не фото и не видео: {nm[0]} файлов, {gb(nm[1])} ГБ). '
+                 f'Хеш из прежней описи: {p["reuse"][0]} файлов.\n\nСканер только читает диск. '
                  'Остановить можно в любой момент - готовые хеши сохранятся.')
         if QMessageBox.question(self, TITLE, q) != QMessageBox.Yes:
             return
@@ -102,7 +114,7 @@ class RescanDialog(QDialog):
         folders = p['folders'] if p else self.folders
         self.proc = sv.rescan_start(self.disk, letter, folders, self.rehash.isChecked(), job=self.job if resume else None)
         self.running = True
-        for b in (self.go, self.rehash, self.close_btn):
+        for b in (self.go, self.rehash, self.close_btn):     # all_types всегда неактивна
             b.setEnabled(False)
         self.halt.setEnabled(True)
         self.bar.show()

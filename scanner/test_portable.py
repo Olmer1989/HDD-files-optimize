@@ -138,11 +138,11 @@ class PortableTests(unittest.TestCase):
                 self.assertEqual(portable.process(job), 0)
             self.assertEqual(sorted(read), ['clip.3gp', 'old_phone.jpg'])  # big.jpg reused, icon.png not selected
             manifest = json.loads((job / 'job.json').read_text(encoding='utf-8'))
-            self.assertEqual((manifest['policy'], manifest['policy_history'][0]['from']), (portable.POLICY_V2, 1))
+            self.assertEqual((manifest['policy'], manifest['policy_history'][0]['from']), (portable.POLICY_V3, 1))
             result = json.loads((job / 'result.json').read_text(encoding='utf-8'))
             self.assertEqual((result['selected_files'], result['cached_files'], result['hashed_files']), (3, 1, 2))
             self.assertIn('policy_upgrade', (job / 'runs.jsonl').read_text(encoding='utf-8'))
-            self.assertIn('| v2 |', (base / 'results' / 'Реестр дисков.md').read_text(encoding='utf-8'))
+            self.assertIn('| v3 |', (base / 'results' / 'Реестр дисков.md').read_text(encoding='utf-8'))
 
     def test_unreadable_file_is_skipped_and_retried_on_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

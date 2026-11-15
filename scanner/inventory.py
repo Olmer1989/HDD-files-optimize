@@ -19,7 +19,7 @@ EXCLUDED_DIRS = {'$recycle.bin', 'system volume information', 'node_modules',
                  'recycler', '.trashes', '.fseventsd'}
 MEDIA = set('.jpg .jpeg .png .heic .heif .tif .tiff .webp .bmp .gif .avif '
             '.raw .cr2 .cr3 .nef .nrw .dng .arw .srf .sr2 .orf .rw2 .raf .pef '
-            '.mov .mp4 .avi .mkv .m4v .mts .m2ts .mpg .mpeg .wmv .3gp .vob .mod .tod .mxf .ts .m2v .webm .flv'.split())
+            '.mov .mp4 .avi .mkv .m4v .mts .m2ts .m2t .dv .mpg .mpeg .wmv .3gp .vob .mod .tod .mxf .ts .m2v .webm .flv'.split())
 COMPANIONS = set('.xmp .aae .thm .lrv .srt .wav .mp3 .m4a .prproj .drp .psd .psb'.split())
 MIN_BYTES = 1048576
 

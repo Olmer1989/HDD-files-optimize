@@ -84,22 +84,29 @@ def backup(path):
     return dst
 
 
-def append_row(path, fields):
-    """Дописать одну целую строку (одной записью на диск). Номер новой строки в файле - в ответе."""
-    for x in fields:
-        if '\t' in x or '\n' in x or '\r' in x:
-            raise Refused('В тексте не должно быть табуляции и переводов строки.')
+def append_rows(path, rows):
+    """Дописать целые строки ОДНОЙ записью на диск (write + fsync). Номер первой новой строки в файле - в ответе.
+    Проверки - до записи: при отказе файл не тронут."""
+    for fields in rows:
+        for x in fields:
+            if '\t' in x or '\n' in x or '\r' in x:
+                raise Refused('В тексте не должно быть табуляции и переводов строки.')
     data = Path(path).read_bytes() if Path(path).exists() else b''
     if data and not data.endswith(b'\n'):
         raise Refused(f'Последняя строка {Path(path).name} не закончена (её кто-то пишет или файл испорчен). '
                       'Запись остановлена, файл не тронут.')
     eol = '\r\n' if b'\r\n' in data[-400:] else '\n'
-    line = ('\t'.join(fields) + eol).encode('utf-8')
+    block = ''.join('\t'.join(fields) + eol for fields in rows).encode('utf-8')
     with open(path, 'ab') as f:
-        f.write(line)
+        f.write(block)
         f.flush()
         os.fsync(f.fileno())
     return len([x for x in data.decode('utf-8-sig', errors='replace').splitlines() if x.strip()]) + 1
+
+
+def append_row(path, fields):
+    """Дописать одну целую строку (одной записью на диск). Номер новой строки в файле - в ответе."""
+    return append_rows(path, [fields])
 
 
 # ---------- проверки ----------
@@ -130,14 +137,15 @@ def files_under(c, disk, path, limit=3):
 
 # ---------- записи владельца ----------
 
-def manual_preview(date, act, disk, path, disk2='', path2=''):
-    """Что изменит ручная операция. Исключение Refused - если записывать нельзя."""
+def manual_preview(date, act, disk, path, disk2='', path2='', c=None):
+    """Что изменит ручная операция. Исключение Refused - если записывать нельзя. c - уже открытое соединение
+    (пакетная запись проверяет все строки по одной базе)."""
     act = (act or '').strip().lower()
     if act not in ACTIONS:
         raise Refused(f'Действие должно быть одним из: {", ".join(ACTIONS)}.')
     if not DATE_RE.match(date or ''):
         raise Refused('Дата - в виде ДД.ММ.ГГГГ, например 14.11.2026.')
-    c = db()
+    c = c or db()
     check_disk(c, disk)
     path = check_rel(path)
     if act != 'удалено':
@@ -174,6 +182,37 @@ def add_manual(date, act, disk, path, disk2='', path2='', note='', apply=True):
         hb.close_last()
         hb.update(quiet=True)
     return pv
+
+
+def add_manual_batch(date, rows, note='', apply=True):
+    """Пакетная запись ручных операций (окно «Я сделал в Проводнике»): rows - [(действие, диск, путь, диск2, путь2)].
+    Всё или ничего: под одним замком таблиц все строки проверяются заранее (как manual_preview каждой, плюс нет
+    повторов внутри пакета), затем одна копия таблицы в архив, все строки - одной записью на диск, одно применение к
+    базе. При любой ошибке не пишется ничего. Ответ: [(поля, номер строки в файле)]."""
+    rows = [tuple((list(r) + [''] * 5)[:5]) for r in rows]
+    if not rows:
+        raise Refused('Ничего не отмечено.')
+    with TableLock():
+        c = db()
+        fields, seen = [], set()
+        for r in rows:
+            try:
+                pv = manual_preview(date, *r, c=c)
+            except Refused as e:
+                raise Refused(f'{r[1]}{SEP}{r[2]}: {e} Ничего не записано.')
+            key = tuple(pv['fields'])
+            if key in seen:
+                raise Refused(f'{r[1]}{SEP}{r[2]}: эта операция в пакете дважды. Ничего не записано.')
+            seen.add(key)
+            fields.append(pv['fields'] + [note or ''])
+        hb.ensure_tables()
+        hb.close_last()
+        backup(hb.MANUAL)
+        first = append_rows(hb.MANUAL, fields)
+    if apply:
+        hb.close_last()
+        hb.update(quiet=True)
+    return [(f, first + i) for i, f in enumerate(fields)]
 
 
 def fix_manual(line_no, fields, reason):
@@ -365,7 +404,7 @@ def folder_children(disk, folder=''):
 
 
 def folder_presence(disk, folder):
-    """Чего из папки нет на 45 и 77 (фото и видео с SHA-256, по таблице presence; решения не учитываются)."""
+    """Чего из папки нет на 45 и 77 (файлы с SHA-256 любого типа, по таблице presence; решения не учитываются)."""
     cond, args = hb.prefix_cond('f.path', (folder or '').strip(SEP))
     c = ro()
     try:
@@ -379,6 +418,90 @@ def folder_presence(disk, folder):
         return dict(files=n, gib=b / hb.GIB, no45=no45 / hb.GIB, no77=no77 / hb.GIB, only=only / hb.GIB, nohash=nohash)
     finally:
         c.close()
+
+
+def _day(t):
+    return time.strftime('%d.%m.%Y', time.localtime(t)) if t else 'дата неизвестна'
+
+
+def _log_day(name):
+    m = re.search(r'(\d{4})-(\d\d)-(\d\d)', name or '')
+    return f'{m.group(3)}.{m.group(2)}.{m.group(1)}' if m else 'дата неизвестна'
+
+
+_n = lambda n: f'{n:,}'.replace(',', ' ')
+
+HASH_HINT = 'Сомневаетесь? «Пересканировать папку…» с галочкой «Перечитать всё».'
+
+
+def hash_dates(disk, folder):
+    """Когда измерены хеши файлов папки - по происхождению строк базы (origin) и, для частичных сканов, по таблице
+    hash_info их hashes.sqlite. Считается при ответе, база не меняется. Дата частичного скана - время его описи;
+    «взято из прежнего скана» - хеш не перечитывался (правило доверия), «измерены не раньше» - начало задания,
+    которое действительно прочитало файл (bound_ns). Нет сведений - «дата неизвестна».
+    -> dict(text=одна строка, hint=подсказка, parts=[...], nohash=число)."""
+    folder = (folder or '').strip(SEP)
+    cond, args = hb.prefix_cond('path', folder)
+    c = ro()
+    try:
+        groups = c.execute(f'select origin, count(*), count(sha) from files where disk=? and {cond} group by origin',
+                           [disk] + args).fetchall()
+        scanned = (c.execute('select scanned from disks where disk=?', (disk,)).fetchone() or [None])[0]
+    finally:
+        c.close()
+    nohash = sum(n - h for _, n, h in groups)
+    partials = {pj['name']: pj for pj in hb.find_partials()} if any((o or '').startswith('частичный скан') for o, _, _ in groups) else {}
+    parts, logs, manual = [], [0, set()], 0
+    for origin, n, h in sorted(groups, key=lambda g: g[0] or ''):
+        origin = origin or ''
+        if not h:
+            continue
+        if origin == 'опись':
+            parts.append((scanned or 0, f'{_day(scanned)} - полная опись ({_n(h)} файлов)'))
+        elif origin.startswith('частичный скан: '):
+            name = origin.split(': ', 1)[1]
+            pj = partials.get(name)
+            reused, bounds = None, []
+            if pj and (pj['dir'] / 'hashes.sqlite').exists():
+                try:
+                    hc = sqlite3.connect(f'file:{(pj["dir"] / "hashes.sqlite").as_posix()}?mode=ro', uri=True)
+                    try:
+                        if hc.execute("select 1 from sqlite_master where name='hash_info'").fetchone():
+                            hcond, hargs = hb.prefix_cond('path', folder)
+                            reused, b0, b1 = hc.execute(
+                                f"select count(*), min(bound_ns), max(bound_ns) from hash_info where how='reused' and {hcond}",
+                                hargs).fetchone()
+                            bounds = [x for x in (b0, b1) if x]
+                    finally:
+                        hc.close()
+                except sqlite3.Error:
+                    reused = None
+            extra = ''
+            if reused is None:
+                extra = ', сколько взято из прежнего скана - неизвестно'
+            elif reused:
+                days = sorted({_day(b / 1e9) for b in bounds}, key=lambda d: d[6:] + d[3:5] + d[:2])
+                extra = (f', из них взято из прежнего скана {_n(reused)}'
+                         + (f' (измерены не раньше {"–".join(days)})' if days else ''))
+            parts.append((pj['time'] if pj else 0,
+                          f'{_day(pj["time"]) if pj else "дата неизвестна"} - пересканирование ({_n(h)} файлов'
+                          + extra + ')'))
+        elif origin.startswith('журнал: '):
+            logs[0] += h
+            logs[1].add(_log_day(origin))
+        else:
+            manual += h
+    if logs[0]:
+        days = sorted(logs[1], key=lambda d: d[6:] + d[3:5] + d[:2])
+        parts.append((1e12, f'{", ".join(days[:3])}{"…" if len(days) > 3 else ""} - копирование шаблоном '
+                      f'(хеш прочитанных байтов, {_n(logs[0])} файлов)'))
+    if manual:
+        parts.append((2e12, f'другие записи ({manual} файлов)'))
+    parts.sort(key=lambda x: x[0])
+    text = ('Хеши измерены: ' + '; '.join(p for _, p in parts) + '.') if parts else 'Хешей у файлов этой папки нет.'
+    if nohash:
+        text += f' Без хеша: {_n(nohash)} файлов.'
+    return dict(text=text, hint=HASH_HINT, parts=[p for _, p in parts], nohash=nohash)
 
 
 def find_folders(words, disk=None, limit=300):
@@ -492,7 +615,7 @@ def rescan_argv(disk, letter, folders, rehash_all=False, job=None):
     argv += ['--output', str(Path(bp.SCAN_ROOTS[0]) / hb.PARTIAL_DIR), '--yes']
     for r in bp.SCAN_ROOTS:
         argv += ['--prior-root', str(r)]
-    return argv + (['--rehash-all'] if rehash_all else [])
+    return argv + ['--hash-all-types'] + (['--rehash-all'] if rehash_all else [])     # хеш у всех файлов - явно
 
 
 def rescan_start(disk, letter, folders, rehash_all=False, job=None):
@@ -529,6 +652,9 @@ def partial_outcome(job_name):
     stats = (rep.get('partial_stats') or {}).get(job_name)
     warn = sorted(w for w in rep['warn'] if job_name in w) + [x for x in rep['old'] if job_name in x]
     lines = []
+    pj = next((x for x in hb.find_partials() if x['name'] == job_name), None)
+    if pj:                                    # итог сканера: прочитано заново / взято из прежнего скана (с даты)
+        lines.append(_scanner()[0].summary_text(pj['info']))
     for f, k in (stats or {}).items():
         became = sum(v for key, v in k.items() if key.startswith('было ') and key != 'было S')
         lines.append(f'{f}: в скане {k.get("файлов", 0)} файлов ({hb.gb(k.get("байт", 0))} ГБ); стало S {became}'

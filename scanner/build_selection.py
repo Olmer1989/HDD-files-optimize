@@ -13,7 +13,7 @@ BASE = Path(__file__).resolve().parents[1]
 # camera/phone photos; other images and RAW from 150 KB, which skips web
 # graphics and thumbnails; video of any non-zero size (old 3GP clips are tiny).
 CAMERA_IMAGES = frozenset('.jpg .jpeg .heic .heif'.split())
-VIDEO = frozenset('.mov .mp4 .avi .mkv .m4v .mts .m2ts .mpg .mpeg .wmv .3gp .vob .mod .tod .mxf .ts .m2v .webm .flv'.split())
+VIDEO = frozenset('.mov .mp4 .avi .mkv .m4v .mts .m2ts .m2t .dv .mpg .mpeg .wmv .3gp .vob .mod .tod .mxf .ts .m2v .webm .flv'.split())
 THRESHOLDS_V1 = {'default': MIN_BYTES}
 THRESHOLDS_V2 = {'camera_image': 50_000, 'video': 1, 'other_media': 150_000}
 

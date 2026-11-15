@@ -36,6 +36,25 @@ class ServiceTest(Base):
         self.quiet(hb.cmd_rebuild, NS())
         self.assertIn('ИТОГ: совпала', self.printed)
 
+    def test_batch_is_written_whole(self):
+        self.db()
+        res = self.quiet(sv.add_manual_batch, '01.01.2099', [('удалено', 'HDD92', 'Фото'),
+                                                             ('перемещено', 'HDD92', 'Фотоархив', 'HDD92', 'Новое')], 'пакет')
+        self.assertEqual([ln for _, ln in res], [2, 3])
+        self.assertEqual(self.manual_count(), 2)
+        self.assertEqual(self.paths('HDD92'), {'Новое\\b.jpg'})            # одно применение - обе строки учтены
+        self.assertEqual(len(list((hb.BASE_DIR / 'архив таблиц').glob('*'))), 1)   # одна копия таблицы
+
+    def test_batch_error_writes_nothing(self):
+        self.db()
+        before = hb.MANUAL.read_bytes()
+        for rows in ([('удалено', 'HDD92', 'Фото'), ('удалено', 'HDD92', 'Нет такой')],      # вторая - нет в базе
+                     [('удалено', 'HDD92', 'Фото'), ('удалено', 'HDD92', 'Фото')],           # повтор в пакете
+                     [('удалено', 'HDD92', 'Фото'), ('стёрто', 'HDD92', 'Фотоархив')]):      # неверное действие
+            with self.assertRaises(sv.Refused):
+                sv.add_manual_batch('01.01.2099', rows)
+            self.assertEqual(hb.MANUAL.read_bytes(), before)                # байт в байт прежняя
+
     def test_neighbour_names_are_not_touched(self):
         self.db()
         pv = self.quiet(sv.manual_preview, '01.01.2099', 'удалено', 'HDD92', 'Фото')

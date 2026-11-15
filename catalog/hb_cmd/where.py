@@ -4,7 +4,7 @@ import collections
 from hb_core.util import gb, out
 from hb_core.report import table
 from hb_core.db import connect
-from hb_core.query import check_disk, sha_sizes, where_unhashed
+from hb_core.query import CAND_NOTE, RENAMED_NOTE, candidates, check_disk, renamed, sha_sizes, where_unhashed
 
 
 def cmd_where(a):
@@ -30,6 +30,16 @@ def cmd_where(a):
     rows = [(d + (' (тот же диск, другое место)' if d == a.disk else ''), cnt[d], gb(size[d]), f'{100 * cnt[d] // len(mine)}%',
              sample[d][:70]) for d in sorted(cnt, key=lambda d: -size[d])]
     table(('диск', 'файлов', 'ГБ', 'доля', 'пример пути'), rows or [('нигде больше', 0, '0.00', '0%', '')])
+    found = {sha for _, sha in seen}
+    lone = [v[0] for k, v in mine.items() if k not in found]
+    cand = candidates(c, a.disk, lone)
+    hint = renamed(c, a.disk, [x for x in lone if x not in cand])
+    for title, got, note in (('по имени и размеру (у копии хеш не считался)', cand, CAND_NOTE),
+                             ('возможно, переименованы', hint, RENAMED_NOTE)):
+        if got:
+            by = collections.Counter(d for v in got.values() for d in v)
+            out(f'Из {len(lone)} файлов, которых больше нигде нет по SHA-256, {title}: {len(got)} - '
+                + ', '.join(f'{d} - {n}' for d, n in by.most_common()) + f' ({note}).')
     weak = collections.Counter()
     for disk, sha in c.execute('select f.disk, f.sha_exp from files f join q on q.sha=f.sha_exp'):
         weak[disk] += 1

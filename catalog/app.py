@@ -17,6 +17,7 @@ from hb_core import api as hb  # noqa: E402  (ядро; hashbase.py - тольк
 import service as sv           # noqa: E402
 import commands_page           # noqa: E402
 import rescan_dialog           # noqa: E402
+import explorer_page           # noqa: E402
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal   # noqa: E402
 from PySide6.QtGui import QColor, QFont, QGuiApplication                                  # noqa: E402
@@ -289,8 +290,12 @@ class DisksPage(QWidget):
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)      # несколько папок - с Ctrl
         self.tree.itemExpanded.connect(self.expand)
-        self.tree.itemSelectionChanged.connect(lambda: self.info.setText(''))
+        self.tree.itemSelectionChanged.connect(self.selected)
         ll.addWidget(self.tree)
+        self.dates = QLabel('')                 # «Хеши измерены: …» для выбранной папки
+        self.dates.setWordWrap(True)
+        self.dates.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        ll.addWidget(self.dates)
         bar = QHBoxLayout()
         b = QPushButton('Чего из папки нет на 45 и 77?')
         b.clicked.connect(self.presence)
@@ -362,10 +367,28 @@ class DisksPage(QWidget):
         self.info.setText('Считаю…')
 
         def show(r):
-            self.info.setText(f'{self.disk}\\{path or "(весь диск)"}: фото и видео с хешем {r["files"]:,} ({gib(r["gib"])} ГБ). '
+            self.info.setText(f'{self.disk}\\{path or "(весь диск)"}: файлов с хешем {r["files"]:,} ({gib(r["gib"])} ГБ). '
                               f'Нет на 45: {gib(r["no45"])} ГБ, нет на 77: {gib(r["no77"])} ГБ, больше нигде: '
-                              f'{gib(r["only"])} ГБ. Без хеша (не сравниваются): {r["nohash"]:,}.'.replace(',', ' '))
+                              f'{gib(r["only"])} ГБ. Без хеша (сравнение только по имени и размеру): '
+                              f'{r["nohash"]:,}.'.replace(',', ' '))
         self.win.bg.run(sv.folder_presence, self.disk, path, ok=show)
+
+    def selected(self):
+        """Выбрана одна папка: «когда измерены хеши» - в фоне; ответ для уже сменившейся папки не показывается."""
+        self.info.setText('')
+        items = self.tree.selectedItems()
+        if self.disk is None or len(items) != 1:
+            self.dates.setText('')
+            return
+        disk, path = self.disk, items[0].data(0, Qt.UserRole) or ''
+        self.dates.setText('Когда измерены хеши: считаю…')
+
+        def show(r):
+            cur = self.tree.selectedItems()
+            if self.disk != disk or len(cur) != 1 or (cur[0].data(0, Qt.UserRole) or '') != path:
+                return
+            self.dates.setText(r['text'] + ' ' + r['hint'])
+        self.win.bg.run(sv.hash_dates, disk, path, ok=show, quiet=True)
 
     def rescan(self):
         """Пересканировать выбранные папки подключённого диска: окно предпросмотра; скан - только по подтверждению."""
@@ -412,7 +435,8 @@ class Window(QMainWindow):
         self.resize(1250, 800)
         self.bg = Background(self)
         self.updating, self.sig = False, None
-        self.pages = [('Обзор', OverviewPage(self)), ('Задания', TasksPage(self)), ('Диски и папки', DisksPage(self)),
+        self.pages = [('Обзор', OverviewPage(self)), ('Задания', __import__('tasks_page').TasksPage(self)), ('Диски и папки', DisksPage(self)),
+                      ('Я сделал в Проводнике', explorer_page.ExplorerPage(self)),
                       ('Команды', commands_page.CommandsPage(self))]
         self.nav = QListWidget()
         self.nav.setFixedWidth(170)
@@ -450,6 +474,11 @@ class Window(QMainWindow):
 
     def closeEvent(self, e):                                  # noqa: N802
         if not self.page('Команды').can_close():
+            e.ignore()
+            return
+        if not self.page('Я сделал в Проводнике').can_close():
+            QMessageBox.information(self, TITLE, 'Идёт запись или исправление на странице «Я сделал в Проводнике». '
+                                    'Дождитесь окончания.')
             e.ignore()
             return
         if getattr(self, 'rescan', None) is not None and self.rescan.running:

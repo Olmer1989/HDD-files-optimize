@@ -29,6 +29,7 @@ import stat
 import time
 
 from inventory import EXCLUDED_DIRS, excluded_file
+from build_selection import THRESHOLDS_V2, select
 
 PARTIAL_DIR = 'Повторное сканирование'
 EPOCH_DIFF = 116444736000000000             # FILETIME (100 нс с 1601) -> Unix
@@ -38,7 +39,7 @@ REASONS = {'new': 'новые', 'changed': 'изменились (размер, 
            'renamed': 'возможно переименованы или перемещены', 'unread_before': 'в прошлый раз не прочитаны',
            'rehash_all': 'перечитать всё', 'not_ntfs': 'не NTFS: прежним хешам не доверяем',
            'clock': 'даты в будущем: часы не в порядке', 'busy': 'файл занят другой программой',
-           'nohash': 'в прежней описи без хеша (не фото и не видео)'}
+           'nohash': 'в прежней описи без хеша (не фото и не видео, или .m2t/.dv)'}
 BASIS = ('путь, размер, mtime, номер файла NTFS и время создания совпали с прежней описью; запись файла (ChangeTime) '
          'не менялась с момента до прежнего чтения')
 
@@ -343,6 +344,7 @@ def plan(root, disk_id, folders, roots, rehash_all=False, filesystem='NTFS', fil
         if r['file_id'] not in ('', '0') and p not in files:
             by_id.setdefault((r['file_id'], r['size'], r['mtime_ns']), []).append(p)
     count = {'reuse': [0, 0]}
+    nonmedia = [0, 0]                    # прочитать придётся и не фото/видео: хеш считается у всех файлов папки
     per_folder = {f: dict(files=0, bytes=0, reuse=0, reuse_bytes=0, read=0, read_bytes=0, gone=0) for f in folders}
     examples = {}
     for p, cur in files.items():
@@ -358,13 +360,15 @@ def plan(root, disk_id, folders, roots, rehash_all=False, filesystem='NTFS', fil
         pf['reuse_bytes' if how == 'reuse' else 'read_bytes'] += cur['size']
         if how == 'read':
             examples.setdefault(key, []).append(p)
+            if not select(p, cur['size'], THRESHOLDS_V2):
+                nonmedia[0] += 1; nonmedia[1] += cur['size']
     gone = [p for p in prior if p not in files]
     for p in gone:
         per_folder[inside(p, folders)]['gone'] += 1
     read = [sum(v[0] for k, v in count.items() if k != 'reuse'), sum(v[1] for k, v in count.items() if k != 'reuse')]
     full = sources[0]
     return dict(disk=disk_id, folders=folders, files=len(files), bytes=sum(x['size'] for x in files.values()),
-                reuse=count['reuse'], read=read, reasons={k: v for k, v in count.items() if k != 'reuse'},
+                reuse=count['reuse'], read=read, read_nonmedia=nonmedia, reasons={k: v for k, v in count.items() if k != 'reuse'},
                 gone=len(gone), gone_examples=sorted(gone)[:5], errors=errors, reparse=reparse, per_folder=per_folder,
                 examples={k: sorted(v)[:5] for k, v in examples.items()}, rehash_all=rehash_all,
                 sources=[dict(job=s['dir'].name, kind=s['kind'], created=ns_utc(s['created_ns'])) for s in sources],
@@ -377,6 +381,38 @@ def _damaged(job):
             return h.execute("select count(*) from hashes where status='damaged'").fetchone()[0]
     except sqlite3.Error:
         return 0
+
+
+def date_ru(text):
+    """'2026-11-08T15:49:52+00:00' -> '08.11.2026' (местное время); пусто - ''."""
+    ns = utc_ns(text)
+    return time.strftime('%d.%m.%Y', time.localtime(ns / 1e9)) if ns else ''
+
+
+CHANGED = ('changed', 'change_time')
+
+
+def summary_text(r):
+    """Итог пересканирования для владельца (result.json): непересекающиеся числа. Прочитано заново = новые +
+    изменились + прочие причины; хеш взят из прежнего скана (правило доверия: размер, даты, номер файла и ChangeTime не
+    менялись с прежнего чтения); не прочитано (ошибка чтения) - отдельно."""
+    reasons = r.get('read_reasons') or {}
+    n_new = (reasons.get('new') or [0])[0]
+    n_chg = sum((reasons.get(k) or [0])[0] for k in CHANGED)
+    other = [(k, v[0]) for k, v in reasons.items() if k not in CHANGED and k != 'new' and v and v[0]]
+    read = r.get('hashed_files') or 0
+    line = f'Прочитано заново: {num(read)} (новые {num(n_new)}, изменились {num(n_chg)}'
+    line += ''.join(f', {REASONS.get(k, k)} {num(n)}' for k, n in other) + ').'
+    reused = (r.get('reused_files') or 0) + (r.get('cached_files') or 0)
+    dates = sorted({date_ru(x) for x in r.get('reused_measured_utc') or [] if x}, key=lambda d: d[6:] + d[3:5] + d[:2])
+    if r.get('rehash_all'):
+        line += ' Перечитано всё: прежние хеши не использовались.'
+    else:
+        since = (f'с {dates[0]}' if len(dates) == 1 else f'с {dates[0]}–{dates[-1]}' if dates else 'с прежнего чтения')
+        line += (f' Хеш взят из прежнего скана (по правилу доверия файлы не менялись {since}): {num(reused)}.')
+    if r.get('unread_files'):
+        line += f' Не прочитано (ошибка чтения): {num(r["unread_files"])} - у них хеша нет.'
+    return line
 
 
 def gb(x):
@@ -394,6 +430,9 @@ def plan_text(p):
     for k, (n, b) in sorted(p['reasons'].items(), key=lambda x: -x[1][1]):
         ex = '; '.join(p['examples'].get(k, [])[:2])
         lines.append(f'  - {REASONS.get(k, k)}: {num(n)} ({gb(b)} ГБ)' + (f', например: {ex}' if ex else ''))
+    nm = p.get('read_nonmedia') or [0, 0]
+    lines.append(f'  из них не фото и не видео (документы, проекты, архивы, прочее): {num(nm[0])} ({gb(nm[1])} ГБ) - '
+                 'хеш считается у всех файлов папки, чтобы ответ «можно ли удалять» был точным.')
     lines.append(f'Взять хеш из прежней описи (без чтения): {num(p["reuse"][0])} файлов, {gb(p["reuse"][1])} ГБ.')
     lines.append(f'Исчезли с диска (были в прежней описи): {num(p["gone"])}'
                  + (f', например: {"; ".join(p["gone_examples"][:2])}' if p['gone'] else '') + '.')

@@ -28,18 +28,23 @@ VERSION = '1.0.0'
 # Partial (selected folders) jobs have their own format version, so that a program
 # before 1.4.0 refuses to continue them as a full scan of the whole disk.
 VERSION_PARTIAL = '1.1.0'
-APP_VERSION = '1.4.0'
+APP_VERSION = '1.5.0'
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
 # POLICY_V1 must stay byte-for-byte equal to the policy stored by 1.0.x jobs.
+# Versions 1 and 2 did not treat .m2t and .dv as video; their stored policies keep the old lists.
+_NEW_VIDEO = {'.m2t', '.dv'}
+MEDIA_OLD, VIDEO_OLD = sorted(set(MEDIA) - _NEW_VIDEO), sorted(set(VIDEO) - _NEW_VIDEO)
 POLICY_V1 = {'algorithm': 'sha256', 'min_bytes': MIN_BYTES,
-             'media_extensions': sorted(MEDIA), 'excluded_dirs': sorted(EXCLUDED_DIRS)}
+             'media_extensions': MEDIA_OLD, 'excluded_dirs': sorted(EXCLUDED_DIRS)}
 POLICY_V2 = {'version': 2, 'algorithm': 'sha256', 'thresholds_bytes': THRESHOLDS_V2,
-             'camera_image_extensions': sorted(CAMERA_IMAGES), 'video_extensions': sorted(VIDEO),
-             'media_extensions': sorted(MEDIA), 'excluded_dirs': sorted(EXCLUDED_DIRS)}
-POLICY = POLICY_V2  # for new jobs; version 1 jobs are upgraded by a top-up pass
-POLICY_TEXT = 'фото JPEG/HEIC от 50 КБ, прочие изображения и RAW от 150 КБ, видео любого размера'
+             'camera_image_extensions': sorted(CAMERA_IMAGES), 'video_extensions': VIDEO_OLD,
+             'media_extensions': MEDIA_OLD, 'excluded_dirs': sorted(EXCLUDED_DIRS)}
+# Version 3 (1.5.0): .m2t and .dv are video too (any size). Older jobs are upgraded by a top-up pass.
+POLICY_V3 = {**POLICY_V2, 'version': 3, 'video_extensions': sorted(VIDEO), 'media_extensions': sorted(MEDIA)}
+POLICY = POLICY_V3  # for new jobs
+POLICY_TEXT = 'фото JPEG/HEIC от 50 КБ, прочие изображения и RAW от 150 КБ, видео любого размера (в том числе .m2t, .dv)'
 
 # An unreadable file is skipped; only these signs of a failing disk stop the scan.
 MAX_DEVICE_ERRORS_IN_ROW = 5
@@ -66,6 +71,8 @@ def error_kind(exc):
     return 'file' if code in FILE_WINERRORS else 'device'
 
 def policy_version(policy):
+    if policy == POLICY_V3:
+        return 3
     if policy == POLICY_V2:
         return 2
     if policy == POLICY_V1:
@@ -391,7 +398,7 @@ def job_row(job, root):
         'Ошибок описи': summary.get('errors', ''),
         'Не прочитано': unread_count(job),
         'Из них — повреждения диска': unread_count(job, damaged_only=True),
-        'Правила': {2: 'v2', 1: 'v1 — нужен добор'}.get(policy_version(manifest.get('policy')), 'другие'),
+        'Правила': {3: 'v3', 2: 'v2 — добор .m2t/.dv', 1: 'v1 — нужен добор'}.get(policy_version(manifest.get('policy')), 'другие'),
         'Дата': (last_run.get('utc') or manifest.get('created_utc', ''))[:10],
         'Папка': str(job.relative_to(root)),
     }
@@ -540,16 +547,17 @@ def process(job):
             say(f'Опись завершена: {summary["files"]:,} файлов, {summary["bytes"] / 1e9:,.1f} ГБ, ошибок {summary["errors"]}')
         else:
             summary = json.loads((job / 'inventory_summary.json').read_text(encoding='utf-8'))
-        if policy_version(manifest['policy']) == 1:
-            # Top-up: the inventory already lists small files, so only the newly
+        was = policy_version(manifest['policy'])
+        if was in (1, 2):
+            # Top-up: the inventory already lists every file, so only the newly
             # selected ones are read; all saved hashes are reused. Recorded first,
             # so an older program refuses to continue this job under old rules.
-            manifest.setdefault('policy_history', []).append({'from': 1, 'to': 2, 'utc': utc(), 'app_version': APP_VERSION})
-            manifest['policy'] = POLICY_V2
+            manifest.setdefault('policy_history', []).append({'from': was, 'to': 3, 'utc': utc(), 'app_version': APP_VERSION})
+            manifest['policy'] = POLICY_V3
             write_json(job / 'job.json', manifest)
-            append_run(job, {'event': 'policy_upgrade', 'run_id': run_id, 'utc': utc(), 'from': 1, 'to': 2})
-            say('Правила выборки обновлены с версии 1 (всё от 1 МиБ) до версии 2: ' + POLICY_TEXT +
-                '. Готовые хеши сохраняются, дочитываются только новые мелкие файлы.')
+            append_run(job, {'event': 'policy_upgrade', 'run_id': run_id, 'utc': utc(), 'from': was, 'to': 3})
+            say(f'Правила выборки обновлены с версии {was} до версии 3: ' + POLICY_TEXT +
+                '. Готовые хеши сохраняются, дочитываются только новые выбранные файлы.')
         with closing(sqlite3.connect(inv.as_uri() + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(job / 'hashes.sqlite')) as target:
             target.execute('create table if not exists hashes(disk_id text,path text,size integer,mtime_ns text,file_id text,sha256 text,status text,error text,primary key(disk_id,path))')
             # Selection uses precisely the same function as the main project.
@@ -716,7 +724,7 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
         summary = inventory(root, db, check, inventory_progress, folders=folders)
     write_json(job / 'inventory_summary.json', summary)
     report = {'disk_id': disk_id, 'scan_scope': 'partial', 'folders': folders, 'hash_scope': 'all_regular_files',
-              'rehash_all': rehash_all, 'status': 'running', 'inventory_errors': summary['errors'], 'physical': physical,
+              'hash_types': 'all', 'rehash_all': rehash_all, 'status': 'running', 'inventory_errors': summary['errors'], 'physical': physical,
               'app_version': APP_VERSION}
     if summary['status'] == 'interrupted':
         report['status'] = 'interrupted' if STOP_FILE and STOP_FILE.exists() else 'error'
@@ -773,6 +781,7 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
         cached = reused = hashed = unread = damaged = 0
         reused_bytes = finished = read = unread_bytes = damaged_bytes = device_in_row = 0
         reasons = {}
+        bounds = []                      # bound_ns of reused hashes: «measured not earlier than» dates
         rate = Rate()
         last = [time.monotonic(), time.monotonic()]
         report.update(selected_files=len(rows), selected_bytes=total)
@@ -837,6 +846,9 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                             cached += 1
                         else:
                             reused += 1; reused_bytes += size
+                        if cand.get('bound_ns'):
+                            b = int(cand['bound_ns'])
+                            bounds[:] = [min(bounds[0], b), max(bounds[1], b)] if bounds else [b, b]
                         finished += size
                         progress()
                         continue
@@ -884,6 +896,7 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                           reuse_basis=rescan.BASIS if not rehash_all else 'перечитать всё: прежние хеши не использовались',
                           reuse_sources=[{'job': s['dir'].name, 'kind': s['kind'], 'created_utc': rescan.ns_utc(s['created_ns'])}
                                          for s in sources] if not rehash_all else [],
+                          reused_measured_utc=[rescan.ns_utc(b) for b in bounds],
                           filesystem_ntfs=ntfs, seconds=round(time.monotonic() - started, 2), app_version=APP_VERSION)
             write_json(job / 'result.json', report)
             progress(force=True)
@@ -902,6 +915,7 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                              'unread_files': unread, 'damaged_files': damaged, 'reuse_basis': report['reuse_basis'],
                              'reuse_sources': report['reuse_sources'], 'seconds': report['seconds'], 'error': report.get('error', '')})
             why = ', '.join(f'{rescan.REASONS.get(k, k)} {v[0]:,}' for k, v in reasons.items())
+            say(rescan.summary_text(report))
             say(f'=== Итог: {report["status"]} · файлов {len(rows):,}: хеш из прежней описи {reused:,}'
                 + (f', из прошлого запуска {cached:,}' if cached else '')
                 + f', прочитано {hashed:,} ({read / 1e9:,.2f} ГБ' + (f'; {why}' if why else '') + ')'
@@ -1053,7 +1067,7 @@ def start_partial(args, record, output):
                 'record': record, 'policy': POLICY, 'created_utc': utc(), 'app_version': APP_VERSION,
                 'identity_at_registration': describe(args.letter),
                 'scan_scope': 'partial', 'hash_scope': 'all_regular_files', 'folders': folders,
-                'rehash_all': bool(args.rehash_all),
+                'rehash_all': bool(args.rehash_all), 'hash_types': 'all', 'hash_all_types_flag': bool(getattr(args, 'hash_all_types', False)),
                 'prior_sources': [{'dir': str(s['dir']), 'kind': s['kind'], 'folders': s['folders'],
                                    'created_ns': s['created_ns']} for s in sources]})
     print('JOB (save this path for resume):', job, flush=True)
@@ -1073,6 +1087,9 @@ def main():
     start.add_argument('--folder', action='append', help='Only this folder (from the volume root); repeat for several. '
                        'Result: a partial scan; the previous full inventory of the disk is required')
     start.add_argument('--rehash-all', action='store_true', help='With --folder: read every file, trust no previous hash')
+    start.add_argument('--hash-all-types', action='store_true',
+                       help='With --folder: SHA-256 of every regular file (documents, projects, archives), not only photo '
+                            'and video. This is the rule of folder rescans since 1.4.0; the flag records it explicitly')
     start.add_argument('--prior-root', type=Path, action='append',
                        help='Where previous jobs of the disk are (default: the parent of «Повторное сканирование»)')
     resume = sub.add_parser('resume'); resume.add_argument('job', type=Path)
@@ -1109,6 +1126,8 @@ def main():
             parser.error(str(exc))
         if args.rehash_all and not args.folder:
             parser.error('--rehash-all only with --folder')
+        if args.hash_all_types and not args.folder:
+            parser.error('--hash-all-types only with --folder (a full scan hashes photo and video only)')
         record = inspect(args.letter, media_kind(args.disk))
         output = args.output.resolve()
         if output.drive.upper() == args.letter.rstrip(':\\').upper() + ':':

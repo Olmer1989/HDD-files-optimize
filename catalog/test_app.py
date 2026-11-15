@@ -103,7 +103,17 @@ class WindowTest(Base):
         self.assertIn('Применены новые модули', self.w.statusBar().currentMessage())
 
 
-HIDDEN = {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist'}
+HIDDEN = {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist', 'manual', 'fix-manual'}
+
+
+def hidden_form(cp, name):
+    """Форма скрытой в окне команды (manual, fix-manual - теперь на странице «Я сделал в Проводнике»): то же
+    построение формы, что у видимых, - проверяем, что описание аргументов по-прежнему годится."""
+    import hb_cli
+    n, h, _, prs = next(c for c in hb_cli.commands() if c[0] == name)
+    f = cpg.CommandForm(cp, n, h, prs)
+    f.set_disks(cp.disks)
+    return f
 
 
 def put(f, **values):
@@ -166,7 +176,7 @@ class CommandsTest(WindowTest):
             self.assertNotIn('yes', f.fields, n)
             args, err = f.argv()
             self.assertTrue(args or err, n)
-        f = self.cp.select('manual')
+        f = hidden_form(self.cp, 'manual')
         self.assertEqual(f.fields['date'].text(), time.strftime('%d.%m.%Y'))
         self.assertEqual(f.fields['action'].kind, 'choice')
         self.assertEqual(self.cp.select('mklist').fields['to'].text(), ['HDD45', 'HDD77'])
@@ -192,7 +202,7 @@ class CommandsTest(WindowTest):
         self.assertIsNone(err)
         self.assertEqual(args, ['mklist', 'HDD90', '--to', 'HDD45', '--name=Моё задание', '--folder=A', '--folder=B\\x',
                                 '--dry'])
-        f = self.cp.select('manual')                                        # пустой disk2 перед заполненным path2
+        f = hidden_form(self.cp, 'manual')                                  # пустой disk2 перед заполненным path2
         put(f, disk='HDD90', path='A', path2='B', action='удалено')
         args, err = f.argv()
         self.assertIn('Куда: диск', err)
@@ -209,9 +219,9 @@ class CommandsTest(WindowTest):
         saved = hb.ANSWERS / cpg.LAST_OUTPUT
         self.assertTrue(saved.exists())
         self.assertIn(str(saved), self.cp.links)                            # путь к файлу - ссылка
-        f = self.cp.select('fix-manual')                                    # код выхода 1 - заметно
-        put(f, line=999, reason='проверка', action='удалено', disk='HDD90', path='A')
-        self.run_cmd('fix-manual')
+        f = self.cp.select('decide')                                        # код выхода 1 - заметно
+        put(f, disk='HDD90', path='Нет такой папки', verdict='не нужно')
+        self.run_cmd('decide')
         self.assertIn('код выхода 1', self.cp.state.text())
         self.assertIsNone(self.cp.preview)
         self.assertFalse(self.cp.btn_write.isEnabled())
@@ -271,8 +281,8 @@ class CommandsUiTest(CommandsTest):
         known = [g for g in cpg.GROUPS if g in heads]
         self.assertEqual(heads[:len(known)], known)
         self.assertEqual(known, list(cpg.GROUPS))
-        want = ['missing', 'only', 'where', 'cmp', 'candel', 'folders', 'find', 'mklist', 'manual', 'decide',
-                'exclude', 'fix-manual', 'stats', 'build', 'tasks', 'rebuild']
+        want = ['missing', 'only', 'where', 'cmp', 'candel', 'folders', 'find', 'mklist', 'decide',
+                'exclude', 'stats', 'build', 'tasks', 'rebuild']
         self.assertEqual([c for c in cmds if c in want], want)
         self.assertNotIn('mvlist', cmds)                                    # отдельного пункта нет
         f = self.cp.select('candel')
@@ -280,7 +290,7 @@ class CommandsUiTest(CommandsTest):
         self.assertEqual(f.fields['disk'].label, 'Диск, с которого хотите удалить')
         self.assertEqual(f.fields['folder'].label, 'Папка, которую хотите удалить')
         self.assertIn('НЕДОСТАТОЧНО ПОДТВЕРЖДЕНИЙ', f.meta['hint'])
-        self.assertEqual(self.cp.select('manual').fields['disk2'].label, 'Куда: диск')
+        self.assertEqual(hidden_form(self.cp, 'manual').fields['disk2'].label, 'Куда: диск')
 
     def test_disk_choice_and_depth_everywhere(self):
         self.cp.got_disks(ROWS)
@@ -326,7 +336,7 @@ class CommandsUiTest(CommandsTest):
         f = self.cp.select('cmp')
         self.assertIs(f.row_of['disk_a'], f.row_of['folder_a'])            # диск и папка - одной строкой
         self.assertTrue(f.fields['folder_a'].pick_disk)
-        m = self.cp.select('manual')
+        m = hidden_form(self.cp, 'manual')
         self.assertIs(m.row_of['disk2'], m.row_of['path2'])
         self.assertEqual(m.fields['disk2'].combo.itemText(0), '— не указан —')
         mk = self.cp.select('mklist')                                       # у диска две папки - выбор только папки

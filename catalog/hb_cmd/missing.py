@@ -5,7 +5,7 @@ from hb_core.consts import MAIN, SEP
 from hb_core.util import gb, is_drop, out
 from hb_core.report import save, table
 from hb_core.db import connect
-from hb_core.query import check_disk, decision_of, decisions_for, folder_key, issues_for, presence, unhashed_note, unhashed_report
+from hb_core.query import CAND_NOTE, NAME_ONLY, RENAMED_NOTE, candidates, renamed, check_disk, decision_of, decisions_for, folder_key, issues_for, presence, unhashed_note, unhashed_report
 
 
 # ---------- команды ----------
@@ -41,8 +41,37 @@ def cmd_missing(a, only=False):
         if ndisks == 1: k[5] += size
         weak45 += (not on45) and bool(w45); weak77 += (not on77) and bool(w77)
         if only or not (on45 and on77):
-            detail.append((path, size, 'да' if on45 else ('не подтверждено' if w45 else 'нет'),
-                           'да' if on77 else ('не подтверждено' if w77 else 'нет'), ndisks - 1, sha))
+            detail.append([path, size, 'да' if on45 else ('не подтверждено' if w45 else 'нет'),
+                           'да' if on77 else ('не подтверждено' if w77 else 'нет'), ndisks - 1, sha])
+    # Файл с хешем без подтверждённой копии, а там лежит тот же файл без хеша (то же имя и размер): пометка
+    # «сравнение только по имени и размеру»; нет и такого - подсказка «возможно, переименована» (тот же размер и дата,
+    # от 1 МБ). Итоги «нет на …» и «больше нигде» не меняются: копией считается только подтверждённая.
+    marks = collections.defaultdict(list)
+    prob, ren = collections.Counter(), collections.Counter()
+    if only:
+        lone = [d[0] for d in detail if d[4] == 0]
+        cand = candidates(c, a.disk, lone, others=True)
+        hint = renamed(c, a.disk, [x for x in lone if x not in cand], others=True)
+        for d in detail:
+            if d[0] in cand:
+                prob['где-либо'] += 1
+                marks[d[0]].append(f'{NAME_ONLY}: ' + ', '.join(sorted(cand[d[0]])))
+            elif d[0] in hint:
+                ren['где-либо'] += 1
+                marks[d[0]].append('возможно, переименована: ' + ', '.join(sorted(hint[d[0]])))
+    else:
+        cand = candidates(c, a.disk, [d[0] for d in detail if 'нет' in (d[2], d[3])], targets=MAIN)
+        for d in detail:
+            for i, disk in ((2, MAIN[0]), (3, MAIN[1])):
+                if d[i] == 'нет' and disk in cand.get(d[0], {}):
+                    d[i] = NAME_ONLY
+                    prob[disk] += 1
+        hint = renamed(c, a.disk, [d[0] for d in detail if 'нет' in (d[2], d[3])], targets=MAIN)
+        for d in detail:
+            for i, disk in ((2, MAIN[0]), (3, MAIN[1])):
+                if d[i] == 'нет' and disk in hint.get(d[0], {}):
+                    ren[disk] += 1
+                    marks[d[0]].append(f'на {disk} возможно, переименована: {hint[d[0]][disk]}')
     title = f'{a.disk}' + (f'\\{prefix}' if prefix else '')
     what = 'только на этом диске' if only else f'чего нет на {MAIN[0]} и {MAIN[1]}'
     out(f'{title}: {what} (ГБ, только файлы с SHA-256; всего таких {len(rows)})')
@@ -56,6 +85,16 @@ def cmd_missing(a, only=False):
     if weak45 or weak77:
         out(f'Из «нет»: на {MAIN[0]} у {weak45} файлов и на {MAIN[1]} у {weak77} лежит НЕПОДТВЕРЖДЁННАЯ копия '
             f'(сверен только размер или со слов пользователя). Копией она не считается, пока файл не прочитан.')
+    if prob[MAIN[0]] or prob[MAIN[1]]:
+        out(f'Из «нет»: на {MAIN[0]} у {prob[MAIN[0]]} файлов и на {MAIN[1]} у {prob[MAIN[1]]} лежит файл с тем же именем и '
+            f'размером без хеша ({CAND_NOTE}).')
+    if prob['где-либо']:
+        out(f'Из «больше нигде»: у {prob["где-либо"]} файлов на другом диске есть файл с тем же именем и размером без '
+            f'хеша ({CAND_NOTE}).')
+    if ren[MAIN[0]] or ren[MAIN[1]] or ren['где-либо']:
+        where = (f'на {MAIN[0]} у {ren[MAIN[0]]}, на {MAIN[1]} у {ren[MAIN[1]]}' if not only else
+                 f'у {ren["где-либо"]} на других дисках')
+        out(f'Подсказка: {where} файлов есть файл того же размера и той же даты с другим именем ({RENAMED_NOTE}).')
     if sections:
         out('')
         out('По решениям пользователя (в таблицу выше не входят; сохранять их НУЖНО, место - по решению):')
@@ -68,7 +107,9 @@ def cmd_missing(a, only=False):
         out(f'ВНИМАНИЕ: опись неполная - сканер не прочитал {len(iss)} мест в этой области; файлы оттуда программе неизвестны.')
     tag = f'{a.disk} {prefix.replace(SEP, " - ")}'.strip()
     p = save(f'{"только" if only else "нет на 45 и 77"} - {tag}',
-             ('путь', 'размер', f'на {MAIN[0]}', f'на {MAIN[1]}', 'на скольких других дисках', 'SHA-256'), sorted(detail))
+             ('путь', 'размер', f'на {MAIN[0]}', f'на {MAIN[1]}', 'на скольких других дисках', 'SHA-256')
+             + (('пометка',) if marks else ()),
+             sorted(tuple(d) + (('; '.join(marks.get(d[0], ())),) if marks else ()) for d in detail))
     out(f'По файлам ({len(detail)}): {p}')
     if only:
         unhashed_report(c, a.disk, prefix, [d for d in decs if is_drop(d[1])], f'только, без хеша - {tag}')

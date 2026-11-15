@@ -10,7 +10,7 @@ from hb_core.consts import MAIN, SEP
 from hb_core.util import gb, is_drop, out, prefix_cond
 from hb_core.sources import serial_map
 from hb_core.db import connect
-from hb_core.query import check_disk, decision_of, decisions_for
+from hb_core.query import NAME_ONLY, candidates, check_disk, decision_of, decisions_for
 
 
 def cmd_mklist(a):
@@ -28,6 +28,7 @@ def cmd_mklist(a):
     waiting = collections.defaultdict(lambda: [0, 0])      # раздел/отсрочка: файлов, байт - не идут в этот список
     dropped, weak_there = [0, 0], collections.Counter()
     waiting_seen = set()
+    hashed_to = collections.defaultdict(list)             # цель -> полные пути файлов с хешем, вошедших в список
     src_folder = (getattr(a, 'source_folder', None) or '').strip(SEP)
     src_name = getattr(a, 'as_name', None) or a.disk
     cut = len(src_folder) + 1 if src_folder else 0
@@ -74,8 +75,10 @@ def cmd_mklist(a):
                     weak_there[t] += 1                     # файл там уже лежит, но не подтверждён: копирование его пропустит
                     continue
                 lines.append((t, path[cut:], size, 'фото/видео', sha.upper()))
+                hashed_to[t].append(path)
                 stat[t][0] += 1; stat[t][1] += size
     lines = sorted(set(lines))
+    same_name = {t: len(candidates(c, a.disk, ps, targets=[t])) for t, ps in hashed_to.items()}
 
     def notes():
         for v, w in sorted(waiting.items(), key=lambda kv: -kv[1][1]):
@@ -84,6 +87,10 @@ def cmd_mklist(a):
         for t, n in weak_there.items():
             out(f'  на {t} уже лежит неподтверждённая копия у {n} файлов (сверен только размер или со слов) - '
                 f'в список не включены: скрипт их пропустит как «уже есть». Подтвердить можно только чтением.')
+        for t, n in same_name.items():
+            if n:
+                out(f'  на {t} у {n} файлов из списка где-то лежит файл с тем же именем и размером без хеша ({NAME_ONLY}; '
+                    f'копией не считается) - они в списке')
         if dropped[0]:
             out(f'  по решению «не нужно» пропущено: {dropped[0]} файлов, {gb(dropped[1])} ГБ')
         if decided[0]:
