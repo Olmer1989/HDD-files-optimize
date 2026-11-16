@@ -352,7 +352,8 @@ def volumes():
 
 
 def disks():
-    """Таблица носителей: номер, метка, подключён ли (буква), файлов, ГБ, опись от, состояние, частичных сканов."""
+    """Таблица носителей: номер, метка, подключён ли (буква), файлов, ГБ, опись от, состояние, частичных сканов;
+    у подключённых - free_gib (свободно, ГиБ)."""
     jobs = bp.find_jobs()
     serial_of = {v: k for k, v in hb.serial_map(jobs).items()}
     try:
@@ -369,9 +370,15 @@ def disks():
                              files=total, gib=(size.get(d) or 0) / hb.GIB, status=status,
                              scanned=time.strftime('%d.%m.%Y', time.localtime(scanned)) if scanned else '',
                              partial=parts.get(d, 0)))
-        return rows
     finally:
         c.close()
+    for r in rows:                         # свободное место подключённых: сведения о томе, диск не читается
+        if r['letter']:
+            try:
+                r['free_gib'] = shutil.disk_usage(r['letter'] + SEP).free / hb.GIB
+            except OSError:
+                pass
+    return rows
 
 
 EV_COLS = (hb.EV_SCAN, hb.EV_COPY, hb.EV_SIZE, hb.EV_USER, hb.EV_STALE)
@@ -466,23 +473,115 @@ def attention(ov, tasks):
     return groups
 
 
+def folder_mark(path, ms, dirs, roots):
+    """Решение владельца для папки «Диски и папки» (16.11.2026) - действующая отметка разбора v3: своя или от ближайшей
+    отмеченной родительской папки (весь носитель - тоже). Служебная папка переноса - своя пометка; отметка носителя в
+    неё не наследуется (как в ядре). -> dict(kind 'dir'/'skip'/'unset'/'service'/'' , text, own, src)."""
+    if path and SEP not in path and path in roots:
+        return dict(kind='service', text='уже перенесено', own=True, src='')
+    orig, inside = hb.original_of(path, roots) if path else ('', False)
+    p = orig
+    while True:
+        m = ms.get(p)
+        if m is not None:
+            break
+        if not p or (inside and SEP not in p):
+            return dict(kind='', text='', own=False, src='')
+        p = hb.parent_of(p)
+    own = p.lower() == orig.lower()
+    src = '' if own else ('весь носитель' if not p else p)
+    if m.kind == hb.R_DIR and m.num in dirs:
+        d = dirs[m.num]
+        return dict(kind='dir', text=f'{d.num} {d.name}', own=own, src=src)
+    if m.kind == hb.R_SKIP:
+        return dict(kind='skip', text='не копировать', own=own, src=src)
+    return dict(kind='unset', text=hb.mark_text(m, dirs), own=own, src=src)
+
+
 def folder_children(disk, folder=''):
-    """Подпапки папки (по готовой таблице folders): имя, путь, файлов, ГБ, ГБ по типам, решение владельца."""
+    """Подпапки папки (по готовой таблице folders): имя, путь, файлов, ГБ, ГБ по типам (фото, видео, тексты, прочие,
+    мусор), решение владельца (старая строка решений, если есть) и mark - действующая отметка разбора (folder_mark)."""
     folder = (folder or '').strip(SEP)
     depth = (folder.count(SEP) + 1 if folder else 0) + 1
     cond, args = hb.prefix_cond('folder', folder)
     decs = hb.decisions_for(disk)
+    snap = snapshot()
+    dirs = hb.parse_directions(snap['directions'])
+    ms = hb.MarkSet.build(hb.mark_rows(disk, snap['decisions']), dirs)
     c = ro()
     try:
+        roots = hb.moved_roots(c, disk)
         q = (f'select folder, files, bytes, ' + ', '.join(f'b{i}' for i in range(5)) +
              f' from folders where disk=? and depth=? and {cond} order by bytes desc')
         res = []
         for r in c.execute(q, [disk, depth] + args):
             res.append(dict(path=r[0], name=r[0].rsplit(SEP, 1)[-1], files=r[1], gib=r[2] / hb.GIB,
-                            types=[x / hb.GIB for x in r[3:8]], decision=hb.decision_of(r[0], decs) or ''))
+                            types=[x / hb.GIB for x in r[3:8]], decision=hb.decision_of(r[0], decs) or '',
+                            mark=folder_mark(r[0], ms, dirs, roots)))
         return res
     finally:
         c.close()
+
+
+def folder_missing(disk, folder, targets):
+    """«Чего нет на дисках направления» (раздел «Диски и папки»): по каждому диску targets - сколько файлов папки с
+    хешем (любого типа) не имеют на этом диске записи с тем же SHA-256 и подтверждённым хешем (S - сканер, C -
+    копирование со сверкой). Без хеша и с устаревшим хешем (X - файл изменён после подсчёта) сравнить нельзя -
+    отдельными числами nohash и stale (критик GPT, этап 10); weak - из недостающих: на диске есть запись с тем же
+    хешем, но копия не проверена. Решения и отметки не учитываются.
+    -> dict(files, gib, nohash, stale, missing={диск: (файлов, ГиБ)}, weak={диск: файлов})."""
+    folder = (folder or '').strip(SEP)
+    cond, args = hb.prefix_cond('f.path', folder)
+    c = ro()
+    try:
+        n, b = c.execute(f'select count(*), coalesce(sum(f.size),0) from files f where f.disk=? and f.sha is not null '
+                         f"and coalesce(f.ev, '')<>'X' and {cond}", [disk] + args).fetchone()
+        nohash = c.execute(f'select count(*) from files f where f.disk=? and f.sha is null and {cond}',
+                           [disk] + args).fetchone()[0]
+        missing, weak = {}, {}
+        for t in targets:
+            if t == disk:
+                missing[t] = (0, 0.0)
+                continue
+            mn, mb = c.execute(
+                f"""select count(*), coalesce(sum(f.size),0) from files f where f.disk=? and f.sha is not null and coalesce(f.ev, '')<>'X' and {cond}
+                    and not exists (select 1 from files g where g.sha=f.sha and g.disk=? and g.ev in ('S','C'))""",
+                [disk] + args + [t]).fetchone()
+            missing[t] = (mn, mb / hb.GIB)
+            if mn:                         # из недостающих: на диске есть запись с тем же хешем, но копия не проверена
+                weak[t] = c.execute(
+                    f"""select count(*) from files f where f.disk=? and f.sha is not null and coalesce(f.ev, '')<>'X' and {cond}
+                        and not exists (select 1 from files g where g.sha=f.sha and g.disk=? and g.ev in ('S','C'))
+                        and exists (select 1 from files g where g.sha=f.sha and g.disk=?)""",
+                    [disk] + args + [t, t]).fetchone()[0]
+        stale = c.execute(f"select count(*) from files f where f.disk=? and f.ev=? and {cond}",
+                          [disk, hb.EV_STALE] + args).fetchone()[0]
+        return dict(files=n, gib=b / hb.GIB, nohash=nohash, missing=missing, weak=weak, stale=stale)
+    finally:
+        c.close()
+
+
+def disk_hash_info(disk):
+    """Строка над деревом «Диски и папки»: у скольких файлов есть хеш и откуда даты (полная опись, пересканирования).
+    -> dict(text, tip). Один проход по записям носителя (в фоне)."""
+    c = ro()
+    try:
+        total, with_sha = c.execute('select count(*), count(sha) from files where disk=?', (disk,)).fetchone()
+        scanned = (c.execute('select scanned from disks where disk=?', (disk,)).fetchone() or [None])[0]
+        parts = c.execute('select count(*) from scan_folders where disk=?', (disk,)).fetchone()[0]
+    finally:
+        c.close()
+    if not total:
+        return dict(text='файлов в описи нет', tip='')
+    if not with_sha:
+        return dict(text='хешей нет', tip='Ни у одного файла носителя хеш не посчитан.')
+    pct = 100 * with_sha / total
+    share = 'хеш у всех файлов' if with_sha == total else f'хеш у {pct:.0f} % файлов'.replace('.', ',')
+    when = f'опись от {_day(scanned)}' if scanned else 'дата описи неизвестна'
+    if parts:
+        when += f' + {parts} {"пересканирование" if parts == 1 else "пересканирования" if parts < 5 else "пересканирований"}'
+    return dict(text=f'{share} · {when}', tip='Точно, когда измерены хеши выбранной папки, — строка в панели ниже '
+                                               '(выделите одну папку).')
 
 
 def folder_presence(disk, folder):
@@ -587,11 +686,13 @@ def hash_dates(disk, folder):
 
 
 def find_folders(words, disk=None, limit=300):
-    """Папки, в пути которых есть все слова (только верхние совпадения), по таблице folders."""
+    """Папки, в пути которых есть все слова (только верхние совпадения), по таблице folders; у каждой - ГБ по типам и
+    решение владельца (как в дереве «Дисков и папок»), тем же запросом."""
     words = [w.lower() for w in words if w.strip()]
     if not words:
         return []
-    q = 'select disk, folder, files, bytes from folders where ' + ' and '.join(['instr(folder_lc, ?) > 0'] * len(words))
+    q = ('select disk, folder, files, bytes, ' + ', '.join(f'b{i}' for i in range(5)) + ' from folders where '
+         + ' and '.join(['instr(folder_lc, ?) > 0'] * len(words)))
     args = list(words)
     if disk:
         q += ' and disk=?'
@@ -599,12 +700,20 @@ def find_folders(words, disk=None, limit=300):
     c = ro()
     try:
         rows = c.execute(q, args).fetchall()
+        hits = {(r[0], r[1]) for r in rows}
+        top = [r for r in rows if r[1] and (r[0], hb.parent_of(r[1])) not in hits]
+        top.sort(key=lambda r: -r[3])
+        top = top[:limit]
+        # состав и решение владельца - как в дереве (folder_children): отметки и служебные папки - по разу на носитель
+        snap = snapshot()
+        dirs = hb.parse_directions(snap['directions'])
+        per = {}
+        for d in {r[0] for r in top}:
+            per[d] = (hb.MarkSet.build(hb.mark_rows(d, snap['decisions']), dirs), hb.moved_roots(c, d))
     finally:
         c.close()
-    hits = {(r[0], r[1]) for r in rows}
-    top = [r for r in rows if r[1] and (r[0], hb.parent_of(r[1])) not in hits]
-    top.sort(key=lambda r: -r[3])
-    return [dict(disk=d, path=f, files=n, gib=b / hb.GIB) for d, f, n, b in top[:limit]]
+    return [dict(disk=r[0], path=r[1], files=r[2], gib=r[3] / hb.GIB, types=[(x or 0) / hb.GIB for x in r[4:9]],
+                 mark=folder_mark(r[1], per[r[0]][0], dirs, per[r[0]][1])) for r in top]
 
 
 def sources_signature():

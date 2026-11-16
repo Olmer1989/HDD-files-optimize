@@ -69,11 +69,8 @@ class DirBase(Base):
     def section(self):
         s = dp.DirectionsSection(self.win)
         s.refresh()
-        self.assertTrue(wait(lambda: s.t.rowCount() == len(sv.directions())), self.win.errors)
+        self.assertTrue(wait(lambda: len(s.cards) == len(sv.directions())), self.win.errors)
         return s
-
-    def row_of(self, s, num):
-        return next(i for i in range(s.t.rowCount()) if s.t.item(i, 0).data(Qt.UserRole) == num)
 
     def lines(self):
         return [x for x in hb.DIRECTIONS.read_text(encoding='utf-8-sig').splitlines() if x.strip()]
@@ -172,37 +169,43 @@ class DescriptionCoreTest(DirBase):
 
 class SectionTest(DirBase):
     def test_table_and_overview(self):
+        """Четвёртый круг: направления - строками-карточками; описание - только если есть; диски строками; «Что
+        копировать:» тегами; плашка «На носителе»; кнопка «Изменить» / «Назначить диск» в строке."""
         sv.direction_save(num='Н1', desc='семейные фото и видео всех лет')
         s = self.section()
-        self.assertEqual(s.t.rowCount(), 3)
-        i1, i3 = self.row_of(s, 'Н1'), self.row_of(s, 'Н3')
-        self.assertEqual(s.t.item(i1, 1).text(), 'Н1 Семейный архив')
-        self.assertEqual(s.t.item(i1, 2).text(), 'семейные фото и видео всех лет')
-        disks = s.t.cellWidget(i1, 3).text()
+        self.assertEqual(list(s.cards), ['Н1', 'Н2', 'Н3'])
+        c1, c3 = s.cards['Н1'], s.cards['Н3']
+        self.assertIn('Н1 Семейный архив', c1.name.text())
+        self.assertEqual(c1.desc.text(), 'семейные фото и видео всех лет')
+        self.assertTrue(c1.desc.isVisibleTo(c1))
+        self.assertFalse(c3.desc.isVisibleTo(c3))                                    # описания нет - строки нет
+        disks = c1.disks.text()
         self.assertIn('HDD45', disks)
         self.assertIn('HDD77', disks)
         self.assertIn('не подключён', disks)
-        self.assertEqual(s.t.item(i1, 5).text(), hb.KIND_MEDIA)
-        self.assertEqual(s.t.item(i1, 6).text(), 'Скопировано на Семейный архив (45 и 77)')
-        self.assertIn('описания нет', s.t.item(i3, 2).text())
-        self.assertIn('диск не назначен', s.t.cellWidget(i3, 3).text())
-        self.assertFalse(s.t.item(i3, 0).flags() & Qt.ItemIsUserCheckable)        # без диска - галочки нет
-        s.t.selectRow(i3)
-        self.assertTrue(s.b_disk.isEnabled())                                       # «Назначить диск» - только без диска
-        s.t.selectRow(i1)
-        self.assertFalse(s.b_disk.isEnabled())
-        self.assertTrue(s.b_edit.isEnabled())
+        self.assertEqual(c1.tags, ['Фото', 'Видео', dp.NEAR_TEXT])                   # каждая категория - тегом
+        self.assertEqual(s.cards['Н2'].tags, ['Все файлы'])                           # «Все файлы» - серым тегом
+        self.assertEqual(s.cards['Н2'].small, 'кроме программ и временных')
+        self.assertIn('«Скопировано на Семейный архив (45 и 77)»', c1.folder.text())
+        self.assertIsNone(c3.folder)                                                 # без диска имени папки нет
+        self.assertIn('диск не назначен', c3.disks.text())
+        self.assertFalse(c3.box.isEnabled())                                         # без диска - галочки нет
+        self.assertEqual(c3.btn.text(), 'Назначить диск')                            # кнопка - в строке
+        self.assertEqual(c1.btn.text(), 'Изменить')
+        self.assertFalse(hasattr(s, 'b_edit') or hasattr(s, 'b_disk'))               # общих кнопок под списком нет
+        self.assertIn('Добавить направление', s.b_add.text())
+        self.assertEqual(dp.kind_tags('что-то странное')[0][0][1], 'red')
         ov = app.OverviewPage(self.win)                                              # секция стоит в начале «Обзора»
         self.assertIsInstance(ov.dirs, dp.DirectionsSection)
         ov.dirs.refresh()
-        self.assertTrue(wait(lambda: ov.dirs.t.rowCount() == 3))
+        self.assertTrue(wait(lambda: len(ov.dirs.cards) == 3))
 
     def test_checkboxes_choice_and_go(self):
         s = self.section()
         self.assertFalse(s.b_go.isEnabled())
         self.assertIn('ещё не готов', s.b_go.toolTip())                             # экрана «Разбор носителя» нет
-        s.t.item(self.row_of(s, 'Н1'), 0).setCheckState(Qt.Checked)
-        s.t.item(self.row_of(s, 'Н2'), 0).setCheckState(Qt.Checked)
+        s.set_checked('Н1', True)
+        s.set_checked('Н2', True)
         self.assertEqual(dp.load_choice(), ['Н1', 'Н2'])                            # выбор окна записан сразу
         self.assertEqual([d.num for d in dp.chosen()], ['Н1', 'Н2'])
         self.assertTrue(dp.choice_path().exists())
@@ -212,7 +215,7 @@ class SectionTest(DirBase):
         self.assertTrue(s.b_go.isEnabled())
         s.b_go.click()
         self.assertEqual(self.win.opened, [dp.RAZBOR_PAGE])
-        s.t.item(self.row_of(s, 'Н2'), 0).setCheckState(Qt.Unchecked)
+        s.set_checked('Н2', False)
         self.assertEqual(dp.load_choice(), ['Н1'])
         dp.save_choice(['Н1', 'Н3', 'Н99'])                                         # без диска и несуществующее - не в выборе
         self.assertEqual([d.num for d in dp.chosen()], ['Н1'])
@@ -243,7 +246,7 @@ class SectionTest(DirBase):
         self.assertEqual(asked, [])                                                  # не переспрашивали
         d = sv.directions()['Н4']
         self.assertEqual((d.name, d.disks, d.desc, d.kind), ('Друзья', ('HDD90',), 'фото друзей', hb.KIND_ALL))
-        self.assertTrue(wait(lambda: s.t.rowCount() == 4))                          # секция перечитана
+        self.assertTrue(wait(lambda: len(s.cards) == 4))                            # секция перечитана
         self.assertIn('Сохранено', s.hint.text())
 
     def test_dialog_refusal_writes_nothing(self):
@@ -268,12 +271,11 @@ class SectionTest(DirBase):
                                                    'цели': ['HDD91']}, ensure_ascii=False), encoding='utf-8')
         self.assertTrue(sv.direction_usage('Н2')['tasks'])                          # задание на диск направления есть
         s = self.section()
-        s.t.selectRow(self.row_of(s, 'Н2'))
         made = []
         orig = dp.DirectionDialog.exec
         dp.DirectionDialog.exec = lambda self_: made.append(self_) or 0
         try:
-            s.b_edit.click()
+            s.cards['Н2'].btn.click()                                                # «Изменить» в строке
         finally:
             dp.DirectionDialog.exec = orig
         dlg = made[0]
@@ -295,17 +297,15 @@ class SectionTest(DirBase):
     def test_assign_only_without_disk(self):
         """Второй круг, п. 3: «Назначить диск…» - только у направления без диска: только список дисков."""
         s = self.section()
-        s.t.selectRow(self.row_of(s, 'Н2'))
-        self.assertFalse(s.b_disk.isEnabled())
+        self.assertEqual(s.cards['Н2'].btn.text(), 'Изменить')
         made = []
         orig = dp.DirectionDialog.exec
         dp.DirectionDialog.exec = lambda self_: made.append(self_) or 0
         try:
-            s.assign()                                                               # у направления с диском - ничего
+            s.assign('Н2')                                                           # у направления с диском - ничего
             self.assertEqual(made, [])
-            s.t.selectRow(self.row_of(s, 'Н3'))
-            self.assertTrue(s.b_disk.isEnabled())
-            s.b_disk.click()
+            self.assertEqual(s.cards['Н3'].btn.text(), 'Назначить диск')
+            s.cards['Н3'].btn.click()
         finally:
             dp.DirectionDialog.exec = orig
         dlg = made[0]
@@ -331,7 +331,7 @@ class SectionTest(DirBase):
         with open(hb.DIRECTIONS, 'a', encoding='utf-8') as f:
             f.write('Н2\tРабота\tСафари\tHDD91\tчто-то странное\t\n')
         s = self.section()
-        self.assertIn('не распознано', s.t.item(self.row_of(s, 'Н2'), 5).text())
+        self.assertIn('не распознано', s.cards['Н2'].tags[0])
         dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н2'])
         self.assertEqual(dlg.chosen_cats(), frozenset())
         self.assertFalse(dlg.b_write.isEnabled())
@@ -398,7 +398,7 @@ class SectionTest(DirBase):
         sv.direction_save(num='Н1', kind=(frozenset({hb.CAT_PHOTO, hb.CAT_VIDEO, hb.CAT_DOC}), True))
         self.assertEqual(sv.directions()['Н1'].kind, hb.KIND_MEDIA)
         s2 = self.section()
-        self.assertEqual(s2.t.item(self.row_of(s2, 'Н2'), 5).text(), 'все файлы (кроме программ и временных)')
+        self.assertEqual(s2.cards['Н2'].tags, ['Все файлы'])
 
     def test_disk_colors(self):
         """Второй круг, п. 1 и 4: в таблице диски зелёные; оранжевые - только у отмеченных галочкой (сразу при щелчке);
@@ -412,16 +412,20 @@ class SectionTest(DirBase):
         s.data['disks'] = [dict(r, letter='Z:') if r['disk'] in ('HDD45', 'HDD90') else r for r in s.data['disks']]
         s.data['by'] = {r['disk']: r for r in s.data['disks']}
         s.render(s.data)
-        cell = lambda num: s.t.cellWidget(self.row_of(s, num), 3).text()
-        self.assertIn(f'<b style="color:{disk_ui.DIR_ON}">● HDD45', cell('Н1'))        # не отмечено - зелёный
-        self.assertIn(f'<span style="color:{disk_ui.DIR_OFF}">HDD77', cell('Н1'))       # не подключён - бледнее
+        cell = lambda num: s.cards[num].disks.text()                                # noqa: E731
+        self.assertIn(f'color:{disk_ui.DIR_ON}; font-weight:bold">Z:', cell('Н1'))    # не отмечено - зелёный
+        self.assertIn(f'color:{disk_ui.DIR_OFF}; font-weight:normal">', cell('Н1'))   # не подключён - бледнее
+        self.assertIn('— HDD45', cell('Н1'))
         self.assertIn('не подключён', cell('Н1'))
+        self.assertNotIn('●', cell('Н1'))
         self.assertNotIn(disk_ui.ASSIGNED_ON, cell('Н1') + cell('Н2'))
-        s.t.item(self.row_of(s, 'Н1'), 0).setCheckState(Qt.Checked)                  # щелчок галочки - сразу
-        self.assertIn(f'<b style="color:{disk_ui.ASSIGNED_ON}">● HDD45', cell('Н1'))
-        self.assertIn(f'<span style="color:{disk_ui.ASSIGNED_OFF}">HDD77', cell('Н1'))
+        self.assertNotIn(dp.CHECKED_BG, s.cards['Н1'].styleSheet())
+        s.set_checked('Н1', True)                  # щелчок галочки - сразу
+        self.assertIn(f'color:{disk_ui.ASSIGNED_ON}; font-weight:bold">Z:', cell('Н1'))
+        self.assertIn(f'color:{disk_ui.ASSIGNED_OFF}; font-weight:normal">', cell('Н1'))
+        self.assertIn(dp.CHECKED_BG, s.cards['Н1'].styleSheet())                      # отмеченная - светло-зелёная
         self.assertNotIn(disk_ui.ASSIGNED_OFF, cell('Н2'))                          # не отмеченное - зелёное
-        s.t.item(self.row_of(s, 'Н1'), 0).setCheckState(Qt.Unchecked)
+        s.set_checked('Н1', False)
         self.assertNotIn(disk_ui.ASSIGNED_ON, cell('Н1'))
         # диалог «Новое направление»: оранжевый - уже у другого направления; голубой фон - выбран сейчас
         dlg = dp.DirectionDialog(s, s.data, None)
@@ -456,7 +460,7 @@ class SectionTest(DirBase):
                 got.append(dp.load_choice())
         self.win.pages.append((dp.RAZBOR_PAGE, Page()))
         self.win.page = lambda name: dict(self.win.pages)[name]
-        s.t.item(self.row_of(s, 'Н2'), 0).setCheckState(Qt.Checked)
+        s.set_checked('Н2', True)
         s.update_buttons()
         s.b_go.click()
         self.assertEqual(got, [['Н2']])
@@ -474,7 +478,7 @@ class OverviewTest(DirBase):
         return ov
 
     def table(self, ov):
-        return [[ov.dt.item(i, j).text() for j in range(ov.dt.columnCount())] for i in range(ov.dt.rowCount())]
+        return [r['cells'] for r in ov.rows]
 
     def test_service_counts_direction_disks(self):
         import sqlite3
@@ -497,32 +501,28 @@ class OverviewTest(DirBase):
         rows = self.table(page)
         self.assertEqual([r[0] for r in rows], ['HDD45', 'HDD77', 'HDD91'])
         self.assertEqual(page.all_note.text(), 'галочек нет — показаны все')
-        self.assertEqual(rows[0][1], 'нет')                                          # не подключён
-        self.assertEqual(rows[0][2], '—')
-        heads = [page.dt.horizontalHeaderItem(j).text().replace('\n', ' ') for j in range(page.dt.columnCount())]
-        self.assertEqual(heads, ['Диск', 'Подключён', 'Свободно', 'Общий объём файлов, ГБ',
-                                 'Проверено по хешу при сканировании', 'Скопировано программой, хеш сверен',
-                                 'Скопировано, сверен только размер', 'Со слов «Я сделал в Проводнике»',
-                                 'Хеш устарел (файл изменён)', 'Хеш не считался'])
-        self.assertFalse(any(f'({x})' in ' '.join(heads) for x in 'SCZUX'))          # букв в заголовках нет
-        self.assertEqual(rows[0][4:], ['1', '0', '0', '1', '0', '0'])
-        self.assertEqual(page.dt.horizontalHeaderItem(8).toolTip(), 'После подсчёта хеша у файла поменялись размер или '
-                         'дата. Пересканируйте папку, чтобы пересчитать хеш.')
-        self.assertIn('Чтобы посчитать хеш — пересканируйте папки (раздел «Диски и папки» → пересканирование)',
-                      page.dt.horizontalHeaderItem(app.C_NOHASH).toolTip())
-        self.assertIsNone(page.dt.cellWidget(0, app.C_NOHASH))                      # 0 - без ссылки
-        u = page.dt.item(0, 7)
-        self.assertEqual(u.foreground().color().name(), app.RED)
-        self.assertIn('пересканировать папку', u.toolTip())
-        z = page.dt.item(2, 6)
-        self.assertEqual(z.foreground().color().name(), app.RED)
-        self.assertIn('пересчитать хеши', z.toolTip())
-        self.assertNotEqual(page.dt.item(0, 6).foreground().color().name(), app.RED)    # 0 - не красным
+        self.assertEqual(app.DISK_HEAD, ['Диск', 'Всего, ГБ', 'при сканировании', 'скопировано программой',
+                                         'сверен только размер', 'со слов «Я сделал в Проводнике»',
+                                         'хеш устарел (файл изменён)', 'Хеш не считался'])
+        html = page.dt.text()
+        for x in ('Копии проверены по хешу', 'Копии не проверены', 'colspan="2"', 'colspan="3"', 'Хеш не<br>считался'):
+            self.assertIn(x, html)                                                   # двухуровневый заголовок
+        for gone in ('Подключён', 'Свободно'):
+            self.assertNotIn(gone, html)                                             # они - в строках направлений
+        self.assertFalse(any(f'({x})' in html for x in 'SCZUX'))                     # букв в заголовках нет
+        self.assertEqual(rows[0][2:], ['1', '0', '0', '1', '0', '0'])
+        self.assertNotIn('rescan:HDD45', html)                                       # 0 - без ссылки
+        self.assertEqual(page.rows[0]['red'], {5})                                   # U - красным
+        self.assertEqual(page.rows[2]['red'], {4})                                   # Z - красным
+        self.assertIn(f'<b style="color:{app.RED}">1</b>', html)
+        todo = page.todo.text()
+        self.assertIn('пересканировать папку', todo)                                 # что делать - под таблицей
+        self.assertIn('пересчитать хеши', todo)
         s = page.dirs
-        s.t.item(self.row_of(s, 'Н2'), 0).setCheckState(Qt.Checked)                  # щелчок - сразу
+        s.set_checked('Н2', True)                  # щелчок - сразу
         self.assertEqual([r[0] for r in self.table(page)], ['HDD91'])
         self.assertEqual(page.all_note.text(), '')
-        s.t.item(self.row_of(s, 'Н1'), 0).setCheckState(Qt.Checked)
+        s.set_checked('Н1', True)
         self.assertEqual([r[0] for r in self.table(page)], ['HDD45', 'HDD77', 'HDD91'])
         self.assertEqual(page.all_note.text(), '')
         self.assertNotIn('База собрана', page.text.toPlainText())
@@ -536,7 +536,7 @@ class OverviewTest(DirBase):
         self.assertEqual(app.shown_disks(dirs, ['Н2', 'Н3']), (['HDD91'], False, 'у Н3 диск не назначен'))
         self.assertEqual(app.shown_disks(dirs, ['Н2']), (['HDD91'], False, ''))
         s = self.section()                                                           # в окне без диска не отметить
-        self.assertFalse(s.t.item(self.row_of(s, 'Н3'), 0).flags() & Qt.ItemIsUserCheckable)
+        self.assertFalse(s.cards['Н3'].box.isEnabled())
         tasks = [dict(task='Т1', state='идёт', done=2, total=9, errors=1),
                  dict(task='Т2', state='идёт', done=2, total=9, errors=0),
                  dict(task='Т3', state='не запускалось', done=0, total=9, errors=3),
@@ -548,9 +548,7 @@ class OverviewTest(DirBase):
         page.ov['disks_info'] = many
         page.current_dirs = lambda: ({'Н9': type('D', (), dict(num='Н9', disks=tuple(many)))()}, [])
         page.paint_disks()
-        self.assertEqual(page.dt.rowCount(), 20)
-        rows8 = page.dt.horizontalHeader().height() + sum(page.dt.rowHeight(i) for i in range(app.MAX_DISK_ROWS)) + 6
-        self.assertEqual(page.dt.height(), rows8)                                    # дальше - прокрутка внутри таблицы
+        self.assertEqual(len(page.rows), 20)                                         # таблица растёт, страница прокручивается
 
     def test_attention_groups(self):
         self.assertEqual(sv.attention(dict(skipped=[], unique=[], warn=[]), []), [])
@@ -627,16 +625,55 @@ class OverviewTest(DirBase):
         page = self.page()
         rows = self.table(page)
         i91 = [r[0] for r in rows].index('HDD91')
-        lab = page.dt.cellWidget(i91, app.C_NOHASH)
-        self.assertIn('Пересканировать', lab.text())
+        lab = page.dt
+        self.assertIn('href="rescan:HDD91">Пересканировать', lab.text())
         self.assertIn('Чтобы посчитать хеш', lab.toolTip())
         self.assertTrue(rows[i91][app.C_NOHASH].startswith('1'))
-        x = page.dt.item(0, 8)                                                       # HDD45: X - красным
-        self.assertEqual(x.foreground().color().name(), app.RED)
-        self.assertIn('поменялись размер или дата', x.toolTip())
+        self.assertEqual(page.rows[0]['red'], {6})                                   # HDD45: X - красным
+        self.assertIn('поменялись размер или дата', page.todo.text())
         lab.linkActivated.emit('rescan:HDD91')
         self.assertEqual(self.win.opened[-1], 'Диски и папки')
         self.assertEqual(shown, ['HDD91'])
+
+class DisksServiceTest(DirBase):
+    """«Диски и папки» (этап 10): решение владельца плашкой - действующая отметка разбора; «чего нет на дисках
+    направления» - по SHA-256 с подтверждённой копией, устаревший хеш и непроверенная копия - отдельно."""
+
+    def test_folder_mark(self):
+        dirs = sv.directions()
+        ms = hb.MarkSet.build([(2, 'A', dirs['Н2'].verdict()), (3, 'A\\b', hb.MARK_SKIP)], dirs)
+        self.assertEqual(sv.folder_mark('A', ms, dirs, set()), dict(kind='dir', text='Н2 Работа', own=True, src=''))
+        self.assertEqual(sv.folder_mark('A\\c', ms, dirs, set())['src'], 'A')        # от родительской папки
+        self.assertEqual(sv.folder_mark('A\\b\\d', ms, dirs, set())['kind'], 'skip')
+        self.assertEqual(sv.folder_mark('Z', ms, dirs, set())['kind'], '')           # решения нет
+        root = hb.MarkSet.build([(2, '', hb.MARK_SKIP)], dirs)
+        self.assertEqual(sv.folder_mark('Z', root, dirs, set())['src'], 'весь носитель')
+        self.assertEqual(sv.folder_mark('ПЕРЕНЕСЕНО', root, dirs, {'ПЕРЕНЕСЕНО'})['kind'], 'service')
+        self.assertEqual(sv.folder_mark('ПЕРЕНЕСЕНО\\x', root, dirs, {'ПЕРЕНЕСЕНО'})['kind'], '')   # не наследуется
+
+    def test_folder_missing(self):
+        import sqlite3
+        r = sv.folder_missing('HDD45', 'X', ['HDD77', 'HDD45'])
+        self.assertEqual((r['files'], r['missing']['HDD77'][0], r['missing']['HDD45']), (2, 1, (0, 0.0)))
+        with sqlite3.connect(hb.DB) as c:                                            # временная база теста
+            c.execute("update files set ev='Z' where disk='HDD77'")
+        hb.close_last()
+        r = sv.folder_missing('HDD45', 'X', ['HDD77'])
+        self.assertEqual((r['missing']['HDD77'][0], r['weak']['HDD77']), (2, 1))     # копия 1.jpg есть, но не проверена
+        with sqlite3.connect(hb.DB) as c:
+            c.execute("update files set ev='X' where disk='HDD45' and path='X\\2.jpg'")
+        hb.close_last()
+        r = sv.folder_missing('HDD45', 'X', ['HDD77'])
+        self.assertEqual((r['files'], r['stale'], r['missing']['HDD77'][0]), (1, 1, 1))   # устаревший - не сравнивается
+        sv.add_marks_batch('HDD45', [('X', sv.directions()['Н2'].verdict())])
+        found = sv.find_folders(['x'], disk='HDD45')                                 # найденные - с составом и решением
+        self.assertEqual([f['path'] for f in found], ['X'])
+        self.assertEqual(len(found[0]['types']), 5)
+        self.assertAlmostEqual(sum(found[0]['types']) * hb.GIB, 300)
+        self.assertEqual(found[0]['mark']['kind'], 'dir')
+        info = sv.disk_hash_info('HDD45')
+        self.assertIn('хеш у всех файлов · опись от', info['text'])
+
 
 if __name__ == '__main__':
     unittest.main()

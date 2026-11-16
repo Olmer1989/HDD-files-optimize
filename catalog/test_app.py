@@ -71,21 +71,30 @@ class WindowTest(Base):
         self.w.open_page('Диски и папки')
         dp = self.w.page('Диски и папки')
         self.assertTrue(wait(lambda: dp.t.rowCount() == 4))
-        row = [dp.t.item(i, 0).text() for i in range(4)].index('HDD90')
+        row = [r['disk'] for r in dp.rows].index('HDD90')
         dp.t.selectRow(row)
+        N = app.T_NAME
         root = dp.tree.topLevelItem(0)
         self.assertTrue(wait(lambda: root.childCount() == 2))                   # A и B, лениво
-        names = sorted(root.child(i).text(0) for i in range(2))
+        names = sorted(root.child(i).text(N) for i in range(2))
         self.assertEqual(names, ['A', 'B'])
-        a = next(root.child(i) for i in range(2) if root.child(i).text(0) == 'A')
+        a = next(root.child(i) for i in range(2) if root.child(i).text(N) == 'A')
         a.setExpanded(True)
-        self.assertTrue(wait(lambda: a.childCount() == 1 and a.child(0).text(0) == 'sub'))
+        self.assertTrue(wait(lambda: a.childCount() == 1 and a.child(0).text(N) == 'sub'))
         dp.tree.setCurrentItem(a)
-        dp.presence()
-        self.assertTrue(wait(lambda: 'Нет на 45' in dp.info.text()))
+        import types
+        import directions_page
+        real = directions_page.chosen
+        directions_page.chosen = lambda: [types.SimpleNamespace(disks=('HDD45', 'HDD77'))]
+        try:
+            dp.presence()
+            self.assertTrue(wait(lambda: 'HDD45' in dp.info.text() and 'HDD77' in dp.info.text()), dp.info.text())
+        finally:
+            directions_page.chosen = real
+        self.assertIn('HDD90\\A', dp.info.text())
         dp.search.setText('sub')
         dp.find()
-        self.assertTrue(wait(lambda: dp.tree.topLevelItemCount() == 1 and 'A\\sub' in dp.tree.topLevelItem(0).text(0)))
+        self.assertTrue(wait(lambda: dp.tree.topLevelItemCount() == 1 and 'A\\sub' in dp.tree.topLevelItem(0).text(N)))
         self.assertEqual(self.errors, [])
 
     def test_new_journal_is_applied_by_timer(self):
@@ -344,10 +353,10 @@ class CommandsUiTest(CommandsTest):
         texts = [combo.itemText(i) for i in range(combo.count())]
         self.assertEqual(combo.itemData(0), 'HDD77')                          # подключённые сверху, по номеру
         self.assertEqual(combo.itemData(1), 'HDD91')
-        self.assertEqual(texts[1], '● HDD91 — E: — Исходники (ADATA 2 ТБ)')
+        self.assertEqual(texts[1], '● HDD91 — E: — Исходники')
         self.assertEqual(texts[2], '')                                        # разделитель
-        self.assertEqual(texts[3], 'HDD45 — Бэкап (16 ТБ) — не подключён')
-        self.assertIn('HDD90 — ACASIS EC-7352, 750 ГБ — не подключён', texts)
+        self.assertEqual(texts[3], 'HDD45 — Бэкап — не подключён')            # модели и объёма нет (16.11)
+        self.assertIn('HDD90 — не подключён', texts)                          # метки тома нет - только номер
         self.assertTrue(combo.itemData(1, Qt.FontRole).bold())
         self.assertEqual(combo.currentIndex(), -1)
         self.assertEqual(combo.placeholderText(), cpg.CHOOSE_DISK)

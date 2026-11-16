@@ -24,11 +24,11 @@ from hb_core import api as hb
 import service as sv
 import disk_ui
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGridLayout,
-                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-                               QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QTextBrowser,
+                               QVBoxLayout, QWidget)
 
 CHOICE_NAME = 'окно - выбор направлений.json'
 RAZBOR_PAGE = 'Разбор носителя'
@@ -99,17 +99,6 @@ def section_data():
     return dict(dirs=dirs, disks=rows, by=by, free=free, choice=load_choice())
 
 
-def disk_line(disk, by, writing=False):
-    """Диск строки направления (второй круг, 16.11.2026): зелёный; оранжевый - направление отмечено галочкой «Пишем
-    команды»; неподключённый - бледнее (и «не подключён» в тексте)."""
-    r = by.get(disk) or {'disk': disk, 'label': '', 'letter': ''}
-    text = disk_ui.disk_text(r)
-    color, bold = disk_ui.dir_disk_color(bool(r.get('letter')), writing)
-    if bold:
-        return f'<b style="color:{color}">{text}</b>'
-    return f'<span style="color:{color}">{text}</span>'
-
-
 def gb(x):
     return f'{x:,.0f}'.replace(',', ' ')
 
@@ -124,62 +113,238 @@ def kind_text(kind):
     return hb.kind_text(cats, near)
 
 
-# ---------- секция в «Обзоре» ----------
+# ---------- секция в «Обзоре»: строки-карточки (четвёртый круг, 16.11.2026) ----------
+
+CHECKED_BG, CARD_BG, CARD_BORDER = '#e8f5e9', '#ffffff', '#d0d7de'
+TAG_BLUE = ('#e3f2fd', '#1565c0', '#90caf9')          # фон, текст, рамка тега категории
+TAG_GRAY = ('#eeeeee', '#424242', '#bdbdbd')
+TAG_RED = ('#ffebee', '#c62828', '#ef9a9a')
+OFF_BADGE = ('#f3e5d8', '#a1662f', '#d7b899')         # плашка «не подключён» (серо-оранжевая)
+# короткие подписи категорий для тегов (порядок - как в диалоге)
+TAG_LABELS = ((hb.CAT_PHOTO, 'Фото'), (hb.CAT_VIDEO, 'Видео'), (hb.CAT_DOC, 'Документы'), (hb.CAT_ARCH, 'Архивы'),
+              (hb.CAT_PROJ, 'Проекты монтажа и графики'), (hb.CAT_MUSIC, 'Музыка'), (hb.CAT_OTHER, 'Другие'))
+
+
+def kind_tags(kind):
+    """«Что копировать» тегами: -> ([(текст, 'blue'/'gray'/'red')], мелкая приписка)."""
+    cats, near, ok = hb.parse_kind(kind)
+    if not ok:
+        return [(f'не распознано («{kind}») — ничего не копируется', 'red')], ''
+    if cats == hb.ALL_CATS and not near:
+        return [('Все файлы', 'gray')], 'кроме программ и временных'
+    tags = []
+    for cat, text in TAG_LABELS:
+        if cat in cats:
+            tags.append((NEAR_TEXT if cat == hb.CAT_DOC and near else text, 'blue'))
+    return tags, ''
+
+
+def badge_css(colors, bold=False):
+    bg, fg, border = colors
+    return (f'background:{bg}; color:{fg}; border:1px solid {border}; border-radius:9px; padding:1px 8px;'
+            + (' font-weight:bold;' if bold else ''))
+
+
+class FlowLayout(QLayout):
+    """Раскладка «в строку с переносом» (теги): ничего не уходит за правый край."""
+
+    def __init__(self, parent=None, spacing=6):
+        super().__init__(parent)
+        self.items, self.gap = [], spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):                                   # noqa: N802
+        self.items.append(item)
+
+    def count(self):
+        return len(self.items)
+
+    def itemAt(self, i):                                       # noqa: N802
+        return self.items[i] if 0 <= i < len(self.items) else None
+
+    def takeAt(self, i):                                       # noqa: N802
+        return self.items.pop(i) if 0 <= i < len(self.items) else None
+
+    def expandingDirections(self):                             # noqa: N802
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self):                               # noqa: N802
+        return True
+
+    def heightForWidth(self, w):                               # noqa: N802
+        return self._do(QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, rect):                               # noqa: N802
+        super().setGeometry(rect)
+        self._do(rect, False)
+
+    def sizeHint(self):                                        # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self):                                     # noqa: N802
+        s = QSize()
+        for it in self.items:
+            s = s.expandedTo(it.minimumSize())
+        return s
+
+    def _do(self, rect, test):
+        x, y, line = rect.x(), rect.y(), 0
+        for it in self.items:
+            hint = it.sizeHint()
+            if x + hint.width() > rect.right() + 1 and line > 0:
+                x, y, line = rect.x(), y + line + self.gap, 0
+            if not test:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self.gap
+            line = max(line, hint.height())
+        return y + line - rect.y()
+
+
+def tag_label(text, look):
+    lab = QLabel(text)
+    lab.setObjectName('tag')
+    lab.setProperty('look', look)
+    lab.setStyleSheet(badge_css({'blue': TAG_BLUE, 'gray': TAG_GRAY}.get(look, TAG_RED)))
+    return lab
+
+
+def disk_row_html(disk, by, free, writing):
+    """Строка диска в карточке: «I: My Book — HDD55 · свободно 421 ГБ» (подключён) или «My Book — HDD55» и плашка
+    «не подключён». Цвет: оранжевый - направление отмечено галочкой; зелёный - нет; неподключённый - бледнее."""
+    r = by.get(disk) or {'disk': disk, 'label': '', 'letter': ''}
+    on = bool(r.get('letter'))
+    color, bold = disk_ui.dir_disk_color(on, writing)
+    label = disk_ui.disk_name(r)
+    text = html_esc(' — '.join(x for x in (disk_ui.disk_place(r) if label else r.get('letter'), disk) if x))
+    w = 'bold' if bold else 'normal'
+    out = f'<span style="color:{color}; font-weight:{w}">{text}</span>'
+    if on:
+        out += f' <span style="color:#555">· свободно {gb(free[disk])} ГБ</span>' if disk in free else ''
+    else:
+        bg, fg, _ = OFF_BADGE
+        out += f' &nbsp;<span style="background:{bg}; color:{fg}">&nbsp;не подключён&nbsp;</span>'
+    return out
+
+
+class DirectionCard(QFrame):
+    """Одна строка-карточка направления: галочка · имя, описание, диски, «Что копировать:» тегами, папка на носителе ·
+    кнопка «Изменить» / «Назначить диск»."""
+
+    def __init__(self, section, d):
+        super().__init__()
+        self.section, self.d, self.num = section, d, d.num
+        self.setObjectName('dircard')
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(12)
+        self.box = QCheckBox()
+        self.box.setEnabled(bool(d.disks))
+        self.box.setToolTip('Отметить: для этого направления пишем команды копирования' if d.disks else
+                            'Сначала назначьте направлению диск («Назначить диск»)')
+        lay.addWidget(self.box, 0, Qt.AlignTop)
+        mid = QVBoxLayout()
+        mid.setSpacing(4)
+        self.name = QLabel(f'<b>{html_esc(d.num)} {html_esc(d.name)}</b>')
+        self.name.setWordWrap(True)
+        f = self.name.font()
+        f.setPointSizeF(f.pointSizeF() + 1)
+        self.name.setFont(f)
+        if d.former:
+            self.name.setToolTip('Прежние имена: ' + ', '.join(d.former))
+        mid.addWidget(self.name)
+        self.desc = QLabel(d.desc or '')
+        self.desc.setWordWrap(True)
+        self.desc.setStyleSheet('color:#555')
+        self.desc.setVisible(bool(d.desc))
+        mid.addWidget(self.desc)
+        self.disks = QLabel('')
+        self.disks.setTextFormat(Qt.RichText)
+        self.disks.setWordWrap(True)
+        mid.addWidget(self.disks)
+        kinds = QWidget()
+        kl = FlowLayout(kinds)
+        what = QLabel('Что копировать:')
+        what.setStyleSheet('color:#555')
+        kl.addWidget(what)
+        tags, small = kind_tags(d.kind)
+        self.tags = [t for t, _ in tags]
+        self.small = small
+        for text, look in tags:
+            kl.addWidget(tag_label(text, look))
+        if small:
+            s = QLabel(small)
+            s.setStyleSheet('color:#777; font-size:8pt')
+            kl.addWidget(s)
+        mid.addWidget(kinds)
+        folder = d.folder()
+        self.folder = None
+        if folder:
+            self.folder = QLabel(f'📁 На носителе: «{folder}»')
+            self.folder.setStyleSheet('color:#37474f; background:#f5f7fa; border:1px solid #b0bec5; border-radius:4px; '
+                                      'padding:2px 8px')
+            self.folder.setToolTip('Так называется папка на носителе, куда переносятся уже скопированные папки.')
+            row = QHBoxLayout()
+            row.addWidget(self.folder)
+            row.addStretch()
+            mid.addLayout(row)
+        lay.addLayout(mid, 1)
+        self.btn = QPushButton('Изменить' if d.disks else 'Назначить диск')
+        self.btn.setToolTip('Имя, описание и «что копировать». Диски здесь не меняются.' if d.disks else
+                            'Диск выбирается один раз — при первом назначении.')
+        self.btn.clicked.connect(lambda: section.edit(self.num) if self.d.disks else section.assign(self.num))
+        lay.addWidget(self.btn, 0, Qt.AlignTop)
+
+    def paint(self, writing):
+        """Отмеченная - светло-зелёный фон; диски - оранжевым у отмеченной, зелёным у остальных."""
+        self.writing = writing
+        bg = CHECKED_BG if writing else CARD_BG
+        border = '#81c784' if writing else CARD_BORDER
+        self.setStyleSheet(f'QFrame#dircard {{ background:{bg}; border:1px solid {border}; border-radius:6px; }}')
+        data = self.section.data
+        if not self.d.disks:
+            self.disks.setText('<span style="color:#c62828">диск не назначен</span>')
+        else:
+            self.disks.setText('<br>'.join(disk_row_html(x, data['by'], data['free'], writing) for x in self.d.disks))
+
 
 class DirectionsSection(QWidget):
     def __init__(self, win):
         super().__init__()
         self.win, self.data, self.filling, self.note = win, None, False, ''
+        self.cards = {}                    # номер направления -> DirectionCard
         self.on_choice = None              # «Обзор»: перерисовать нижнюю таблицу дисков (щелчок галочки, перечитывание)
         self.on_saved = None               # «Обзор»: после сохранения в диалоге перечитать всё
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(QLabel('<b>Направления</b> — куда собираются файлы с носителей: у каждого направления свои диски. '
-                             'Галочкой отметьте направления, для которых сейчас пишем команды копирования.'))
-        legend = QLabel(f'Диски: <b style="color:{disk_ui.DIR_ON}">зелёный</b> — диск направления, '
-                        f'<b style="color:{disk_ui.ASSIGNED_ON}">оранжевый</b> — диск направления, отмеченного '
-                        f'галочкой (для него пишем команды); <span style="color:{disk_ui.DIR_OFF}">бледный</span> — '
-                        'не подключён.')
+        head = QLabel('<b>Направления</b> — куда собираются файлы с носителей: у каждого направления свои диски. '
+                      'Галочкой отметьте направления, для которых сейчас пишем команды копирования.')
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        legend = QLabel(f'Диски: <b style="color:{disk_ui.ASSIGNED_ON}">оранжевый</b> — у отмеченного направления '
+                        f'(для него пишем команды), <b style="color:{disk_ui.DIR_ON}">зелёный</b> — у остальных; '
+                        f'<span style="color:{disk_ui.DIR_OFF}">бледный</span> — не подключён.')
         legend.setStyleSheet('color:#555')
         legend.setWordWrap(True)
         lay.addWidget(legend)
-        self.t = QTableWidget(0, len(HEADERS))
-        self.t.setHorizontalHeaderLabels(HEADERS)
-        self.t.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.t.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.t.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.t.verticalHeader().setVisible(False)
-        h = self.t.horizontalHeader()
-        h.setSectionResizeMode(QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(2, QHeaderView.Interactive)       # описание - с переносом строк, ширину можно тянуть
-        self.t.setColumnWidth(2, 230)
-        h.setStretchLastSection(True)
-        self.t.setWordWrap(True)
-        self.t.itemChanged.connect(self.on_item)
-        self.t.itemSelectionChanged.connect(self.update_buttons)
-        self.t.doubleClicked.connect(lambda *_: self.edit())
-        lay.addWidget(self.t)
+        self.list = QVBoxLayout()
+        self.list.setSpacing(6)
+        lay.addLayout(self.list)
         bar = QHBoxLayout()
         self.b_add = QPushButton('Добавить направление…')
-        self.b_edit = QPushButton('Изменить…')
-        self.b_disk = QPushButton('Назначить диск…')
+        self.b_add.clicked.connect(self.add)
+        bar.addWidget(self.b_add, 0, Qt.AlignTop)
+        bar.addSpacing(16)
+        self.hint = QLabel('')
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet('color:#555')
+        bar.addWidget(self.hint, 1)
         self.b_go = QPushButton(GO_TEXT)
         f = self.b_go.font()
         f.setBold(True)
         self.b_go.setFont(f)
-        self.b_add.clicked.connect(self.add)
-        self.b_edit.clicked.connect(self.edit)
-        self.b_disk.clicked.connect(self.assign)
         self.b_go.clicked.connect(self.go)
-        for b in (self.b_add, self.b_edit, self.b_disk):
-            bar.addWidget(b)
-        bar.addStretch()
-        bar.addWidget(self.b_go)
+        bar.addWidget(self.b_go, 0, Qt.AlignTop)
         lay.addLayout(bar)
-        self.hint = QLabel('')
-        self.hint.setWordWrap(True)
-        self.hint.setStyleSheet('color:#555')
-        lay.addWidget(self.hint)
         self.update_buttons()
 
     # --- данные ---
@@ -188,99 +353,44 @@ class DirectionsSection(QWidget):
 
     def render(self, data):
         self.data = data
-        dirs, by, free = data['dirs'], data['by'], data['free']
         choice = set(data['choice'])
-        sel = self.current()
         self.filling = True
-        self.t.setRowCount(0)
-        for d in dirs.values():
-            i = self.t.rowCount()
-            self.t.insertRow(i)
-            chk = QTableWidgetItem('')
-            if d.disks:
-                chk.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-                chk.setCheckState(Qt.Checked if d.num in choice else Qt.Unchecked)
-                chk.setToolTip('Отметить: для этого направления пишем команды копирования')
-            else:
-                chk.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                chk.setText('нет диска')
-                chk.setForeground(QColor(OFF))
-                chk.setToolTip('Сначала назначьте направлению диск («Назначить диск…»)')
-            chk.setData(Qt.UserRole, d.num)
-            self.t.setItem(i, 0, chk)
-            name = QTableWidgetItem(f'{d.num} {d.name}')
-            f = name.font()
-            f.setBold(True)
-            name.setFont(f)
-            if d.former:
-                name.setToolTip('Прежние имена: ' + ', '.join(d.former))
-            self.t.setItem(i, 1, name)
-            desc = QTableWidgetItem(d.desc or '')
-            if not d.desc:
-                desc.setText('— описания нет («Изменить…»)')
-                desc.setForeground(QColor(OFF))
-            self.t.setItem(i, 2, desc)
-            free_html = '<br>'.join(f'{gb(free[x])} ГБ' if x in free else '—' for x in d.disks) if d.disks else '—'
-            self.t.setItem(i, 3, QTableWidgetItem(''))
-            self.t.setItem(i, 4, QTableWidgetItem(''))
-            self.t.setCellWidget(i, 3, self._label(self.disks_html(d, d.num in choice)))
-            self.t.setCellWidget(i, 4, self._label(free_html, right=True))
-            self.t.setItem(i, 5, QTableWidgetItem(kind_text(d.kind)))
-            self.t.setItem(i, 6, QTableWidgetItem(d.folder() or '—'))
-        self.t.resizeRowsToContents()
+        while self.list.count():
+            w = self.list.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self.cards = {}
+        for d in data['dirs'].values():
+            card = DirectionCard(self, d)
+            card.box.setChecked(bool(d.disks) and d.num in choice)
+            card.box.toggled.connect(self.on_toggled)
+            self.cards[d.num] = card
+            self.list.addWidget(card)
         self.filling = False
-        h = self.t.horizontalHeader().height() + sum(self.t.rowHeight(i) for i in range(self.t.rowCount())) + 8 \
-            + self.t.horizontalScrollBar().sizeHint().height()
-        self.t.setFixedHeight(min(max(h, 80), 420))
-        if sel:
-            self.select(sel)
+        self.paint_disks()
         self.update_buttons()
         if self.on_choice:
             self.on_choice()
 
-    def disks_html(self, d, writing):
-        if not d.disks:
-            return '<span style="color:#c62828">диск не назначен</span>'
-        return '<br>'.join(disk_line(x, self.data['by'], writing) for x in d.disks)
-
     def paint_disks(self):
-        """Щелчок галочки: оранжевым - только диски отмеченных направлений (без перечитывания базы)."""
+        """Щелчок галочки: фон карточки и цвета дисков - без перечитывания базы."""
         if self.data is None:
             return
         on = set(self.checked())
-        for i in range(self.t.rowCount()):
-            d = self.data['dirs'].get(self.t.item(i, 0).data(Qt.UserRole))
-            lab = self.t.cellWidget(i, 3)
-            if d is not None and lab is not None:
-                lab.setText(self.disks_html(d, d.num in on))
-
-    @staticmethod
-    def _label(html, right=False):
-        lab = QLabel(html)
-        lab.setTextFormat(Qt.RichText)
-        lab.setContentsMargins(4, 2, 4, 2)
-        if right:
-            lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        return lab
+        for num_, card in self.cards.items():
+            card.paint(num_ in on)
 
     # --- выбор ---
-    def current(self):
-        r = self.t.currentRow()
-        it = self.t.item(r, 0) if r >= 0 else None
-        return it.data(Qt.UserRole) if it else None
-
-    def select(self, num):
-        for i in range(self.t.rowCount()):
-            if self.t.item(i, 0).data(Qt.UserRole) == num:
-                self.t.selectRow(i)
-                return
-
     def checked(self):
-        return [self.t.item(i, 0).data(Qt.UserRole) for i in range(self.t.rowCount())
-                if self.t.item(i, 0).flags() & Qt.ItemIsUserCheckable and self.t.item(i, 0).checkState() == Qt.Checked]
+        return [n for n, c in self.cards.items() if c.d.disks and c.box.isChecked()]
 
-    def on_item(self, it):
-        if self.filling or it.column() != 0:
+    def set_checked(self, num_, on=True):
+        """Поставить/снять галочку направления (как щелчок владельца)."""
+        self.cards[num_].box.setChecked(on)
+
+    def on_toggled(self, *_):
+        if self.filling:
             return
         nums = self.checked()
         save_choice(nums)
@@ -295,12 +405,6 @@ class DirectionsSection(QWidget):
         return RAZBOR_PAGE in [n for n, _ in getattr(self.win, 'pages', [])]
 
     def update_buttons(self):
-        num = self.current()
-        d = self.data['dirs'].get(num) if (self.data and num) else None
-        self.b_edit.setEnabled(d is not None)
-        self.b_disk.setEnabled(d is not None and not d.disks)
-        self.b_disk.setToolTip('' if d is None or not d.disks else
-                               'У направления уже есть диск. Диск выбирается один раз — при создании или первом назначении.')
         nums = self.checked()
         if not self.has_razbor():
             self.b_go.setEnabled(False)
@@ -314,13 +418,14 @@ class DirectionsSection(QWidget):
         if self.data:
             dirs = self.data['dirs']
             if nums:
-                self.hint.setText('Пишем команды для: ' + '; '.join(dirs[n].label() for n in nums if n in dirs) + '.')
+                text = 'Пишем команды для: <b>' + html_esc('; '.join(dirs[n].label() for n in nums if n in dirs)) + '</b>'
             else:
-                self.hint.setText('Галочки не стоят: отметьте направления, для которых пишем команды копирования.')
+                text = 'Галочки не стоят: отметьте направления, для которых пишем команды копирования.'
             if not self.has_razbor():
-                self.hint.setText(self.hint.text() + ' Экран «Разбор носителя» ещё не готов — кнопка перехода неактивна.')
+                text += ' Экран «Разбор носителя» ещё не готов — кнопка перехода неактивна.'
             if self.note:
-                self.hint.setText(self.note + ' ' + self.hint.text())
+                text = html_esc(self.note) + '<br>' + text
+            self.hint.setText(text)
 
     def go(self):
         nums = self.checked()
@@ -338,17 +443,15 @@ class DirectionsSection(QWidget):
             return
         DirectionDialog(self, self.data, None).exec()
 
-    def edit(self):
+    def edit(self, num_):
         """Только карточка: имя, «что собирается», «что копировать». Диски не показываются и не меняются."""
-        num = self.current()
-        if self.data is None or not num or num not in self.data['dirs']:
+        if self.data is None or num_ not in self.data['dirs']:
             return
-        DirectionDialog(self, self.data, self.data['dirs'][num], mode=CARD).exec()
+        DirectionDialog(self, self.data, self.data['dirs'][num_], mode=CARD).exec()
 
-    def assign(self):
+    def assign(self, num_):
         """Первое назначение диска - только направлению без диска (смены диска в окне нет)."""
-        num = self.current()
-        d = self.data['dirs'].get(num) if (self.data and num) else None
+        d = self.data['dirs'].get(num_) if self.data else None
         if d is None or d.disks:
             return
         DirectionDialog(self, self.data, d, mode=ASSIGN).exec()

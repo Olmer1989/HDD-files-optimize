@@ -33,24 +33,33 @@ def disk_key(d):
     return (0 if m.group(1) == 'HDD' else 1, m.group(1), int(m.group(2) or 0), d)     # диски, потом флешки
 
 
-def disk_title(r):
-    """Понятное название из описи: «метка тома (марка, объём)»; без метки - модель и объём."""
+def disk_name(r):
+    """Название диска для окна - ТОЛЬКО метка тома (16.11.2026, решение владельца): модель и док-станция («JMicron 6 ТБ»,
+    «WD 2 ТБ») - устройство подключения, в следующий раз будет другим, поэтому не показываются нигде.
+    Подпись в базе: «модель - объём - метка» (sv.disks() уже убрал номер HDD; метка сама может содержать « - »);
+    если номер не убран - он отбрасывается. Второе поле не похоже на объём - метка всё после модели. Метки нет - ''."""
     parts = [x.strip() for x in (r.get('label') or '').split(' - ') if x.strip()]
-    if not parts:
+    if parts and r.get('disk') and parts[0] == r.get('disk'):
+        parts = parts[1:]
+    if len(parts) < 2:
         return ''
-    model = parts[0]
-    size = parts[1] if len(parts) > 1 and SIZE_RE.match(parts[1]) else ''
-    vol = ' - '.join(parts[2:] if size else parts[1:])
-    brand = model.split()[0] if model.split() else ''
-    brand = brand if (brand.isalpha() or '_' in brand) and not any(ch.isdigit() for ch in brand) else ''
-    brief = ' '.join(x for x in (brand, size) if x)
-    if vol:
-        return f'{vol} ({brief})' if brief else vol
-    return ', '.join(x for x in (model, size) if x)
+    if SIZE_RE.match(parts[1]):
+        return ' - '.join(parts[2:])
+    return ' - '.join(parts[1:])
+
+
+disk_title = disk_name          # прежнее имя: все места окна получают подпись без модели
+
+
+def disk_place(r):
+    """«I: My Book» (подключён) / «My Book» (не подключён) / номер диска, если метки нет."""
+    r = as_row(r)
+    name = disk_name(r) or r.get('disk', '')
+    return f'{r["letter"]} {name}' if r.get('letter') else name
 
 
 def disk_text(r):
-    """«● HDD54 — E: — Исходники (ADATA 2 ТБ)» или «HDD61 — ACASIS EC-7352, 750 ГБ — не подключён»."""
+    """«● HDD54 — E: — Исходники» или «HDD61 — не подключён» (метки тома нет)."""
     r = as_row(r)
     name = disk_title(r)
     if r.get('letter'):

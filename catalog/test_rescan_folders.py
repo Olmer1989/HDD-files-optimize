@@ -134,7 +134,7 @@ class RescanWindowTest(Base):
             info = []
             with mock.patch.object(QMessageBox, 'information', side_effect=lambda *a: info.append(a[2])):
                 dp.rescan()                                                            # ничего не выбрано
-            self.assertIn('Выберите диск', info[-1])
+            self.assertIn('Отметьте папки', info[-1])
             plan = dict(letter='F:', folders=['A'], read=[1, 2e9], reuse=[5, 3e9], errors=[],
                         lines=['HDD90: папок 1', 'Прочитать с диска: 1 файлов, 2,00 ГБ.'])
             proc = mock.Mock()
