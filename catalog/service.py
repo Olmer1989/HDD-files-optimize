@@ -1718,8 +1718,9 @@ TEMPLATE_VER_RE = re.compile(r'версия (\d+)\.(\d+)')
 
 
 def copy_template_version(task):
-    """Версия шаблона копирования в папке задания: (2, 4) / (2, 3) / None. Для очереди: -Confirmed понимают только
-    задания 2.4 и новее; старые в автоматическую очередь не включаются (Дискуссия этапа 4, р2-7)."""
+    """Версия шаблона копирования в папке задания: (2, 5) / (2, 4) / (2, 3) / None. Для очереди: -Confirmed понимают
+    только задания 2.4 и новее (2.5 - как 2.4: те же параметры, отпечаток и коды выхода; сравнивать кортежем
+    `>= (2, 4)`); старые в автоматическую очередь не включаются (Дискуссия этапа 4, р2-7)."""
     try:
         with open(Path(task) / 'Копировать.ps1', encoding='utf-8-sig') as f:
             m = TEMPLATE_VER_RE.search(f.readline())
@@ -1800,7 +1801,7 @@ def copy_left(name):
             continue
         key = (f[0].strip(), (sub + SEP + f[1]) if sub else f[1])
         r = last.get(key, '')
-        if not (r.startswith('скопирован') or r == 'уже есть'):
+        if not hb.copy_ok(r):
             res.append(f)
     return res
 

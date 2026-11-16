@@ -1,7 +1,7 @@
 """Применение модуля «журнал скрипта» (копирование, перемещение, корзина)."""
 # Перенесено из hashbase.py механически 15.11.2026 (разбивка на модули); логика не менялась.
 from pathlib import Path
-from hb_core.consts import COPIED_PREFIX, EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, OLD_LOGS, SEP
+from hb_core.consts import COPIED_PREFIX, EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, HAVE_SHA, OLD_LOGS, SEP, copy_ok
 from hb_core.util import moved_rel, prefix_cond, rel_of
 from hb_core.sources import log_time, read_tsv
 from hb_core.apply_common import put_row
@@ -36,7 +36,7 @@ def apply_log(c, log, jobs, serials, report, seen, rows=None, start=0):
         i_t, i_r, i_s, i_src, i_dst = (head.index(x) for x in ('цель', 'результат', 'размер', 'источник', 'куда'))
         i_h = next((i for i, h in enumerate(head) if h.startswith('sha-256')), None)
         for f in body:
-            if len(f) <= i_dst or not (f[i_r].startswith('скопирован') or f[i_r] == 'уже есть'):
+            if len(f) <= i_dst or not copy_ok(f[i_r]):
                 continue
             disk = names.get(f[i_t]) or (f[i_t] if f[i_t] in jobs and f[i_t] not in names else None)
             if not disk:
@@ -48,8 +48,9 @@ def apply_log(c, log, jobs, serials, report, seen, rows=None, start=0):
             log_sha = (f[i_h].strip().lower() if i_h is not None and len(f) > i_h else '') or None
             got = lookup(src_disk, rel_of(f[i_src])[1]) if src_disk else None
             src_sha = (got[0] or got[3]) if got else None
-            if f[i_r].startswith('скопирован') and log_sha:
-                # скрипт сам прочитал и записал эти байты и посчитал их хеш
+            if (f[i_r].startswith('скопирован') or f[i_r].startswith(HAVE_SHA)) and log_sha:
+                # скрипт сам прочитал и записал эти байты и посчитал их хеш; или (шаблон 2.5) прочитал файл, уже
+                # лежавший в цели, и его SHA-256 совпал с описью / источником - тоже подтверждённая копия
                 put_row(c, disk, rel_of(f[i_dst])[1], int(f[i_s]), log_sha, got[2] if got else None, EV_COPY, None, origin)
             else:
                 # «уже есть» или копия, сверенная только по размеру: содержимое приёмника никто не читал.

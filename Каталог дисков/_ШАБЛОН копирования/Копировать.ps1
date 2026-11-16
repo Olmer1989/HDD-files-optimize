@@ -1,4 +1,14 @@
-﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.4 от 15.11.2026)
+﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.5 от 16.11.2026)
+#
+# Новое в 2.5 (логика v3, этап 15; «Логика_v3_разбор_носителя.md», раздел «Этап 15»):
+#   - если на месте назначения уже лежит файл ТОГО ЖЕ размера, он читается и его SHA-256 сравнивается с эталоном:
+#     SHA-256 из список.tsv, а если его там нет - SHA-256 источника (источник тогда читается целиком). Совпал -
+#     «уже есть, SHA-256 совпал» (в журнале - этот хеш; сборка базы засчитывает как подтверждённую копию, степень C).
+#     Не совпал - «КОНФЛИКТ: на месте назначения другой файл того же размера (SHA-256 отличается)»: ничего не
+#     перезаписывается, файл не скопирован, пробуется запасной экземпляр дубля (если есть). Другой размер - как раньше.
+#   - чтение при сверке - с тем же контролем, что копирование: диск не отвечает - код 2, Q - код 3, ошибка чтения -
+#     ОШИБКА (5 подряд, пропавший том - код 4). Простое «уже есть» (без сверки) 2.5 больше не пишет; в старых журналах
+#     оно читается как раньше (степень Z).
 #
 # Новое в 2.4 (логика v3, этап 4; «Логика_v3_разбор_носителя.md», раздел «Этап 4»):
 #   - запуск из очереди окна: -Confirmed -Expect <отпечаток> - без вопроса «да» и без «Enter - закрыть». Отпечаток -
@@ -30,7 +40,9 @@
 #   «скопирован, размер и SHA-256 совпали» - байты, прочитанные с источника, совпали с описью, и записано столько же
 #        байт. Записанный файл обратно НЕ читался.
 #   «скопирован, размер совпал» - то же, но хеша в описи не было: сверять было не с чем, в журнале хеш прочитанного.
-#   «уже есть» - в цели лежит файл с тем же размером. Его содержимое НЕ читалось: это не доказательство копии.
+#   «уже есть, SHA-256 совпал» (2.5) - в цели лежит файл того же размера; он прочитан, и его SHA-256 совпал с описью
+#        (или, если в описи хеша нет, с прочитанным источником). Это доказательство копии.
+#   «уже есть» (без слов о SHA-256, версии до 2.5) - в цели был файл того же размера, содержимое НЕ читалось.
 # Пять ошибок подряд считаются признаком сбоя диска: копирование прекращается (версия 2.3).
 # Подпапка источника не меняет того, какой это диск: цель на том же диске, что источник, отвергается (версия 2.3).
 #
@@ -50,8 +62,8 @@
 #   Ограничение: предел ожидания действует на чтение и запись данных. Открытие файла, создание папки и
 #   завершение записи (Flush) Windows может держать дольше. Если окно не меняется больше 5 минут -
 #   закройте его и проверьте диск; недописанный временный файл уберёт следующий запуск.
-# Файл, который уже лежит в цели с тем же размером, считается скопированным и повторно не читается
-#   (правило проекта). Копии, сделанные старыми скриптами, сверяются по SHA-256 отдельно.
+# Файл, который уже лежит в цели с тем же размером, не копируется заново: он читается и сверяется по SHA-256
+#   (2.5; до 2.5 сверялся только размер). Другое содержимое - КОНФЛИКТ, существующий файл не трогается.
 #
 # Параметры ниже нужны только для проверки шаблона на тестовых папках, при обычном запуске не задаются:
 #   -TestRoots 'HDD17=C:\тест\источник;HDD45=C:\тест\цель1'  (папки вместо дисков, без вопросов)
@@ -374,6 +386,42 @@ foreach ($t in $Targets) {
 $Start = Get-Date
 $LastUi = $Start.AddSeconds(-10)
 $bytes = New-Object byte[] $BufSize
+# 2.5: SHA-256 файла (только чтение) с тем же контролем, что копирование: ожидание не дольше $TimeoutSec на блок,
+# клавиша Q между блоками. -> @{Hash} | @{Hung = 'чтение с …'} | @{Q}. Ошибка чтения - исключение (общий catch строки).
+# Зависший поток не закрывается (закрытие тоже может зависнуть) - как при копировании.
+function Read-Sha([string]$path, [string]$who, $it, [int]$i) {
+    $s = $null; $h = $null
+    try {
+        $s = [System.IO.FileStream]::new($LongPrefix + $path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, $BufSize)
+        $h = [System.Security.Cryptography.SHA256CryptoServiceProvider]::new()
+        [double]$got = 0
+        while ($true) {
+            $rt = $s.ReadAsync($bytes, 0, $BufSize)
+            if (-not $rt.Wait($TimeoutMs)) { $s = $null; return @{ Hung = "чтение с $who" } }
+            $n = $rt.Result
+            if ($n -le 0) { break }
+            [void]$h.TransformBlock($bytes, 0, $n, $null, 0)
+            $got += $n
+            $now = Get-Date
+            if (($now - $script:LastUi).TotalMilliseconds -ge 500) {
+                $script:LastUi = $now
+                Write-Progress -Id 1 -Activity ("Сверка SHA-256 (уже лежит файл того же размера): файл {0} из {1}" -f $i, $Todo.Count) `
+                    -Status ("{0}% | {1} | Q - стоп" -f (Get-Pct ($Done + $got) $Total), $who) -PercentComplete (Get-Pct ($Done + $got) $Total)
+                Write-Progress -Id 2 -ParentId 1 -Activity $it.Rel -PercentComplete (Get-Pct $got $it.Size)
+            }
+            if ($CanKey -and [Console]::KeyAvailable) {
+                $k = [Console]::ReadKey($true)
+                if ($k.Key -eq 'Q') { return @{ Q = $true } }
+            }
+        }
+        [void]$h.TransformFinalBlock($bytes, 0, 0)
+        if ($got -ne $it.Size) { throw "при сверке с $who прочитано $got байт, а по списку $($it.Size)" }
+        return @{ Hash = [System.BitConverter]::ToString($h.Hash).Replace('-', '') }
+    } finally {
+        if ($s) { try { $s.Dispose() } catch { } }
+        if ($h) { try { $h.Dispose() } catch { } }
+    }
+}
 for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
     $it = $Todo[$idx]
     $i = $idx + 1
@@ -386,7 +434,26 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
         $dInfo = [System.IO.FileInfo]::new($LongPrefix + $dstPath)
         if (-not $sInfo.Exists) { $result = 'нет источника' }
         elseif ($sInfo.Length -ne $it.Size) { $result = "размер источника изменился ($($sInfo.Length))" }
-        elseif ($dInfo.Exists -and $dInfo.Length -eq $it.Size) { $result = 'уже есть' }
+        elseif ($dInfo.Exists -and $dInfo.Length -eq $it.Size) {
+            # 2.5: тот же размер - содержимое сверяется по SHA-256. Эталон - опись; нет в описи - прочитанный источник.
+            $want = $it.Hash; $r = @{}
+            if (-not $want) {
+                $r = Read-Sha $srcPath "$SrcName ($($Root[$SrcName]))" $it $i
+                if ($r.Hash) { $want = $r.Hash }
+            }
+            if ($want) { $r = Read-Sha $dstPath "$($it.Target) ($($Root[$it.Target]))" $it $i }
+            if ($r.Hung) {
+                $Hung = $r.Hung; $Stopped = $true; $Errors++
+                $result = "ОШИБКА: диск не отвечает дольше $TimeoutSec с - $Hung (сверка SHA-256). Копирование прекращено"
+            }
+            elseif ($r.Q) { $Stopped = $true; $QStop = $true; $result = 'ОСТАНОВЛЕНО (Q) во время сверки SHA-256, ничего не изменено' }
+            elseif ($want -and $r.Hash -eq $want) {
+                $result = 'уже есть, SHA-256 совпал'
+                $readHash = $r.Hash                 # SHA-256, прочитанный с места назначения (он и совпал)
+                if ($it.Spare) { $result += " (запасной экземпляр вместо «$($it.Spare)»)" }
+            }
+            else { $result = 'КОНФЛИКТ: на месте назначения другой файл того же размера (SHA-256 отличается)' }
+        }
         elseif ($dInfo.Exists) { $result = "КОНФЛИКТ: в цели другой размер ($($dInfo.Length)), не трогал" }
         else {
             [void][System.IO.Directory]::CreateDirectory($LongPrefix + $dstPath.Substring(0, $dstPath.LastIndexOf('\')))
@@ -466,7 +533,7 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
     }
     if ($sha) { try { $sha.Dispose() } catch { } }
     # Несколько ошибок подряд - признак сбоя диска: дальше не идём, чтобы не усугублять.
-    if ($result -like 'ОШИБКА*') { $ErrorsInRow++ } elseif ($result -like 'скопирован*' -or $result -eq 'уже есть') { $ErrorsInRow = 0 }
+    if ($result -like 'ОШИБКА*') { $ErrorsInRow++ } elseif ($result -like 'скопирован*' -or $result -like 'уже есть*') { $ErrorsInRow = 0 }
     if (-not $Stopped -and ($result -eq 'нет источника' -or $result -like 'ОШИБКА*')) {
         $check = if ($result -eq 'нет источника') { @($SrcName) } else { @($SrcName, $it.Target) }
         foreach ($n in $check) {
@@ -481,12 +548,12 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
         $Stopped = $true; $Failing = $true; $Why = "$MaxErrorsInRow ошибок подряд, проверьте диски"
         $result += " | $MaxErrorsInRow ошибок подряд - копирование прекращено, проверьте диски"
     }
-    if ($result -eq 'уже есть' -or $result -eq 'нет источника' -or $result -like 'КОНФЛИКТ*' -or $result -like 'размер источника*') { $Skipped++ }
+    if ($result -like 'уже есть*' -or $result -eq 'нет источника' -or $result -like 'КОНФЛИКТ*' -or $result -like 'размер источника*') { $Skipped++ }
     if ($result -eq 'нет источника' -or $result -like 'КОНФЛИКТ*' -or $result -like 'размер источника*') { $Problems++ }
     # Запасной экземпляр дубля (2.4): этот файл не удался - следующей строкой следующий дубль с тем же SHA-256 на свой путь.
-    # «уже есть» у основного файла запасной не запускает; у запасного - запускает следующий (содержимое не сверялось).
+    # «уже есть, SHA-256 совпал» (2.5) - копия подтверждена, запасной не нужен; другой SHA-256 того же размера - КОНФЛИКТ.
     if ($it.Hash -and -not $Stopped -and ($result -eq 'нет источника' -or $result -like 'размер источника*' -or $result -like 'КОНФЛИКТ*' -or
-            $result -like 'ОШИБКА*' -or ($it.Spare -and $result -eq 'уже есть'))) {
+            $result -like 'ОШИБКА*')) {
         $key = "$($it.Target)|$($it.Hash)"
         if ($Spare.ContainsKey($key) -and $Spare[$key].Count -gt 0) {
             $next = $Spare[$key].Dequeue()
@@ -501,7 +568,7 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
     $srcMtime = ''
     try { if ($sInfo -and $sInfo.Exists) { $srcMtime = [string][int64][math]::Floor(($sInfo.LastWriteTimeUtc - [datetime]'1970-01-01').TotalSeconds) } } catch { }
     $Log.WriteLine(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}" -f (Get-Date -Format 'HH:mm:ss'), $it.Target, $result, $it.Size, $readHash, $srcPath, $dstPath, $srcMtime))
-    $color = if ($result -like 'скопирован*' -or $result -eq 'уже есть') { 'Gray' } else { 'Yellow' }
+    $color = if ($result -like 'скопирован*' -or $result -like 'уже есть*') { 'Gray' } else { 'Yellow' }
     Write-Host ("[{0}/{1}] {2} {3} - {4}" -f $i, $Todo.Count, $it.Target, $it.Rel, $result) -ForegroundColor $color
     if ($Stopped) { break }
 }
@@ -520,7 +587,7 @@ Write-Host ("Итог: скопировано {0}, пропущено {1}, ош�
 if ($Errors -gt 0) { Write-Host 'Есть ошибки: строки со словом ОШИБКА в журнале.' -ForegroundColor Red }
 if ($Missing.Count) { Write-Host ('Не подключены: ' + ($Missing -join ', ') + ' - для них запустите задание ещё раз, когда подключите.') -ForegroundColor Yellow }
 Write-Host "Журнал: $LogPath"
-Write-Host 'Повторный запуск продолжит с места остановки: уже скопированные файлы пропускаются.'
+Write-Host 'Повторный запуск продолжит с места остановки: уже скопированные файлы сверяются по SHA-256 и не копируются заново.'
 # код выхода (очередь окна: 10 и 11 - дальше, остальное - стоп): 2 завис > 3 Q > 4 авария > 1/11 не всё > 0/10 всё
 $code = if ($QStop) { 3 } elseif ($Failing) { 4 } elseif ($Errors -gt 0 -or $Problems -gt 0 -or $Missing.Count -gt 0) { $CodeIncomplete } else { $CodeOk }
 if ($Confirmed) { Write-Host "Код завершения для очереди: $code" }

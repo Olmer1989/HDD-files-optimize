@@ -73,7 +73,7 @@ class TemplateReview(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertFalse(own.exists())
 
-    def test_01_existing_same_size_file_is_reported_as_already_there_without_hash(self):
+    def test_01_existing_same_size_other_content_is_a_conflict(self):
         content = b'G' * 100
         (self.src / 'A' / '1.jpg').write_bytes(content)
         final = self.dst / DEST / 'HDD90' / 'A' / '1.jpg'
@@ -82,9 +82,11 @@ class TemplateReview(unittest.TestCase):
         p, rows = self.run_template('HDD90\tAAAA0090\nHDD77\tAAAA0077\n',
                                     ['HDD77\tA\\1.jpg\t100\tтест\t' + hashlib.sha256(content).hexdigest()],
                                     f'HDD90={self.src};HDD77={self.dst}')
-        self.assertEqual(rows[0][2], 'уже есть')
+        # шаблон 2.5: файл того же размера прочитан, SHA-256 другой - КОНФЛИКТ (до 2.5 было «уже есть» без сверки)
+        self.assertEqual(rows[0][2], 'КОНФЛИКТ: на месте назначения другой файл того же размера (SHA-256 отличается)')
         self.assertEqual(rows[0][4], '')                   # хеша нет: базе нечем подтвердить такую «копию»
         self.assertEqual(final.read_bytes(), b'B' * 100)   # существующий файл не тронут
+        self.assertEqual(p.returncode, 1)
 
     def test_09_source_subfolder_does_not_bypass_same_volume_guard(self):
         volume = self.tmp / 'volume'; (volume / 'sub').mkdir(parents=True)
@@ -174,8 +176,11 @@ class Template24(unittest.TestCase):
 
     def test_version_line_and_no_pause_guard(self):
         lines = TEMPLATE.read_text(encoding='utf-8-sig').splitlines()
-        self.assertIn('версия 2.4', lines[0])
-        self.assertEqual(sv.copy_template_version(TEMPLATE.parent), (2, 4))
+        self.assertIn('версия 2.5', lines[0])
+        self.assertEqual(sv.copy_template_version(TEMPLATE.parent), (2, 5))
+        self.assertTrue(sv.copy_template_version(TEMPLATE.parent) >= (2, 4))     # очередь: 2.5 - как 2.4
+        old = TEMPLATE.parent / 'Копировать - версия 2.4.ps1.txt'
+        self.assertIn('версия 2.4', old.read_text(encoding='utf-8-sig').splitlines()[0])
         for i, x in enumerate(lines):
             if 'Read-Host' in x:                       # каждая пауза и вопрос - под одним флагом «без пауз»
                 self.assertTrue(any('if (-not $NoPause)' in y for y in lines[max(0, i - 2):i + 1]), f'строка {i + 1}: {x}')
@@ -198,8 +203,9 @@ class Template24(unittest.TestCase):
         self.assertEqual(head[7], 'дата изменения источника')
         self.assertEqual(rows[0][7], str(int((self.src / 'A' / '1.jpg').stat().st_mtime)))   # секунды UTC, как в описи
         p, rows, _ = self.run_ps('-Confirmed', '-Expect', self.fingerprint())
-        self.assertEqual(p.returncode, 10)             # повтор: «уже есть» - тоже всё прошло
-        self.assertEqual(rows[0][2], 'уже есть')
+        self.assertEqual(p.returncode, 10)             # повтор: «уже есть, SHA-256 совпал» - тоже всё прошло
+        self.assertEqual(rows[0][2], 'уже есть, SHA-256 совпал')
+        self.assertEqual(rows[0][4], sha(b'G' * 100).upper())
 
     def test_exit_codes(self):
         ok = self.one_file()
@@ -285,9 +291,10 @@ class Template24(unittest.TestCase):
         self.assertEqual(rows[1][4], h.upper())
         self.assertEqual((self.dst / DEST / 'HDD90' / 'B' / 'копия.jpg').read_bytes(), content)   # на СВОЙ путь
         self.assertEqual(len(rows), 2)                 # третий дубль не понадобился
-        # «уже есть» у запасного (содержимое не сверялось) - берётся следующий
+        # 2.5: у запасного «уже есть, SHA-256 совпал» - копия подтверждена, следующий не нужен
         p, rows, out = self.run_ps()
-        self.assertEqual([r[2].split(' | ')[0] for r in rows], ['нет источника', 'уже есть', 'скопирован, размер и SHA-256 совпали (запасной экземпляр вместо «A\\1.jpg»)'])
+        self.assertEqual([r[2].split(' | ')[0] for r in rows], ['нет источника', 'уже есть, SHA-256 совпал (запасной экземпляр вместо «A\\1.jpg»)'])
+        self.assertEqual(rows[1][4], h.upper())
 
     def test_big_sparse_file_then_source_vanishes(self):
         """Файл больше 2 ГБ копируется и сверяется по SHA-256; затем том источника пропадает - код 4 сразу."""
@@ -317,6 +324,118 @@ class Template24(unittest.TestCase):
         self.assertEqual(rows[0][4], h_big.upper())   # SHA-256 прочитанного = описи
         self.assertTrue(rows[1][2].startswith('нет источника | диск HDD90 пропал'), rows[1][2])
         self.assertEqual(proc.returncode, 4)           # аварийная остановка - очередь стоит
+
+
+
+def lock_exclusive(path):
+    """Открыть файл без совместного доступа (как чужая программа, держащая файл): чтение шаблоном даст ошибку."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.windll.kernel32
+    k32.CreateFileW.restype = wintypes.HANDLE
+    h = k32.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)      # GENERIC_READ, share 0, OPEN_EXISTING
+    assert h and h != wintypes.HANDLE(-1).value
+    return lambda: k32.CloseHandle(wintypes.HANDLE(h))
+
+
+@unittest.skipUnless(sys.platform == 'win32' and TEMPLATE.exists(), 'нужны Windows и шаблон копирования')
+class Template25(unittest.TestCase):
+    """Версия 2.5 (логика v3, этап 15): файл того же размера на месте назначения читается и сверяется по SHA-256.
+    Windows PowerShell 5.1, -TestRoots, только временные папки."""
+    tearDown, write_task, run_ps, fingerprint, razbor = (Template24.tearDown, Template24.write_task,
+                                                         Template24.run_ps, Template24.fingerprint, Template24.razbor)
+    TOMA = 'HDD90\tAAAA0090\nHDD45\tAAAA0045\n'
+    CONFLICT = 'КОНФЛИКТ: на месте назначения другой файл того же размера (SHA-256 отличается)'
+
+    def setUp(self):
+        TemplateReview.setUp(self)
+        self.roots = f'HDD90={self.src};HDD45={self.dst}'
+        self.final = lambda rel: self.dst / DEST / 'HDD90' / rel
+
+    def put_dst(self, rel, content):
+        f = self.final(rel)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(content)
+        return f
+
+    def test_same_size_same_sha_is_confirmed_with_and_without_list_hash(self):
+        good = b'G' * 100
+        (self.src / 'A' / '1.jpg').write_bytes(good)
+        (self.src / 'A' / '2.jpg').write_bytes(good)
+        f1, f2 = self.put_dst('A\\1.jpg', good), self.put_dst('A\\2.jpg', good)
+        before = (f1.stat().st_mtime_ns, f2.stat().st_mtime_ns)
+        self.write_task(self.TOMA, [f'HDD45\tA\\1.jpg\t100\tтест\t{sha(good)}',     # хеш из описи
+                                    'HDD45\tA\\2.jpg\t100\tтест'])                      # без хеша - сверка с источником
+        p, rows, out = self.run_ps('-Confirmed', '-Expect', self.fingerprint())
+        self.assertEqual(p.returncode, 10, out)
+        self.assertEqual([r[2] for r in rows], ['уже есть, SHA-256 совпал'] * 2)
+        self.assertEqual([r[4] for r in rows], [sha(good).upper()] * 2)                # SHA-256 прочитанного в цели
+        self.assertEqual((f1.stat().st_mtime_ns, f2.stat().st_mtime_ns), before)       # ничего не перезаписано
+        self.assertFalse((self.dst / TMP_NAME).exists())
+        self.assertTrue(all(sv.hb.copy_ok(r[2]) and r[2].startswith(sv.hb.HAVE_SHA) for r in rows))
+
+    def test_same_size_other_sha_is_conflict_and_spare_is_tried(self):
+        good, bad = b'D' * 300, b'E' * 300
+        (self.src / 'A' / '1.jpg').write_bytes(good)
+        (self.src / 'B').mkdir()
+        (self.src / 'B' / 'копия.jpg').write_bytes(good)
+        h = sha(good)
+        f1 = self.put_dst('A\\1.jpg', bad)
+        deps = {'HDD45': [['B\\копия.jpg', h, 'A\\1.jpg']]}
+        self.write_task(self.TOMA, [f'HDD45\tA\\1.jpg\t300\tтест\t{h}'],
+                        self.razbor(цели=['HDD45'], **{'обязательные диски': ['HDD45'], 'зависимые': deps}))
+        p, rows, out = self.run_ps('-Confirmed', '-Expect', self.fingerprint())
+        self.assertEqual(p.returncode, 11, out)                   # конфликт - «не всё», очередь идёт дальше
+        self.assertEqual(rows[0][2].split(' | ')[0], self.CONFLICT)
+        self.assertIn('запасной экземпляр «B\\копия.jpg»', rows[0][2])
+        self.assertEqual(rows[0][4], '')                          # хеш чужого файла в журнал не пишется
+        self.assertEqual(f1.read_bytes(), bad)                    # конфликтный файл не тронут
+        self.assertEqual(rows[1][2], 'скопирован, размер и SHA-256 совпали (запасной экземпляр вместо «A\\1.jpg»)')
+        self.assertEqual(self.final('B\\копия.jpg').read_bytes(), good)   # запасной - на свой путь
+        self.assertFalse(sv.hb.copy_ok(rows[0][2]))
+        # без хеша в списке: эталон - прочитанный источник; другой SHA - тоже КОНФЛИКТ, код 1
+        self.write_task(self.TOMA, ['HDD45\tA\\1.jpg\t300\tтест'], self.razbor(цели=['HDD45'], **{'обязательные диски': ['HDD45']}))
+        p, rows, out = self.run_ps()
+        self.assertEqual(p.returncode, 1, out)
+        self.assertEqual([r[2] for r in rows], [self.CONFLICT])
+        self.assertEqual(f1.read_bytes(), bad)
+        # другой размер - как раньше
+        f1.write_bytes(b'E' * 10)
+        p, rows, out = self.run_ps()
+        self.assertTrue(rows[0][2].startswith('КОНФЛИКТ: в цели другой размер (10)'), rows)
+        self.assertEqual(f1.read_bytes(), b'E' * 10)
+
+    def test_destination_read_error_is_an_error_and_spare_is_tried(self):
+        good = b'D' * 300
+        (self.src / 'A' / '1.jpg').write_bytes(good)
+        (self.src / 'B').mkdir()
+        (self.src / 'B' / 'копия.jpg').write_bytes(good)
+        h = sha(good)
+        f1 = self.put_dst('A\\1.jpg', good)
+        deps = {'HDD45': [['B\\копия.jpg', h, 'A\\1.jpg']]}
+        self.write_task(self.TOMA, [f'HDD45\tA\\1.jpg\t300\tтест\t{h}'],
+                        self.razbor(цели=['HDD45'], **{'обязательные диски': ['HDD45'], 'зависимые': deps}))
+        unlock = lock_exclusive(f1)
+        try:
+            p, rows, out = self.run_ps('-Confirmed', '-Expect', self.fingerprint())
+        finally:
+            unlock()
+        self.assertEqual(p.returncode, 11, out)
+        self.assertTrue(rows[0][2].startswith('ОШИБКА: '), rows[0][2])
+        self.assertIn('запасной экземпляр «B\\копия.jpg»', rows[0][2])
+        self.assertEqual(rows[1][2], 'скопирован, размер и SHA-256 совпали (запасной экземпляр вместо «A\\1.jpg»)')
+        self.assertEqual(f1.read_bytes(), good)
+
+    def test_big_sparse_same_file_without_list_hash(self):
+        """Файл больше 2 ГБ на источнике и в цели, хеша в списке нет: читаются оба, SHA-256 совпал."""
+        big = 2 ** 31 + 4099
+        h = make_sparse(self.src / 'A' / 'большой.bin', big)
+        f = self.final('A\\большой.bin'); f.parent.mkdir(parents=True)
+        self.assertEqual(make_sparse(f, big), h)
+        self.write_task(self.TOMA, [f'HDD45\tA\\большой.bin\t{big}\tтест'])
+        p, rows, out = self.run_ps(timeout=900)
+        self.assertEqual(p.returncode, 0, out)
+        self.assertEqual((rows[0][2], rows[0][4]), ('уже есть, SHA-256 совпал', h.upper()))
 
 
 if __name__ == '__main__':

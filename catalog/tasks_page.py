@@ -149,10 +149,11 @@ def progress(task, kind, running=False, now=None):
     done_b = sum(s for _r, s in last.values())
     errs = [f'{k[1] if isinstance(k, tuple) else k}: {r}' for k, (r, _s) in last.items()
             if not r.startswith(ok_words)][:5]
-    # этап 9: сколько строк проверено по хешу (последний результат «… SHA-256 совпали»; «уже есть» - только размер)
+    # этап 9: сколько строк проверено по хешу (последний результат «… SHA-256 совпали» или, шаблон 2.5, «уже есть,
+    # SHA-256 совпал»; простое «уже есть» - только размер)
     # и последний результат журнала (у прерванного - что было перед остановкой: причину шаблон пишет только в консоль)
     hashed_keys = frozenset(_file_key(k) for k, (r, _s) in last.items()
-                            if isinstance(k, tuple) and r.startswith('скопирован') and HASH_WORD in r)
+                            if isinstance(k, tuple) and r.startswith(('скопирован', hb.HAVE_SHA)) and HASH_WORD in r)
     last_res = cur[-1][1] if cur else ''
     res = dict(total_b=total_b, done_b=done_b, speed=None, eta=None, eta_text='', ago=None, examples=errs,
                hashed=len(hashed_keys), hashed_keys=hashed_keys, last_res=last_res)

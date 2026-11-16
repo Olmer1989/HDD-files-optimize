@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 import build_pilot as bp
 from hb_core import paths
-from hb_core.consts import COPIED_PREFIX, EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, MAIN, OLD_LOGS, SEP
+from hb_core.consts import COPIED_PREFIX, EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, HAVE_SHA, MAIN, OLD_LOGS, SEP
 from hb_core.util import copied_tail, gb, is_moved_dir, moved_folder, out, prefix_cond, rel_of
 from hb_core.sources import log_time, read_tsv, serial_map
 from hb_core.db import connect
@@ -26,7 +26,7 @@ from hb_core.query import check_disk, decision_of, decisions_for
 from hb_core import razbor as rz
 
 MAX_PATH = 259          # политика совместимости: Проводник и большинство программ не открывают пути длиннее
-COPY_OK = ('скопирован',)
+COPY_OK = ('скопирован', HAVE_SHA)                   # HAVE_SHA - шаблон 2.5: файл в цели прочитан, SHA-256 совпал
 
 
 def _task_dirs():

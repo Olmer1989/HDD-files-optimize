@@ -232,6 +232,24 @@ class ReviewFixes(Base):
         self.assertIn('не подтверждены', text)
         self.assertEqual(self.row('HDD77', 'П\\HDD90\\A\\2.jpg')[:2], (None, hb.EV_SIZE))
 
+    def test_01_already_there_with_sha_is_confirmed(self):
+        # шаблон 2.5 (этап 15): файл в цели того же размера прочитан, SHA-256 совпал - подтверждённая копия (C),
+        # и с припиской запасного экземпляра; строка «уже есть» без сверки по-прежнему Z (тест выше)
+        self.task('T5', [('HDD90', 'AAAA0090'), ('HDD77', 'AAAA0077')],
+                  'Журнал копирования 2099-01-05 00-00-00.tsv', LOG_HEAD + ('дата изменения источника',),
+                  [('00:00:01', 'HDD77', 'уже есть, SHA-256 совпал', '200', S[2].upper(), 'K:\\A\\2.jpg',
+                    'S:\\П\\HDD90\\A\\2.jpg', '0'),
+                   ('00:00:02', 'HDD77', 'уже есть, SHA-256 совпал (запасной экземпляр вместо «B\\5.jpg»)', '400',
+                    S[4].upper(), 'K:\\B\\4.jpg', 'S:\\П\\HDD90\\B\\4.jpg', '0'),
+                   ('00:00:03', 'HDD77', 'КОНФЛИКТ: на месте назначения другой файл того же размера (SHA-256 отличается)',
+                    '500', '', 'K:\\B\\5.jpg', 'S:\\П\\HDD90\\B\\5.jpg', '0')])
+        self.assertEqual(self.row('HDD77', 'П\\HDD90\\A\\2.jpg')[:2], (S[2], hb.EV_COPY))
+        self.assertEqual(self.row('HDD77', 'П\\HDD90\\B\\4.jpg')[:2], (S[4], hb.EV_COPY))
+        self.assertIsNone(self.row('HDD77', 'П\\HDD90\\B\\5.jpg'))           # конфликт - не копия
+        self.assertEqual(self.state()['A\\2.jpg'][:2], (True, True))
+        self.assertTrue(hb.copy_ok('уже есть') and hb.copy_ok('уже есть, SHA-256 совпал (запасной экземпляр вместо «x»)'))
+        self.assertFalse(hb.copy_ok('уже есть что-то другое') or hb.copy_ok('КОНФЛИКТ: …'))
+
     def test_02_unique_database_blocks_yes_until_owner_decides(self):
         with sqlite3.connect(self.job('HDD90') / 'inventory.sqlite') as c:
             c.execute("delete from files where path not in ('A\\1.jpg')")

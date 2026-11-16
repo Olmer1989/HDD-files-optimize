@@ -5,6 +5,7 @@
 Временные данные; настоящие диски, таблицы и задания не используются. Шаблон перемещения запускается настоящий
 (Windows PowerShell 5.1) на временной папке вместо диска. Снимок «Заданий»: переменная MOVE_V3_SHOT=<папка>.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -810,9 +811,15 @@ class CleanDestTest(MoveBase):
         self.assertEqual(code, 1)
         self.assertTrue(got['описание.doc'][2].startswith('КОНФЛИКТ'))
         self.assertEqual(busy.read_bytes(), b'abc')
-        busy.write_bytes(b'z' * 10)                                               # тот же размер - «уже есть»
+        busy.write_bytes(b'z' * 10)                         # тот же размер, другое содержимое - шаблон 2.5: КОНФЛИКТ
         code, got, _log = self.run_copy(s['name'], t77)
-        self.assertEqual((code, got['описание.doc'][2]), (0, 'уже есть'))
+        self.assertEqual((code, got['описание.doc'][2]),
+                         (1, 'КОНФЛИКТ: на месте назначения другой файл того же размера (SHA-256 отличается)'))
+        self.assertEqual(busy.read_bytes(), b'z' * 10)
+        busy.write_bytes(b'x' * 10)                         # то же содержимое (хеша в описи нет - сверка с источником)
+        code, got, _log = self.run_copy(s['name'], t77)
+        self.assertEqual((code, got['описание.doc'][2]), (0, 'уже есть, SHA-256 совпал'))
+        self.assertEqual(got['описание.doc'][4], hashlib.sha256(b'x' * 10).hexdigest().upper())
 
     def test_duplicate_outside_copied_folder(self):
         """Проверка кода, п. 3: дубль (тот же SHA-256) файла из R в обычной папке носителя - другая группа, в

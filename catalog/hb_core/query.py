@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from hb_core import paths
 from hb_core.paths import journal_paths
-from hb_core.consts import CLASS_ORDER, C_EMPTY, C_JUNK, MAIN, NOHASH_NOTE, SEP, SIGNIFICANT
+from hb_core.consts import CLASS_ORDER, C_EMPTY, C_JUNK, MAIN, NOHASH_NOTE, SEP, SIGNIFICANT, copy_ok
 from hb_core.util import class_of, gb, is_v3_mark, original_path, out, prefix_cond, rel_of
 from hb_core.report import save, table
 from hb_core.sources import log_time, read_table, read_tsv, serial_map
@@ -431,7 +431,7 @@ def report_lines(c, rep):
 
 def copied_from(disk, jobs):
     """Что журналы единого шаблона скопировали С этого диска: путь источника -> {диск-цель: путь назначения}.
-    Учитываются строки «скопирован…» и «уже есть»; подтверждена ли копия, решает база (степень S или C)."""
+    Учитываются строки «скопирован…», «уже есть» и «уже есть, SHA-256 совпал…» (2.5); подтверждена ли копия, решает база (степень S или C)."""
     serials = serial_map(jobs)
     res = collections.defaultdict(dict)
     for log in sorted(journal_paths(), key=log_time):
@@ -448,7 +448,7 @@ def copied_from(disk, jobs):
             continue
         i_t, i_r, i_src, i_dst = (head.index(x) for x in ('цель', 'результат', 'источник', 'куда'))
         for f in rows[1:]:
-            if len(f) <= i_dst or not (f[i_r].startswith('скопирован') or f[i_r] == 'уже есть'):
+            if len(f) <= i_dst or not copy_ok(f[i_r]):
                 continue
             t = names.get(f[i_t]) or (f[i_t] if f[i_t] in jobs else None)
             if t:
