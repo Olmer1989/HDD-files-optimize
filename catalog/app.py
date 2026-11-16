@@ -21,15 +21,13 @@ import rescan_dialog           # noqa: E402
 import explorer_page           # noqa: E402
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal   # noqa: E402
-from PySide6.QtGui import QColor, QFont, QGuiApplication                                  # noqa: E402
+from PySide6.QtGui import QColor, QFont                                                   # noqa: E402
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel, QLineEdit,  # noqa: E402
                                QListWidget, QMainWindow, QMessageBox, QPushButton, QSplitter, QStackedWidget,
                                QTableWidget, QTableWidgetItem, QTextBrowser, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 TITLE = 'Архив дисков'
-STATE_COLOR = {'идёт': '#1565c0', 'готово': '#2e7d32', 'готово с ошибками': '#c62828', 'прервано': '#e65100',
-               'состояние неизвестно': '#6d4c41', 'не запускалось': '#455a64'}
 
 
 def log_error(text):
@@ -340,100 +338,6 @@ class OverviewPage(QWidget):
                 os.startfile(path)
             else:
                 QMessageBox.information(self, TITLE, 'Файл списка не найден — пересоберите базу.')
-
-
-# ---------- Задания ----------
-
-class TasksPage(QWidget):
-    HEAD = ['Задание', 'Вид', 'Состояние', 'Обработано', 'Ошибок и пропусков']
-
-    def __init__(self, win):
-        super().__init__()
-        self.win, self.rows = win, []
-        lay = QVBoxLayout(self)
-        lay.addWidget(QLabel('<b>Задания на копирование</b> - папки в «Запускаемые скрипты». Копирование и перемещение идут в '
-                             'своём окне: там спросят «да», остановка - клавиша Q.'))
-        self.t = table(self.HEAD)
-        lay.addWidget(self.t)
-        bar = QHBoxLayout()
-        for text, fn in (('Обновить', self.refresh), ('Запустить…', self.launch), ('Открыть папку', self.open_dir),
-                         ('Открыть журнал', self.open_log), ('Сводка для чата', self.to_chat)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            bar.addWidget(b)
-        bar.addStretch()
-        lay.addLayout(bar)
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh)
-
-    def refresh(self):
-        self.win.bg.run(sv.tasks, ok=self.render, quiet=True)
-
-    def render(self, rows):
-        sel = self.current()
-        self.rows = rows
-        self.t.setRowCount(len(rows))
-        for i, r in enumerate(rows):
-            self.t.setItem(i, 0, cell(r['task']))
-            self.t.setItem(i, 1, cell(r['kind']))
-            self.t.setItem(i, 2, cell(r['state'], color=STATE_COLOR.get(r['state'])))
-            self.t.setItem(i, 3, cell(f'{r["done"]} из {r["total"]}', right=True))
-            self.t.setItem(i, 4, cell(r['errors'] + r['skipped'], right=True))
-            if sel and r['task'] == sel['task']:
-                self.t.selectRow(i)
-        busy = any(r['state'] == 'идёт' for r in rows)
-        if busy and not self.timer.isActive():
-            self.timer.start(5000)
-        elif not busy and self.timer.isActive():
-            self.timer.stop()
-
-    def current(self):
-        i = self.t.currentRow()
-        return self.rows[i] if 0 <= i < len(self.rows) else None
-
-    def need(self):
-        r = self.current()
-        if not r:
-            QMessageBox.information(self, TITLE, 'Сначала выберите задание в таблице.')
-        return r
-
-    def launch(self):
-        r = self.need()
-        if not r:
-            return
-        d = hb.TASKS / r['task']
-        if r['state'] == 'идёт':
-            QMessageBox.information(self, TITLE, 'Это задание уже идёт.')
-            return
-        how = (Path(d) / 'Как запустить.txt')
-        info = how.read_text(encoding='utf-8-sig')[:900] if how.exists() else ''
-        ans = QMessageBox.question(self, TITLE, f'Запустить «{r["task"]}»?\n\n{info}\n\nОткроется отдельное окно: проверьте '
-                                   'сводку и введите «да». Остановить - клавиша Q, повторный запуск продолжит.')
-        if ans != QMessageBox.Yes:
-            return
-        os.startfile(str(d / 'Запустить.cmd'))
-        QTimer.singleShot(3000, self.refresh)
-        self.timer.start(5000)
-
-    def open_dir(self):
-        r = self.need()
-        if r:
-            os.startfile(str(hb.TASKS / r['task']))
-
-    def open_log(self):
-        r = self.need()
-        if r and r['journal']:
-            os.startfile(r['journal'])
-        elif r:
-            QMessageBox.information(self, TITLE, 'Журнала ещё нет: задание не запускалось.')
-
-    def to_chat(self):
-        r = self.need()
-        if r:
-            QGuiApplication.clipboard().setText(
-                f'Задание «{r["task"]}» ({r["kind"]}): {r["state"]}; обработано {r["done"]} из {r["total"]}, ошибок '
-                f'{r["errors"]}, пропусков {r["skipped"]}. Журнал: {r["journal"] or "нет"}')
-            self.win.statusBar().showMessage('Сводка скопирована - вставьте её в чат.', 5000)
 
 
 # ---------- Диски и папки ----------

@@ -1,5 +1,5 @@
 """Раздел окна «Задания на копирование» (15.11.2026): что сейчас идёт, ход и оценка времени по журналам, запуск отмеченных
-заданий (каждое в своём окне PowerShell или по очереди в одном), «Разложить на источнике…» после копирования.
+заданий (каждое в своём окне PowerShell или по очереди в одном); перемещение папки на носителе после копирования.
 
 Окно ничего не копирует и не перемещает само: оно открывает «Запустить.cmd» задания, а задание перемещения
 создаёт командой mvlist (отдельным процессом, как раздел «Команды»). Состояние задания - service.task_state
@@ -10,7 +10,13 @@
 таблицей - «Можно переместить на носителе» (по каждой скопированной папке разбора - вопрос и кнопка; при ошибках
 копирования - «Переместить скопированное», затем «Повторить копирование») и «Готово» (статусы). Задание переноса
 создаёт `mvlist --razbor`, повтор копирования - service.retry_copy_task. Документ - «Логика_v3_разбор_носителя.md».
+
+Этап 9 (16.11.2026, макет владельца): плашки-сводка; таблица без готовых - галочка · «Что и куда» в две строки ·
+Состояние (скорость и остаток - внутри) · Сделано · Ошибки; «Запустить отмеченные (N)», «Запустить все по очереди»;
+блок «Скопировано — можно переместить папку на носителе»; «Готово (N)» свёрнутым списком. Из окна убраны старая
+«Разложить на источнике…» («ПЕРЕНЕСЕНО → …», mvlist --task - остаётся в командах) и «Сводка для чата».
 """
+import html
 import json
 import os
 import re
@@ -24,31 +30,29 @@ import service as sv
 from hb_core import api as hb
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QGuiApplication
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFrame, QGroupBox, QHBoxLayout,
-                               QHeaderView, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+                               QHeaderView, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QTableWidget,
+                               QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
 TITLE = 'Архив дисков'
 STATE_COLOR = {'идёт': '#1565c0', 'готово': '#2e7d32', 'готово с ошибками': '#c62828', 'прервано': '#e65100',
                'состояние неизвестно': '#6d4c41', 'не запускалось': '#455a64', 'в очереди': '#6a1b9a'}
 DONE = ('готово', 'готово с ошибками')
-MOVE_SUFFIX = ' - разложить на источнике'       # имя задания перемещения по умолчанию (mvlist --task)
 COPY_META, V3_META = 'разбор.json', 'перемещение.json'   # логика v3: задание копирования разбора / задание переноса
 MIN_BYTES, MIN_SEC = 10 * 1024 ** 2, 30          # раньше оценка времени не показывается
-EXPLAIN = ('После копирования и проверки копий файлы на исходном диске можно перенести в папку «ПЕРЕНЕСЕНО → …» '
-           'с сохранением всех папок и подпапок — так видно, что уже сохранено. Например, F:\\Котуй 2026\\Валере\\1.jpg '
-           '→ F:\\ПЕРЕНЕСЕНО → 78\\Котуй 2026\\Валере\\1.jpg (78 — номер диска, где лежит копия). Это отдельный шаг '
-           'с вашим подтверждением: кнопка «Разложить на источнике…» у законченного копирования. Ничего не удаляется. '
-           'Переносится только файл, копия которого проверена по SHA-256 на всех дисках, куда его копировали.')
-
-
-V3_EXPLAIN = ('После копирования и проверки копий папку можно перенести на носителе в «Скопировано на …», все '
-              'подпапки сохраняются. Ничего не удаляется.')
+RED, GREY, AMBER = '#c62828', '#607d8b', '#8d6e00'
+INTRO = 'Одно задание копирует одну папку носителя на диск направления. Ничего не удаляется и не перезаписывается.'
+RUN_NOTE = ('Каждое задание открывается в своём окне. Остановить — клавиша Q; повторный запуск продолжит с места '
+            'остановки.')
+MOVE_NOTE = 'Перемещается внутри носителя, все подпапки сохраняются. Так видно, что папка уже сохранена.'
+MOVE_EMPTY = 'Пока нечего: папка появится здесь, когда её копирование закончится и копии проверятся.'
+BAD_STATES = ('прервано', 'готово с ошибками')        # плашка «Прервано, с ошибками»
+HASH_WORD = 'SHA-256'                                 # «скопирован, размер и SHA-256 совпали» - копия проверена по хешу
 
 
 def gb(b):
-    return f'{b / 1024 ** 3:,.1f}'.replace(',', ' ')
+    return f'{b / 1024 ** 3:,.1f}'.replace(',', ' ').replace('.', ',')
 
 
 def n(x):
@@ -113,6 +117,15 @@ def _read_log(log, kind):
     return rows
 
 
+_DRIVE_RE = re.compile(r'^[A-Za-z]:')
+
+
+def _file_key(k):
+    """(диск-цель, путь источника) без буквы тома и без регистра: у повтора буква носителя могла смениться."""
+    target, path = k
+    return target.strip().upper(), _DRIVE_RE.sub('', path.strip()).lower()
+
+
 def progress(task, kind, running=False, now=None):
     """Ход задания: обработано файлов и байт (по уникальной строке списка, последний результат), скорость
     текущего запуска, оценка оставшегося времени, примеры ошибок."""
@@ -135,7 +148,13 @@ def progress(task, kind, running=False, now=None):
     done_b = sum(s for _r, s in last.values())
     errs = [f'{k[1] if isinstance(k, tuple) else k}: {r}' for k, (r, _s) in last.items()
             if not r.startswith(ok_words)][:5]
-    res = dict(total_b=total_b, done_b=done_b, speed=None, eta=None, eta_text='', ago=None, examples=errs)
+    # этап 9: сколько строк проверено по хешу (последний результат «… SHA-256 совпали»; «уже есть» - только размер)
+    # и последний результат журнала (у прерванного - что было перед остановкой: причину шаблон пишет только в консоль)
+    hashed_keys = frozenset(_file_key(k) for k, (r, _s) in last.items()
+                            if isinstance(k, tuple) and r.startswith('скопирован') and HASH_WORD in r)
+    last_res = cur[-1][1] if cur else ''
+    res = dict(total_b=total_b, done_b=done_b, speed=None, eta=None, eta_text='', ago=None, examples=errs,
+               hashed=len(hashed_keys), hashed_keys=hashed_keys, last_res=last_res)
     if not logs or start is None:
         return res
     times = [t for _k, _r, _s, t in cur if t is not None]
@@ -180,9 +199,11 @@ def task_disks(task, serials, letters, labels=None):
         longs.append(disk_long(name, letters.get(ser), labels))
     label = names[0] + (' → ' + ', '.join(names[1:]) if len(names) > 1 else ' (внутри диска)') if names else ''
     long_ = longs[0] + (' → ' + ', '.join(longs[1:]) if len(longs) > 1 else ' (внутри диска)') if longs else ''
-    src = serials.get(vols[0][1].strip().upper()) if vols else None
+    src = (serials.get(vols[0][1].strip().upper()) or vols[0][0].strip()) if vols else None
+    src_ser = vols[0][1].strip().upper() if vols else None
     return dict(disks=label, disks_long=long_, src_long=longs[0] if longs else '', dst_long=longs[1:], serials=sers,
-                src_serial=vols[0][1].strip().upper() if vols else None, src=src)
+                src_serial=src_ser, src=src, src_letter=letters.get(src_ser, '') if src_ser else '',
+                targets=[serials.get(f[1].strip().upper()) or f[0].strip() for f in vols[1:]])
 
 
 _SERIALS = {'at': 0, 'map': {}}
@@ -220,17 +241,27 @@ def _meta(path):
         return None
 
 
+def _letters():
+    try:
+        return sv.volumes()
+    except (OSError, AttributeError):
+        return {}
+
+
+def disk_letters(serials=None, letters=None):
+    """Носитель -> буква подключённого тома («HDD09» -> «F:») по серийным номерам."""
+    serials = serial_names() if serials is None else serials
+    letters = _letters() if letters is None else letters
+    return {serials[s]: l for s, l in letters.items() if s in serials and l}
+
+
 def load(root=None, now=None):
-    """Строки таблицы: состояние (service) + ход, диски, пометка «после копирования.json», есть ли уже задание раскладки."""
+    """Строки таблицы: состояние (service) + ход по журналам, диски, разбор.json / перемещение.json."""
     root = Path(root or hb.TASKS)
     rows = sv.tasks(root)
     serials = serial_names()
     labels = disk_labels()
-    try:
-        letters = sv.volumes()
-    except (OSError, AttributeError):
-        letters = {}
-    names = {r['task'] for r in rows}
+    letters = _letters()
     for r in rows:
         d = root / r['task']
         r.update(progress(d, r['kind'], r['state'] == 'идёт', now))
@@ -244,93 +275,134 @@ def load(root=None, now=None):
                 r['left'] = len(sv.copy_left(r['task']))
             except Exception:                               # noqa: BLE001
                 r['left'] = r['errors'] + r['skipped']
-        mark = d / sv.MOVE_MARK
-        try:
-            r['mark'] = json.loads(mark.read_text(encoding='utf-8')) if mark.exists() else None
-        except (OSError, ValueError):
-            r['mark'] = None
-        r['move_task'] = (r['task'] + MOVE_SUFFIX) if (r['task'] + MOVE_SUFFIX) in names else None
     return rows
 
 
 # ---------- решения без экрана (их проверяют тесты) ----------
 
-def headline(rows, queue=()):
-    run = [r for r in rows if r['state'] == 'идёт']
-    if run:
-        parts = []
-        for r in run:
-            s = (f'Идёт: {r["task"]} — {r["disks"]}: {n(r["done"])} из {n(r["total"])} файлов')
-            if r['kind'] == 'копирование':
-                s += f', {gb(r["done_b"])} из {gb(r["total_b"])} ГБ'
-                if r.get('eta_text'):
-                    s += (', осталось ' + r['eta_text']) if r.get('eta') is not None else f' ({r["eta_text"]})'
-            parts.append(s)
-        waiting = sum(1 for r in rows if r['state'] == 'не запускалось')
-        if waiting:
-            parts.append(f'Ещё подготовлено, не запускалось: {waiting}')
-        return '\n'.join(parts)
-    waiting = sum(1 for r in rows if r['state'] == 'не запускалось')
-    s = f'Ничего не идёт. Подготовлено, не запускалось: {waiting}'
-    stopped = sum(1 for r in rows if r['state'] == 'прервано')
-    if stopped:
-        s += f'; прервано: {stopped}'
-    offers = sum(1 for r in rows if r['kind'] == 'копирование' and r['state'] in DONE and not r.get('move_task')
-                 and not r.get('meta'))
-    if offers:
-        s += f'; можно разложить на источнике: {offers}'
-    return s
-
-
-def headline_rows(rows, queue=()):
-    """Заголовок «Идёт: …» в столбик: [(заголовок, [(название, значение)])] по каждому идущему заданию."""
-    res = []
-    for r in (r for r in rows if r['state'] == 'идёт'):
-        p = [('Задание', r['task'])]
-        if r['kind'] == 'копирование':
-            p += [('Откуда', r.get('src_long') or r.get('disks', '')),
-                  ('Куда', ', '.join(r.get('dst_long') or []) or '—'),
-                  ('Сделано', f'{n(r["done"])} из {n(r["total"])} файлов · {gb(r["done_b"])} из {gb(r["total_b"])} ГБ')]
-            sp = r.get('speed')
-            p.append(('Скорость', f'{sp / 1024 ** 2:,.0f} МБ/с'.replace(',', ' ') if sp else 'считается…'))
-            left = r.get('eta_text') or ''
-            left = ('около ' + left.lstrip('~')) if r.get('eta') is not None else left
-            if r.get('ago') is not None and r['ago'] > 120:
-                left += f' (последняя запись {fmt_ago(r["ago"])}: идёт большой файл или диск завис)'
-            p.append(('Осталось', left or '—'))
-        else:
-            p += [('Где', r.get('src_long') or r.get('disks', '')),
-                  ('Сделано', f'{n(r["done"])} из {n(r["total"])} файлов')]
-        res.append(('Идёт ' + r['kind'], p))
-    if res:
-        waiting = [r for r in rows if r['state'] == 'не запускалось' and r['task'] in queue]
-        if waiting:
-            res[-1][1].append(('В очереди', f'ещё {len(waiting)} заданий, '
-                                            f'{gb(sum(r.get("total_b", 0) for r in waiting))} ГБ'))
-        rest = sum(1 for r in rows if r['state'] == 'не запускалось' and r['task'] not in queue)
-        if rest:
-            res[-1][1].append(('Подготовлено', f'не запускалось: {rest}'))
+def summary(rows, queue=()):
+    """Плашки над таблицей: [(текст, цвет или None)]. «Неизвестно» - отдельно и только если есть (не ошибка)."""
+    st = [r['state'] for r in rows]
+    wait = st.count('не запускалось')
+    queued = sum(1 for r in rows if r['state'] == 'не запускалось' and r['task'] in queue)
+    bad = sum(1 for s in st if s in BAD_STATES)
+    res = [(f'Идёт: {st.count("идёт")}', '#1565c0' if 'идёт' in st else None),
+           (f'Ждут запуска: {wait}' + (f' (в очереди {queued})' if queued else ''), None),
+           (f'Прервано, с ошибками: {bad}', RED if bad else None),
+           (f'Готово: {st.count("готово")}', '#2e7d32' if 'готово' in st else None)]
+    unknown = st.count('состояние неизвестно')
+    if unknown:
+        res.append((f'Неизвестно: {unknown}', GREY))
     return res
 
 
-def headline_text(rows, queue=()):
-    """То же простым текстом, строка на величину (для «Сводки для чата» и тестов)."""
-    lines = []
-    for title, pairs in headline_rows(rows, queue):
-        lines.append(title)
-        lines += [f'{k}: {v}' for k, v in pairs]
-    return '\n'.join(lines)
+def _loc(letter, disk, rel):
+    """«F:\\Котуй 2026»; носитель не подключён - «HDD09\\Котуй 2026»; файлы в корне - «F:\\»."""
+    base = letter or disk or '?'
+    return base + '\\' + (rel or '')
 
 
-def headline_html(rows, queue=()):
-    import html
-    parts = []
-    for title, pairs in headline_rows(rows, queue):
-        cells = ''.join(f'<tr><td style="color:#546e7a; padding-right:14px">{html.escape(k)}:</td>'
-                        f'<td>{html.escape(v)}</td></tr>' for k, v in pairs)
-        parts.append(f'<div style="font-size:14pt; font-weight:bold; color:#1565c0">{html.escape(title)}</div>'
-                     f'<table style="font-size:11pt; font-weight:normal">{cells}</table>')
-    return ''.join(parts)
+def _where(letter, folder):
+    """Папка носителя для «Что и куда»: «F:\\Котуй 2026», «Котуй 2026», «F:\\ (файлы в корне)», «(файлы в корне)»."""
+    if not folder:                                           # None и '' - файлы в корне носителя
+        return (letter + '\\ ' if letter else '') + '(файлы в корне)'
+    return _loc(letter, '', folder) if letter else folder
+
+
+def _target_words(meta, targets):
+    """«Работа и Сафари — HDD78»; у направления на двух дисках задание на один - «Семейный архив — на 45 (HDD45)»."""
+    name = meta.get('имя направления') or ''
+    tg = list(meta.get('цели') or targets or [])
+    req = meta.get('обязательные диски') or []
+    if len(req) > 1 and len(tg) == 1:
+        return f'{name} — на {_num(tg[0])} ({tg[0]})'
+    return f'{name} — {", ".join(tg)}' if name else ', '.join(tg)
+
+
+def what_where(r):
+    """«Что и куда» в две строки: («HDD09 · F:\\Котуй 2026», «→ Работа и Сафари — HDD78»)."""
+    m, mm = r.get('meta'), r.get('move_meta')
+    src = r.get('src') or (m or {}).get('носитель') or ''
+    letter = r.get('src_letter') or ''
+    if m:
+        where = _where(letter, m.get('папка'))
+        tail = ' (повтор не скопированного)' if m.get('повтор') else ''
+        return f'{src} · {where}', f'→ {_target_words(m, r.get("targets"))}{tail}'
+    if mm:
+        where = _where(letter, mm.get('папка'))
+        return f'{src} · {where}', f'→ перемещение внутри носителя в «{mm.get("куда", "Скопировано на …")}»'
+    return r['task'], '→ ' + (r.get('disks') or 'диски не указаны')
+
+
+def state_text(r, queue=()):
+    """Столбец «Состояние»: (текст, цвет). У идущего - скорость и остаток; у прерванного - последняя запись журнала."""
+    s = r['state']
+    if s == 'идёт':
+        parts = ['Идёт']
+        sp = r.get('speed')
+        if sp:
+            parts.append((f'{sp / 1024 ** 2:,.0f} МБ/с' if sp >= 10 * 1024 ** 2 else
+                          f'{sp / 1024 ** 2:.1f} МБ/с').replace(',', ' ').replace('.', ','))
+        eta = r.get('eta_text') or ''
+        if eta:
+            parts.append(('осталось ' + eta.lstrip('~')) if r.get('eta') is not None else eta)
+        text = ' · '.join(parts)
+        if r.get('ago') is not None and r['ago'] > 120:
+            text += f' · последняя запись {fmt_ago(r["ago"])}: идёт большой файл или диск завис'
+        return text, STATE_COLOR['идёт']
+    if s == 'не запускалось':
+        return ('В очереди', STATE_COLOR['в очереди']) if r['task'] in queue else ('Ждёт запуска', STATE_COLOR[s])
+    if s == 'прервано':
+        last = r.get('last_res') or ''
+        ok = last.startswith(('скопирован', 'уже есть', 'перемещён', 'уже перемещён'))
+        return ('Прервано' + (f' · последняя запись: {last[:80]}' if last and not ok else
+                              ' · повторный запуск продолжит'), STATE_COLOR[s])
+    if s == 'состояние неизвестно':
+        return 'Неизвестно, идёт ли (не удалось узнать) — нажмите «Обновить»', STATE_COLOR[s]
+    if s == 'готово с ошибками':
+        return f'Готово с ошибками: не сделано {n(r["errors"] + r["skipped"])}', STATE_COLOR[s]
+    return s.capitalize(), STATE_COLOR.get(s)
+
+
+def errors_tip(r):
+    lines = [f'ошибок (ОШИБКА, КОНФЛИКТ): {n(r["errors"])}', f'не сделано по другим причинам: {n(r["skipped"])}']
+    return '\n'.join(lines + (r.get('examples') or []))
+
+
+def checkable(r):
+    """Галочку можно ставить всем, кроме идущего, неизвестного (может уже идти) и «готово с ошибками» задания разбора,
+    которое можно перемещать на носителе (для него в блоке ниже - «Повторить копирование»: старое задание после переноса
+    дало бы «нет источника»). Если источник - диск направления, блока нет: повтор - самим заданием (галочка)."""
+    if r['state'] in ('идёт', 'состояние неизвестно'):
+        return False
+    m = r.get('meta')
+    if r['state'] == 'готово с ошибками' and m and m.get('перемещать на носителе', True):
+        return False
+    return True                      # на диске направления ничего не перемещается - задание можно просто запустить снова
+
+
+def run_all_set(rows):
+    """«Запустить все по очереди»: ждущие и прерванные (не идущие, не готовые, не неизвестные)."""
+    return [r for r in rows if r['state'] in ('не запускалось', 'прервано')]
+
+
+def _date(ts):
+    return time.strftime('%d.%m.%Y', time.localtime(ts)) if ts else ''
+
+
+def done_rows(rows, done_items=()):
+    """«Готово (N)»: [dict(task, files, gb, errors, date, left, tip, item)] по заданиям «готово»."""
+    info = {it['task']: it for it in done_items}
+    res = []
+    for r in rows:
+        if r['state'] != 'готово':
+            continue
+        it = info.get(r['task'])
+        left = (it or {}).get('left', 0) if r['kind'] == 'перемещение' else 0
+        res.append(dict(task=r['task'], files=r['total'], gb=gb(r.get('total_b', 0)) if r['kind'] == 'копирование' else '',
+                        errors=r['errors'] + r['skipped'], date=_date(r.get('log_ts')), left=left,
+                        tip=(it or {}).get('text', ''), item=it))
+    return res
 
 
 def _overlap(a, b):
@@ -364,12 +436,6 @@ def move_blocks(sel, rows):
                     continue                  # логика v3: другая папка того же носителя - пути не пересекаются
                 res.append(f'«{m["task"]}» (перемещение) и «{c["task"]}» (копирование) — один и тот же источник')
     return res
-
-
-def pending_offers(rows, offered):
-    """Законченные копирования с пометкой «разложить после копирования», для которых окно ещё не предлагало раскладку."""
-    return [r for r in rows if r.get('mark') and r['kind'] == 'копирование' and r['state'] in DONE
-            and not r.get('move_task') and r['task'] not in offered]
 
 
 def queue_cmd(dirs, path):
@@ -415,7 +481,54 @@ def disks_words(disks, labels):
 
 
 def _folder_word(folder):
-    return '(файлы в корне)' if folder is None else folder
+    return folder if folder else '(файлы в корне)'
+
+
+def move_line(letter, disk, folder, dest):
+    """«F:\\Котуй 2026 → F:\\Скопировано на Работа и Сафари (78)\\Котуй 2026» (тот же путь, что считает mvlist)."""
+    src = _loc(letter, disk, folder) + ('' if folder else ' (файлы в корне)')
+    dst = _loc(letter, disk, dest + '\\' + (folder or ''))
+    return f'{src} → {dst}'
+
+
+def _on_disks(disks):
+    return ('диске ' if len(set(disks)) == 1 else 'дисках ') + hb.disk_nums(disks)
+
+
+def _targets_of(x):
+    return list((x.get('meta') or {}).get('цели') or x.get('targets') or [])
+
+
+def hash_words(members, extra=()):
+    """«Копии проверены по хешу на диске 78», если у каждой строки списка последний результат журнала - с SHA-256;
+    иначе честно «по хешу проверено K из N». Окончательно разрешает перенос пофайловая проверка базы (mvlist)."""
+    disks = sorted({t for x in members for t in _targets_of(x)})
+    total = sum(x.get('total', 0) for x in members)
+    group = list(members) + list(extra)
+    if all('hashed_keys' in x for x in group):              # повтор тех же файлов не засчитывается дважды
+        hashed = min(total, len(frozenset().union(*(x['hashed_keys'] for x in group))))
+    else:                                                    # строки без ключей (тесты окна): по каждому заданию
+        hashed = min(total, sum(x.get('hashed', 0) for x in members))
+    if total and hashed >= total:
+        return f'Копии проверены по хешу на {_on_disks(disks)}'
+    return (f'Скопировано на {_on_disks(disks)}; по журналу копирования SHA-256 сверен у {n(hashed)} из {n(total)} — '
+            'остальное перемещение проверит по базе')
+
+
+def _size_words(r):
+    return f'{n(r.get("total", 0))} файлов, {gb(r.get("total_b", 0))} ГБ'
+
+
+def member_word(x):
+    """Состояние одного задания группы 45/77: «на 45 скопировано и проверено», «на 77 ждёт запуска»."""
+    s = x['state']
+    if s == 'готово':
+        w = ('скопировано и проверено' if x.get('hashed', 0) >= x.get('total', 0) else
+             f'скопировано (по хешу проверено {n(x.get("hashed", 0))} из {n(x.get("total", 0))})')
+    else:
+        w = {'идёт': 'идёт копирование', 'готово с ошибками': 'скопировано с ошибками', 'не запускалось': 'ждёт запуска',
+             'прервано': 'прервано, ждёт продолжения', 'состояние неизвестно': 'неизвестно, идёт ли'}.get(s, s)
+    return f'на {", ".join(_num(t) for t in _targets_of(x)) or "?"} {w}'
 
 
 def latest_manifest_groups(root=None):
@@ -476,33 +589,25 @@ def move_items(rows, groups=()):
         key = (m.get('носитель', ''), m.get('группа')) if m.get('группа') else ('', r['task'])
         sibs.setdefault(key, []).append(r)
 
-    def state_word(g):
-        if g['state'] == 'идёт':
-            return 'идёт копирование'
-        if g['state'] == 'готово':
-            return 'скопировано'
-        if g['state'] == 'готово с ошибками':
-            return 'скопировано с ошибками'
-        return {'не запускалось': 'ждёт запуска', 'прервано': 'прервано, ждёт продолжения'}.get(g['state'], g['state'])
-
     for members in sibs.values():
         members.sort(key=lambda x: x['task'])
         r = members[0]                                       # «ведущее» задание группы: им вызывается mvlist
         m = r['meta']
         labels = r.get('labels') or {}
         folder, disks, src = m.get('папка'), m.get('обязательные диски') or [], m.get('носитель', '')
+        letter = r.get('src_letter') or ''
         group = [g for x in members for g in [x] + retries.get(x['task'], [])]
         if any(g['state'] == 'идёт' for g in group) and len(members) == 1:
             continue
         if any(x['state'] not in DONE for x in members) or any(g['state'] == 'идёт' for g in group):
             if len(members) > 1:                             # не все диски группы скопированы - перемещать рано
-                parts = []
-                for x in members:
-                    tg = (x['meta'].get('цели') or ['?'])
-                    parts.append(f'на {", ".join(_num(t) for t in tg)} — {state_word(x)}')
+                parts = [member_word(x) for x in members]
+                dest = hb.copied_folder(m.get('имя направления', ''), disks) if disks else '…'
+                small = ' · '.join(parts)
                 waiting.append(dict(text=f'Папка «{_folder_word(folder)}»: ' + '; '.join(parts) + '. Переместить на '
                                          f'носителе можно, когда копии будут на {disks_words(disks, labels)}.',
-                                    task=r['task'], left=0, reasons={}, ok=False))
+                                    task=r['task'], left=0, reasons={}, ok=False, copy_task=r['task'], folder=folder,
+                                    line=move_line(letter, src, folder, dest), small=small[:1].upper() + small[1:]))
             continue
         if not m.get('перемещать на носителе', True):
             done.append(dict(text=f'Папка «{_folder_word(folder)}» скопирована на {disks_words(disks, labels)}; '
@@ -517,10 +622,14 @@ def move_items(rows, groups=()):
         left = sum(x.get('left', 0) for x in members)
         with_left = [x['task'] for x in members if x.get('left', 0)]
         retry_busy = any(g['state'] not in DONE for x in members for g in retries.get(x['task'], []))
-        base = dict(copy_task=r['task'], folder=folder, dest=dest, disk=src, retry_tasks=with_left or [r['task']])
+        hw = hash_words(members, [g for x in members for g in retries.get(x['task'], [])])
+        base = dict(copy_task=r['task'], folder=folder, dest=dest, disk=src, retry_tasks=with_left or [r['task']],
+                    line=move_line(letter, src, folder, dest), small=f'{hw} · {_size_words(r)}')
         if last and last['state'] in ('не запускалось', 'прервано', 'состояние неизвестно'):
             word = 'Запустить перемещение' if last['state'] == 'не запускалось' else 'Продолжить перемещение'
             offers.append(dict(base, kind='run', move_task=last['task'], buttons=[word],
+                               small=('Задание перемещения создано, но не запускалось' if last['state'] == 'не запускалось'
+                                      else 'Перемещение прервано — повторный запуск продолжит с места остановки'),
                                text=f'Папка «{_folder_word(folder)}»: задание переноса в «{dest}» '
                                     + ('создано, но не запускалось.' if last['state'] == 'не запускалось' else
                                        'прервано — повторный запуск продолжит с места остановки.')))
@@ -532,6 +641,8 @@ def move_items(rows, groups=()):
             if (not last or newer) and not retry_busy:
                 if left:
                     offers.append(dict(base, kind='move', buttons=['Переместить скопированное', 'Повторить копирование'],
+                                       small=f'Не скопировано {n(left)} файлов: можно переместить скопированное '
+                                             f'(остальное останется на месте), затем повторить копирование · {hw}',
                                        text=f'Папка «{_folder_word(folder)}» скопирована на {disks_words(disks, labels)} '
                                             f'не полностью: не скопировано {n(left)} файлов. Сначала можно переместить '
                                             f'скопированное в «{dest}» (остальное останется на месте), затем повторить '
@@ -539,9 +650,12 @@ def move_items(rows, groups=()):
                 else:
                     offers.append(dict(base, kind='move', buttons=['Переместить'],
                                        text=f'Папка «{_folder_word(folder)}» скопирована на {disks_words(disks, labels)}. '
-                                            f'Переместить её на носителе {src} в «{dest}»?'))
+                                            f'Переместить её на носителе {src} в «{dest}»? Проверка по хешу — по журналу '
+                                            'копирования (SHA-256 прочитанного и записанного); перед перемещением '
+                                            'каждый файл ещё раз сверяется с базой.'))
             elif left and not retry_busy:
                 offers.append(dict(base, kind='retry', buttons=['Повторить копирование'],
+                                   small=f'Скопированное уже перенесено; не скопировано {n(left)} файлов',
                                    text=f'Папка «{_folder_word(folder)}»: скопированное перенесено, не скопировано '
                                         f'{n(left)} файлов. Повторить копирование остального?'))
         done_items([x['task'] for x in members], disks, labels, folder, src)
@@ -553,8 +667,10 @@ def move_items(rows, groups=()):
         key = ('манифест', g['manifest'], gr.get('folder'))
         mv = moves.get(key, [])
         dest = hb.copied_folder(gr.get('direction', ''), gr.get('disks') or []) if gr.get('disks') else '…'
+        gdisks = gr.get('disks') or []
         base = dict(manifest=g['manifest'], group=_folder_word(gr.get('folder')), folder=gr.get('folder'), dest=dest,
-                    disk=g['disk'])
+                    disk=g['disk'], line=move_line(g.get('letter') or '', g['disk'], gr.get('folder'), dest),
+                    small=f'Все подходящие файлы уже есть на {_on_disks(gdisks)}' if gdisks else 'Копировать нечего')
         if not mv:
             offers.append(dict(base, kind='move', buttons=['Переместить'],
                                text=f'Папка «{_folder_word(gr.get("folder"))}»: все подходящие файлы уже есть на '
@@ -562,9 +678,10 @@ def move_items(rows, groups=()):
                                     f'{g["disk"]} в «{dest}»?'))
         elif mv[-1]['state'] in ('не запускалось', 'прервано', 'состояние неизвестно'):
             offers.append(dict(base, kind='run', move_task=mv[-1]['task'], buttons=['Продолжить перемещение'],
+                               small='Перемещение не закончено — повторный запуск продолжит с места остановки',
                                text=f'Папка «{_folder_word(gr.get("folder"))}»: задание переноса в «{dest}» не закончено.'))
         done_items(key, gr.get('disks') or [], labels, gr.get('folder'), g['disk'])
-    return offers + [dict(w, kind='wait', buttons=[]) for w in waiting], done
+    return offers + [dict(w, kind='wait', buttons=['Переместить'], disabled=True) for w in waiting], done
 
 
 def load_all(root=None, now=None):
@@ -574,6 +691,10 @@ def load_all(root=None, now=None):
         groups = latest_manifest_groups()
     except OSError:
         groups = []
+    if groups:
+        lt = disk_letters()
+        for g in groups:
+            g['letter'] = lt.get(g['disk'], '')
     return rows, groups
 
 
@@ -634,31 +755,85 @@ class TextDialog(QDialog):
         lay.addWidget(box)
 
 
+def _small(text, color=GREY):
+    lab = QLabel(text)
+    lab.setWordWrap(True)
+    lab.setStyleSheet(f'color:{color}; font-size:9pt')
+    return lab
+
+
+def _chip_style(color):
+    if color == RED:
+        return f'QLabel{{color:{RED}; background:#ffebee; border:1px solid #ef9a9a; border-radius:10px; ' \
+               'padding:3px 12px; font-weight:bold}'
+    return (f'QLabel{{color:{color or "#37474f"}; background:#f5f7f8; border:1px solid #cfd8dc; border-radius:10px; '
+            'padding:3px 12px}')
+
+
 class TasksPage(QWidget):
-    HEAD = ['Задание (галочка - запустить)', 'Вид', 'Состояние', 'Ход', 'Скорость', 'Осталось', 'Ошибки', 'Диски']
+    HEAD = ['', 'Что и куда', 'Состояние', 'Сделано', 'Ошибки']
+    DONE_HEAD = ['Задание', 'Файлов', 'ГБ', 'Ошибок и пропусков', 'Дата']
 
     def __init__(self, win):
         super().__init__()
-        self.win, self.rows, self.checked, self.offered, self.queue = win, [], set(), set(), []
+        self.win, self.rows, self.trows, self.checked, self.queue = win, [], [], set(), []
+        self.dlist = []
         self.start_file = os.startfile                    # тесты подменяют: окно PowerShell не открывается
         lay = QVBoxLayout(self)
-        self.head = QLabel('Задания на копирование: считаю…')
+        top = QHBoxLayout()
+        self.head = QLabel('Задания на копирование')
         f = QFont()
         f.setPointSize(14)
         f.setBold(True)
         self.head.setFont(f)
-        self.head.setWordWrap(True)
-        lay.addWidget(self.head)
-        self.sub = QLabel(V3_EXPLAIN)
+        top.addWidget(self.head)
+        top.addStretch()
+        self.refresh_btn = QPushButton('Обновить')
+        self.refresh_btn.clicked.connect(self.refresh)
+        top.addWidget(self.refresh_btn)
+        lay.addLayout(top)
+        self.chips_lay = QHBoxLayout()
+        self.chips = []
+        lay.addLayout(self.chips_lay)
+        self.sub = QLabel(INTRO)
         self.sub.setWordWrap(True)
         self.sub.setStyleSheet('color:#37474f')
         lay.addWidget(self.sub)
-        lay.addWidget(QLabel('Папки в «Запускаемые скрипты». Каждое задание идёт в своём окне PowerShell: там спросят '
-                             '«да», остановка — клавиша Q, повторный запуск продолжит с места остановки.'))
-        self.t = _table(self.HEAD)
+        cap = QLabel('Задания')
+        cap.setStyleSheet('font-weight:bold; margin-top:6px')
+        lay.addWidget(cap)
+        self.t = QTableWidget(0, len(self.HEAD))
+        self.t.setHorizontalHeaderLabels(self.HEAD)
+        self.t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.t.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.t.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.t.verticalHeader().setVisible(False)
+        hh = self.t.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Interactive)      # ширина - по самой длинной строке «Что и куда»
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.t.setWordWrap(False)
         self.t.itemChanged.connect(self.on_check)
-        lay.addWidget(self.t, 1)
-        # логика v3: под таблицей - «Можно переместить на носителе» и «Готово»
+        lay.addWidget(self.t)
+        bar = QHBoxLayout()
+        self.run_btn = QPushButton('Запустить отмеченные (0)')
+        self.run_btn.setStyleSheet('font-weight:bold')
+        self.run_btn.clicked.connect(lambda: self.launch_checked())
+        self.all_btn = QPushButton('Запустить все по очереди')
+        self.all_btn.setToolTip('Все задания, которые ждут запуска или прерваны, — друг за другом в одном окне.')
+        self.all_btn.clicked.connect(self.launch_all)
+        self.log_btn = QPushButton('Открыть журнал')
+        self.log_btn.clicked.connect(self.open_log)
+        self.dir_btn = QPushButton('Открыть папку задания')
+        self.dir_btn.clicked.connect(self.open_dir)
+        for b in (self.run_btn, self.all_btn):
+            bar.addWidget(b)
+        bar.addStretch()
+        for b in (self.log_btn, self.dir_btn):
+            bar.addWidget(b)
+        lay.addLayout(bar)
+        lay.addWidget(_small(RUN_NOTE, '#37474f'))
+        # ниже - блок перемещения и «Готово» (в прокрутке: список «Готово» может быть длинным)
         self.offers, self.done_items, self.groups = [], [], []
         self.blocks = QScrollArea()
         self.blocks.setWidgetResizable(True)
@@ -666,35 +841,37 @@ class TasksPage(QWidget):
         inner = QWidget()
         bl = QVBoxLayout(inner)
         bl.setContentsMargins(0, 0, 0, 0)
-        self.offer_box = QGroupBox('Можно переместить на носителе')
+        self.offer_box = QGroupBox('Скопировано — можно переместить папку на носителе')
         self.offer_lay = QVBoxLayout(self.offer_box)
-        self.done_box = QGroupBox('Готово')
-        self.done_lay = QVBoxLayout(self.done_box)
         bl.addWidget(self.offer_box)
-        bl.addWidget(self.done_box)
+        self.move_note = _small(MOVE_NOTE)
+        bl.addWidget(self.move_note)
+        self.done_btn = QToolButton()
+        self.done_btn.setCheckable(True)
+        self.done_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.done_btn.setStyleSheet('QToolButton{border:none; font-weight:bold; padding:4px 0}')
+        self.done_btn.toggled.connect(self.on_done_toggle)
+        bl.addWidget(self.done_btn)
+        self.done_t = QTableWidget(0, len(self.DONE_HEAD))
+        self.done_t.setHorizontalHeaderLabels(self.DONE_HEAD)
+        self.done_t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.done_t.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.done_t.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.done_t.verticalHeader().setVisible(False)
+        self.done_t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.done_t.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.done_t.setMinimumHeight(170)
+        self.done_t.setVisible(False)
+        self.done_t.cellDoubleClicked.connect(self.on_done_double)
+        bl.addWidget(self.done_t)
         bl.addStretch()
         self.blocks.setWidget(inner)
-        self.blocks.setMaximumHeight(320)
-        lay.addWidget(self.blocks)
-        self.note = QLabel(EXPLAIN)
-        self.note.setWordWrap(True)
-        self.note.setStyleSheet('color:#37474f; background:#eef3f7; padding:8px; border-radius:4px')
-        lay.addWidget(self.note)
-        bar = QHBoxLayout()
-        for text, fn in (('Обновить', self.refresh), ('Запустить отмеченные', self.launch_checked),
-                         ('По очереди', lambda: self.launch_checked(sequential=True)),
-                         ('Разложить на источнике…', self.move_current), ('Открыть папку', self.open_dir),
-                         ('Открыть журнал', self.open_log), ('Сводка для чата', self.to_chat)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            bar.addWidget(b)
-            if text == 'Разложить на источнике…':
-                self.move_btn = b
-        bar.addStretch()
-        lay.addLayout(bar)
+        lay.addWidget(self.blocks, 1)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
-        self.t.itemSelectionChanged.connect(self.on_select)
+        self.t.itemSelectionChanged.connect(lambda: self._only_one(self.t, self.done_t))
+        self.done_t.itemSelectionChanged.connect(lambda: self._only_one(self.done_t, self.t))
+        self._done_title(0)
 
     # --- данные ---
     def refresh(self):
@@ -708,73 +885,144 @@ class TasksPage(QWidget):
         running = {r['task'] for r in rows if r['state'] == 'идёт'}
         if self.queue and not running and all(r['state'] != 'не запускалось' for r in rows if r['task'] in self.queue):
             self.queue = []
+        self.render_chips()
+        self.trows = [r for r in rows if r['state'] != 'готово']
+        self.checked = {r['task'] for r in self.trows if r['task'] in self.checked and checkable(r)}
         self.t.blockSignals(True)
-        self.t.setRowCount(len(rows))
-        for i, r in enumerate(rows):
-            state = r['state']
-            if state == 'не запускалось' and r['task'] in self.queue:
-                state = 'в очереди'
-            box = _cell(r['task'])
-            box.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            box.setCheckState(Qt.Checked if r['task'] in self.checked else Qt.Unchecked)
+        self.t.clearSelection()
+        self.t.setRowCount(len(self.trows))
+        for i, r in enumerate(self.trows):
+            box = QTableWidgetItem('')
+            if checkable(r):
+                box.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                box.setCheckState(Qt.Checked if r['task'] in self.checked else Qt.Unchecked)
+            else:
+                box.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                box.setToolTip('Идёт — запускать нечего' if r['state'] == 'идёт' else
+                               'Не удалось узнать, идёт ли задание: нажмите «Обновить»'
+                               if r['state'] == 'состояние неизвестно' else
+                               'Не скопированное — кнопкой «Повторить копирование» ниже')
             self.t.setItem(i, 0, box)
-            self.t.setItem(i, 1, _cell(r['kind']))
-            self.t.setItem(i, 2, _cell(state, color=STATE_COLOR.get(state)))
-            hod = f'{n(r["done"])} из {n(r["total"])} файлов'
-            if r['kind'] == 'копирование':
-                hod += f' · {gb(r["done_b"])} из {gb(r["total_b"])} ГБ'
-            self.t.setItem(i, 3, _cell(hod, right=True))
-            sp = r.get('speed') if r['state'] == 'идёт' else None       # у законченного скорость не нужна
-            self.t.setItem(i, 4, _cell((f'{sp / 1024 ** 2:,.0f} МБ/с' if sp >= 10 * 1024 ** 2 else
-                                        f'{sp / 1024 ** 2:.1f} МБ/с').replace(',', ' ') if sp else '', right=True))
-            left = r.get('eta_text', '')
-            if r.get('ago') is not None and r['ago'] > 120:
-                left += f' (последняя запись {fmt_ago(r["ago"])}: идёт большой файл или диск завис)'
-            self.t.setItem(i, 5, _cell(left))
+            l1, l2 = what_where(r)
+            it = QTableWidgetItem('')
+            it.setData(Qt.UserRole, f'{l1}\n{l2}')
+            it.setToolTip(f'Задание: {r["task"]}\n{r.get("disks_long") or r.get("disks", "")}')
+            self.t.setItem(i, 1, it)
+            lab = QLabel(f'{html.escape(l1)}<br><span style="color:{GREY}; font-size:9pt">{html.escape(l2)}</span>')
+            lab.setTextFormat(Qt.RichText)
+            lab.setContentsMargins(4, 2, 4, 2)
+            lab.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self.t.setCellWidget(i, 1, lab)
+            text, color = state_text(r, self.queue)
+            self.t.setItem(i, 2, _cell(text, color=color))
+            done = _cell(f'{n(r["done"])} из {n(r["total"])}', right=True,
+                         tip=f'{gb(r.get("done_b", 0))} из {gb(r.get("total_b", 0))} ГБ' if r['kind'] == 'копирование'
+                         else '')
+            self.t.setItem(i, 3, done)
             bad = r['errors'] + r['skipped']
-            self.t.setItem(i, 6, _cell(bad if bad else '', right=True, color='#c62828' if r['errors'] else None,
-                                       tip='\n'.join(r.get('examples', []))))
-            self.t.setItem(i, 7, _cell(r.get('disks_long') or r.get('disks', ''), tip=r.get('disks', '')))
+            self.t.setItem(i, 4, _cell(n(bad) if bad else '', right=True, color=RED if bad else None, tip=errors_tip(r)))
+            self.t.setRowHeight(i, 46)
             if sel and r['task'] == sel['task']:
                 self.t.selectRow(i)
         self.t.blockSignals(False)
-        if any(r['state'] == 'идёт' for r in rows):
-            self.head.setTextFormat(Qt.RichText)
-            self.head.setText(headline_html(rows, self.queue))
-        else:
-            self.head.setTextFormat(Qt.AutoText)
-            self.head.setText(headline(rows, self.queue))
+        widths = [self.t.cellWidget(i, 1).sizeHint().width() for i in range(len(self.trows))]
+        self.t.setColumnWidth(1, min(700, max([260] + widths) + 16))
+        # таблица - по числу строк (до 8 видно сразу, дальше прокрутка): место ниже - блоку перемещения и «Готово»
+        self.t.setFixedHeight(self.t.horizontalHeader().sizeHint().height() + 46 * max(2, min(8, len(self.trows))) + 6)
+        self.update_run_btn()
         self.render_blocks()
-        self.note.setVisible(any(r['kind'] == 'копирование' and not r.get('meta') for r in rows) or not rows)
-        self.on_select()
+        self.render_done(sel)
         busy = bool(running) or bool(self.queue)
         if busy and not self.timer.isActive():
             self.timer.start(5000)
         elif not busy and self.timer.isActive():
             self.timer.stop()
-        for r in pending_offers(rows, self.offered):
-            self.offered.add(r['task'])
-            QTimer.singleShot(0, lambda r=r: self.offer_move(r, auto=True))
+
+    def render_chips(self):
+        while self.chips_lay.count():                       # плашки и растяжка - убираются из ряда сразу
+            item = self.chips_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.chips = []
+        for text, color in summary(self.rows, self.queue):
+            lab = QLabel(text)
+            lab.setStyleSheet(_chip_style(color))
+            self.chips_lay.addWidget(lab)
+            self.chips.append(lab)
+        self.chips_lay.addStretch(1)
+
+    def update_run_btn(self):
+        self.run_btn.setText(f'Запустить отмеченные ({len(self.checked)})')
 
     def on_check(self, it):
-        if it.column() != 0 or not (0 <= it.row() < len(self.rows)):
+        if it.column() != 0 or not (0 <= it.row() < len(self.trows)):
             return
-        name = self.rows[it.row()]['task']
-        (self.checked.add if it.checkState() == Qt.Checked else self.checked.discard)(name)
+        r = self.trows[it.row()]
+        if not checkable(r):
+            return
+        (self.checked.add if it.checkState() == Qt.Checked else self.checked.discard)(r['task'])
+        self.update_run_btn()
 
-    def on_select(self):
-        r = self.current()
-        self.move_btn.setEnabled(bool(r and r['kind'] == 'копирование' and r['state'] in DONE and not r.get('meta')))
+    def _only_one(self, a, b):
+        if a.selectionModel().selectedRows():
+            b.blockSignals(True)
+            b.clearSelection()
+            b.blockSignals(False)
 
     def current(self):
-        i = self.t.currentRow()
-        return self.rows[i] if 0 <= i < len(self.rows) else None
+        for t, lst in ((self.t, self.trows), (self.done_t, self.dlist)):
+            rows = t.selectionModel().selectedRows() if not t.isHidden() else []
+            if rows and 0 <= rows[0].row() < len(lst):
+                name = lst[rows[0].row()]['task']
+                return next((r for r in self.rows if r['task'] == name), None)
+        return None
 
     def need(self):
         r = self.current()
         if not r:
             self.say('Сначала выберите задание в таблице (щелчок по строке).')
         return r
+
+    # --- «Готово (N)» ---
+    def _done_title(self, k):
+        self.done_btn.setText(('▾ ' if self.done_btn.isChecked() else '▸ ') + f'Готово ({k})')
+
+    def render_done(self, sel=None):
+        self.dlist = done_rows(self.rows, self.done_items)
+        t = self.done_t
+        t.blockSignals(True)
+        t.clearSelection()
+        t.setRowCount(len(self.dlist))
+        for i, d in enumerate(self.dlist):
+            t.setItem(i, 0, _cell(d['task'], tip=d['tip']))
+            t.setItem(i, 1, _cell(n(d['files']), right=True))
+            t.setItem(i, 2, _cell(d['gb'], right=True))
+            if d['left']:
+                t.setItem(i, 3, _cell(f'осталось на месте: {n(d["left"])}', color=AMBER,
+                                      tip='Двойной щелчок — почему файлы остались на старом месте'))
+            else:
+                t.setItem(i, 3, _cell(n(d['errors']) if d['errors'] else '0', right=True,
+                                      color=RED if d['errors'] else None))
+            t.setItem(i, 4, _cell(d['date']))
+            if sel and d['task'] == sel['task'] and not t.isHidden():
+                t.selectRow(i)
+        t.blockSignals(False)
+        self._done_title(len(self.dlist))
+
+    def on_done_toggle(self, on):
+        self.done_t.setVisible(on)
+        if not on:
+            self.done_t.clearSelection()
+        self._done_title(len(self.dlist))
+
+    def on_done_double(self, row, _col):
+        if not (0 <= row < len(self.dlist)):
+            return
+        d = self.dlist[row]
+        if d['left'] and d['item']:
+            self.show_left(d['item'])
+        else:
+            self.start_file(str(hb.TASKS / d['task']))
 
     # --- вопросы (тесты подменяют) ---
     def say(self, text):
@@ -795,11 +1043,22 @@ class TasksPage(QWidget):
         return TextDialog(self, title, text, ok).exec() == QDialog.Accepted
 
     # --- запуск ---
+    def launch_all(self):
+        """«Запустить все по очереди»: ждущие и прерванные - тем же путём, что «По очереди» для отмеченных."""
+        sel = run_all_set(self.rows)
+        if not sel:
+            self.say('Нет заданий, которые ждут запуска или прерваны.')
+            return
+        self.launch(sel, sequential=True)
+
     def launch_checked(self, sequential=False):
         sel = [r for r in self.rows if r['task'] in self.checked]
         if not sel:
             self.say('Отметьте галочками задания, которые нужно запустить.')
             return
+        self.launch(sel, sequential)
+
+    def launch(self, sel, sequential=False):
         busy = [r for r in sel if r['state'] == 'идёт']
         if busy:
             self.say('Уже идут: ' + ', '.join(f'«{r["task"]}»' for r in busy) + '. Их повторно не запускаю.')
@@ -858,99 +1117,46 @@ class TasksPage(QWidget):
         QTimer.singleShot(3000, self.refresh)
         self.timer.start(5000)
 
-    # --- раскладка на источнике ---
-    def move_current(self):
-        r = self.need()
-        if r:
-            self.offer_move(r)
-
-    def offer_move(self, r, auto=False):
-        if r['kind'] != 'копирование' or r['state'] not in DONE:
-            self.say('Разложить на источнике можно только после законченного копирования '
-                     '(«готово» или «готово с ошибками»). Сейчас: ' + r['state'] + '.')
-            return
-        if r.get('move_task'):
-            self.say(f'Задание раскладки уже создано: «{r["move_task"]}». Его можно запустить из таблицы.')
-            return
-        if auto and not self.ask(f'Копирование «{r["task"]}» закончилось ({r["state"]}).\n\nПри подготовке вы отметили '
-                                 '«разложить на источнике после копирования». Посмотреть, сколько файлов и куда можно '
-                                 'перенести? Сейчас ничего не переносится.'):
-            return
-        self.win.statusBar().showMessage(f'Считаю, что можно перенести после «{r["task"]}»…')
-        self.win.bg.run(run_hb, 'mvlist', '--task', r['task'], '--dry', ok=lambda res: self._preview(r, *res))
-
-    def _preview(self, r, code, text):
-        self.win.statusBar().clearMessage()
-        cnt = can_move(text) if code == 0 else 0
-        intro = ('Предпросмотр (ничего не перенесено). Перенос — внутри того же диска, все папки и подпапки '
-                 'сохраняются, ничего не удаляется.\n\n')
-        if not cnt:
-            self.show_text('Разложить на источнике', intro + text)
-            return
-        if not self.show_text('Разложить на источнике', intro + text, ok=f'Создать задание перемещения ({n(cnt)} файлов)'):
-            return
-        args = ['mvlist', '--task', r['task']]
-        if 'главный архивный диск' in text:
-            if not self.ask('Источник — главный архивный диск (45 или 77). Перенос в «ПЕРЕНЕСЕНО → …» изменит '
-                            'структуру архива на нём. Всё равно создать задание?'):
-                return
-            args.append('--allow-main')
-        self.win.bg.run(run_hb, *args, ok=lambda res: self._created(r, *res))
-
-    def _created(self, r, code, text):
-        if code != 0 or 'Папка задания:' not in text:
-            self.show_text('Задание не создано', text)
-            return
-        name = r['task'] + MOVE_SUFFIX
-        self.refresh()
-        if self.ask(f'Создано задание «{name}».\n\nЗапустить его сейчас? Откроется окно PowerShell: подключите диск, '
-                    'проверьте сводку и введите «да».'):
-            self.checked = {name}
-            self.win.bg.run(lambda: run_hb('mvlist', '--recheck', str(hb.TASKS / name)),
-                            ok=lambda res: self._after_recheck([({'task': name}, *res)], [{'task': name}], False))
-
-    # --- логика v3: блоки под таблицей ---
+    # --- логика v3: блок «Скопировано — можно переместить папку на носителе» ---
     def render_blocks(self):
         self.offers, self.done_items = move_items(self.rows, self.groups)
-        for lay in (self.offer_lay, self.done_lay):
-            while lay.count():
-                w = lay.takeAt(0).widget()
-                if w:
-                    w.deleteLater()
+        lay = self.offer_lay
+        while lay.count():
+            w = lay.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self.offer_buttons = []
         for it in self.offers:
             row = QFrame()
-            row.setStyleSheet('QFrame{background:#f3f8ee; border-radius:4px}')
+            row.setStyleSheet('QFrame{background:#f3f8ee; border-radius:4px}' if not it.get('disabled') else
+                              'QFrame{background:#f5f5f5; border-radius:4px}')
             h = QHBoxLayout(row)
-            lab = QLabel(it['text'])
+            col = QVBoxLayout()
+            lab = QLabel(it.get('line') or it['text'])
             lab.setWordWrap(True)
-            h.addWidget(lab, 1)
+            lab.setToolTip(it['text'])
+            col.addWidget(lab)
+            if it.get('small'):
+                col.addWidget(_small(it['small']))
+            h.addLayout(col, 1)
             for i, word in enumerate(it['buttons']):
                 b = QPushButton(word)
                 if i == 0:
                     b.setStyleSheet('font-weight:bold')
+                if it.get('disabled'):
+                    b.setEnabled(False)
+                    b.setToolTip('Станет доступна, когда копии будут на всех дисках направления.')
                 b.clicked.connect(lambda _=False, it=it, word=word: self.on_offer(it, word))
                 h.addWidget(b)
-            self.offer_lay.addWidget(row)
+                self.offer_buttons.append((it, b))
+            row.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            lay.addWidget(row)
         if not self.offers:
-            self.offer_lay.addWidget(QLabel('Сейчас нечего: папка появится здесь, когда её копирование закончится.'))
-        for it in self.done_items:
-            row = QFrame()
-            h = QHBoxLayout(row)
-            h.setContentsMargins(4, 2, 4, 2)
-            lab = QLabel(('✓ ' if it.get('ok') else '• ') + it['text'])
-            lab.setWordWrap(True)
-            lab.setStyleSheet('color:#2e7d32' if it.get('ok') else 'color:#8d6e00')
-            h.addWidget(lab, 1)
-            if it.get('left'):
-                b = QPushButton('Показать')
-                b.clicked.connect(lambda _=False, it=it: self.show_left(it))
-                h.addWidget(b)
-            self.done_lay.addWidget(row)
-        if not self.done_items:
-            self.done_lay.addWidget(QLabel('Пока ничего не перенесено.'))
-        self.done_box.setVisible(True)
+            lay.addWidget(_small(MOVE_EMPTY, '#37474f'))
 
     def on_offer(self, it, word):
+        if it.get('disabled'):
+            return
         if word.startswith('Переместить'):
             self.move_v3(it)
         elif word == 'Повторить копирование':
@@ -1038,11 +1244,3 @@ class TasksPage(QWidget):
             self.start_file(r['journal'])
         elif r:
             self.say('Журнала ещё нет: задание не запускалось.')
-
-    def to_chat(self):
-        r = self.need()
-        if r:
-            QGuiApplication.clipboard().setText(
-                f'Задание «{r["task"]}» ({r["kind"]}, {r.get("disks", "")}): {r["state"]}; обработано {r["done"]} из '
-                f'{r["total"]}, ошибок {r["errors"]}, пропусков {r["skipped"]}. Журнал: {r["journal"] or "нет"}')
-            self.win.statusBar().showMessage('Сводка скопирована - вставьте её в чат.', 5000)

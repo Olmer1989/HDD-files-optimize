@@ -67,7 +67,7 @@ class WindowTest(Base):
         self.assertTrue(wait(lambda: tasks.t.rowCount() == 1))
         self.assertTrue(self.w.footer.text().startswith('База собрана '), self.w.footer.text())   # подвал окна
         self.assertIn(': носителей 4, файлов ', self.w.footer.text())
-        self.assertEqual(tasks.t.item(0, 2).text(), 'не запускалось')
+        self.assertEqual(tasks.t.item(0, 2).text(), 'Ждёт запуска')
         self.w.open_page('Диски и папки')
         dp = self.w.page('Диски и папки')
         self.assertTrue(wait(lambda: dp.t.rowCount() == 4))

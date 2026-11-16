@@ -28,6 +28,7 @@ QAPP = QApplication.instance() or QApplication([])
 OK = 'скопирован, размер и SHA-256 совпали'
 OK_NOHASH = 'скопирован, размер совпал'
 DOC_SHA = 'ab' * 32                                         # хеш прочитанного у файла без хеша в описи
+MOVE_SUFFIX = ' - разложить на источнике'                 # имя задания mvlist --task по умолчанию (команда)
 DST = 'L:\\ПЕРЕНОС с других дисков\\HDD90\\'
 
 
@@ -108,9 +109,9 @@ class MoveAnyTargetTest(Base):
         self.assertIn('ПЕРЕНЕСЕНО → 91\\<тот же путь>: 3 файлов', self.printed)
         self.assertIn('ждут задания «2 - HDD90 на 45»: 1 файлов', self.printed)
         self.assertIn('копирование не удалось', self.printed)                   # B\5.jpg - ошибка
-        self.assertFalse((hb.TASKS / ('1 - HDD90 на 91' + tp.MOVE_SUFFIX)).exists())          # --dry ничего не создаёт
+        self.assertFalse((hb.TASKS / ('1 - HDD90 на 91' + MOVE_SUFFIX)).exists())          # --dry ничего не создаёт
         self.quiet(mv.cmd_mvlist, args(task='1 - HDD90 на 91'))
-        task = hb.TASKS / ('1 - HDD90 на 91' + tp.MOVE_SUFFIX)
+        task = hb.TASKS / ('1 - HDD90 на 91' + MOVE_SUFFIX)
         self.assertEqual(self.lines(task), {('A\\1.jpg', 'ПЕРЕНЕСЕНО → 91'), ('A\\sub\\3.mp4', 'ПЕРЕНЕСЕНО → 91'),
                                             ('A\\заметки.doc', 'ПЕРЕНЕСЕНО → 91')})   # файл без хеша - по журналу
         doc = next(x.split('\t') for x in (task / 'перемещение.tsv').read_text(encoding='utf-8').splitlines()
@@ -179,9 +180,9 @@ class MoveAnyTargetTest(Base):
         self.assertIn('главный архивный диск', str(e.exception))
         self.quiet(mv.cmd_mvlist, args(task='С 45', dry=True))
         self.assertIn('ВНИМАНИЕ: HDD45 - главный архивный диск', self.printed)
-        self.assertFalse((hb.TASKS / ('С 45' + tp.MOVE_SUFFIX)).exists())
+        self.assertFalse((hb.TASKS / ('С 45' + MOVE_SUFFIX)).exists())
         self.quiet(mv.cmd_mvlist, args(task='С 45', allow_main=True))
-        self.assertEqual(self.lines(hb.TASKS / ('С 45' + tp.MOVE_SUFFIX)), {('X\\2.jpg', 'ПЕРЕНЕСЕНО → 91')})
+        self.assertEqual(self.lines(hb.TASKS / ('С 45' + MOVE_SUFFIX)), {('X\\2.jpg', 'ПЕРЕНЕСЕНО → 91')})
 
     def test_long_path_stays(self):
         long = 'Д' * 120 + '\\' + 'е' * 125 + '.jpg'                  # 250 символов: после переноса > 259
@@ -201,7 +202,7 @@ class MoveAnyTargetTest(Base):
     def test_recheck_sees_new_copy_task(self):
         self.done_task()
         self.quiet(mv.cmd_mvlist, args(task='1 - HDD90 на 91'))
-        name = '1 - HDD90 на 91' + tp.MOVE_SUFFIX
+        name = '1 - HDD90 на 91' + MOVE_SUFFIX
         self.quiet(mv.cmd_mvlist, args(recheck=name))
         self.assertIn('по-прежнему верны', self.printed)
         self.copy_task('3 - новое на 45', [('A\\1.jpg', 100, S[1])], target=('HDD45', 'AAAA0045'))
@@ -285,9 +286,8 @@ class TasksPageTest(unittest.TestCase):
         self.assertAlmostEqual(r['eta'], 8 * size / (2 * size / 200))            # 800 с
         self.assertEqual(r['eta_text'], '~14 мин')
         self.assertEqual(r['disks'], 'HDD58 → HDD78 (L:)')
-        head = tp.headline([r])
-        self.assertIn('Идёт: 4 - HDD58 на L — HDD58 → HDD78 (L:): 2 из 10 файлов', head)
-        self.assertIn('осталось ~14 мин', head)
+        self.assertEqual(tp.state_text(r)[0], 'Идёт · 1,0 МБ/с · осталось 14 мин')     # скорость и остаток - в «Состоянии»
+        self.assertEqual(tp.what_where(r), ('4 - HDD58 на L', '→ HDD58 → HDD78 (L:)'))   # задание без разбор.json
         self.assertEqual(tp.fmt_eta(4200), '~1 ч 10 мин')
 
     def test_midnight_and_small_amount(self):
@@ -299,28 +299,29 @@ class TasksPageTest(unittest.TestCase):
         self.assertAlmostEqual(r['ago'], 400 - 50)                                # последняя строка - через полночь
         self.assertEqual(r['eta_text'], 'оценка появится позже')                  # меньше 10 МБ скопировано
 
-    def test_headline_checkboxes_and_offer(self):
+    def test_checkboxes_count_and_launch(self):
         lines = [(f'10:00:0{i}', 'HDD78', OK, str(100 * self.mb), 'h', f'D:\\P\\{i}.mp4', 'L:\\x') for i in range(4)]
         self.make('5 - готовое', log=lines, mark=True)
         for i in range(6, 9):
             self.make(f'{i} - ждёт', toma=f'HDD{i}0\tS{i}0\nHDD78\tS78\n')
         page = tp.TasksPage(FakeWin())
-        offered = []
-        page.offer_move = lambda r, auto=False: offered.append((r['task'], auto))
         page.render(self.rows())
         QAPP.processEvents()
-        self.assertEqual(page.head.text(), 'Ничего не идёт. Подготовлено, не запускалось: 3; можно разложить на источнике: 1')
-        self.assertEqual(offered, [('5 - готовое', True)])                        # пометка -> окно само предлагает
-        page.render(self.rows())
-        QAPP.processEvents()
-        self.assertEqual(len(offered), 1)                                         # один раз за сеанс
-        self.assertEqual(page.t.item(0, 2).text(), 'готово')
+        self.assertFalse(hasattr(page, 'offer_move'))                             # старой «раскладки» в окне нет
+        self.assertEqual([c.text() for c in page.chips if c.text()],
+                         ['Идёт: 0', 'Ждут запуска: 3', 'Прервано, с ошибками: 0', 'Готово: 1'])
+        self.assertEqual(page.t.rowCount(), 3)                                    # готовое - не в таблице, а в «Готово»
+        self.assertEqual(page.done_btn.text(), '▸ Готово (1)')
+        self.assertEqual(page.t.item(0, 2).text(), 'Ждёт запуска')
+        self.assertEqual(page.run_btn.text(), 'Запустить отмеченные (0)')
+        page.t.item(0, 0).setCheckState(Qt.Checked)
         page.t.item(1, 0).setCheckState(Qt.Checked)
-        page.t.item(2, 0).setCheckState(Qt.Checked)
         self.assertEqual(page.checked, {'6 - ждёт', '7 - ждёт'})
+        self.assertEqual(page.run_btn.text(), 'Запустить отмеченные (2)')          # число обновляется сразу
         page.render(self.rows())                                                  # галочки переживают обновление
-        self.assertEqual(page.t.item(1, 0).checkState(), Qt.Checked)
-        # два задания пишут на один диск (HDD78): вопрос «по очереди / все сразу»
+        self.assertEqual(page.t.item(0, 0).checkState(), Qt.Checked)
+        self.assertEqual(page.run_btn.text(), 'Запустить отмеченные (2)')
+        # два задания пишут на один диск (HDD78): вопрос «по очереди / все сразу» - как раньше
         started, asked = [], []
         page.start_file = started.append
         page.choose = lambda text, buttons: asked.append((text, buttons)) or 'Все сразу'
@@ -328,11 +329,33 @@ class TasksPageTest(unittest.TestCase):
         self.assertIn('общий диск', asked[0][0])
         self.assertEqual(asked[0][1][0], 'По очереди')                            # при общем диске рекомендовано по очереди
         self.assertEqual([Path(x).parent.name for x in started], ['6 - ждёт', '7 - ждёт'])
-        # кнопка «Разложить на источнике…» - только у законченного копирования
-        page.t.selectRow(0)
-        self.assertTrue(page.move_btn.isEnabled())
-        page.t.selectRow(1)
-        self.assertFalse(page.move_btn.isEnabled())
+        # «Запустить все по очереди»: все ждущие - одним .cmd очереди (тот же путь, что «По очереди»)
+        started.clear()
+        asks = []
+        page.ask = lambda text: asks.append(text) or True
+        with mock.patch.object(tp.hb, 'BASE_DIR', self.tmp):
+            page.launch_all()
+        self.assertIn('по очереди в одном окне', asks[0])
+        self.assertEqual([Path(x).name for x in started], ['очередь заданий.cmd'])
+        self.assertEqual(page.queue, ['6 - ждёт', '7 - ждёт', '8 - ждёт'])
+        page.render(self.rows())
+        self.assertEqual(page.t.item(2, 2).text(), 'В очереди')
+        self.assertIn('Ждут запуска: 3 (в очереди 3)', [c.text() for c in page.chips])
+
+    def test_old_buttons_removed(self):
+        page = tp.TasksPage(FakeWin())
+        page.render([])
+        texts = {b.text() for b in page.findChildren(tp.QPushButton)}
+        for gone in ('Разложить на источнике…', 'Сводка для чата', 'По очереди', 'Открыть папку'):
+            self.assertNotIn(gone, texts)
+        for there in ('Обновить', 'Запустить отмеченные (0)', 'Запустить все по очереди', 'Открыть журнал',
+                      'Открыть папку задания'):
+            self.assertIn(there, texts)
+        labels = ' '.join(x.text() for x in page.findChildren(tp.QLabel))
+        self.assertNotIn('ПЕРЕНЕСЕНО', labels)
+        self.assertIn(tp.INTRO, labels)
+        self.assertIn(tp.RUN_NOTE, labels)
+        self.assertIn(tp.MOVE_EMPTY, labels)
 
     def test_move_blocked_while_copy_from_same_source_runs(self):
         cp = dict(task='К', kind='копирование', state='идёт', src_serial='S58', serials={'S58', 'S78'})
@@ -340,32 +363,6 @@ class TasksPageTest(unittest.TestCase):
         self.assertTrue(tp.move_blocks([mvr], [cp, mvr]))
         self.assertFalse(tp.move_blocks([mvr], [dict(cp, src_serial='S09', serials={'S09'}), mvr]))
         self.assertEqual(tp.conflicts([cp, dict(mvr, serials={'S99'})]), [])
-
-    def test_offer_creates_move_task(self):
-        lines = [('10:00:01', 'HDD78', OK, str(self.mb), 'h', 'D:\\P\\0.mp4', 'L:\\x')]
-        self.make('Готово', n=1, size=self.mb, log=lines)
-        page = tp.TasksPage(FakeWin())
-        page.render(self.rows())
-        calls, shown = [], []
-
-        def fake_run(*a, timeout=0):
-            calls.append(a)
-            if '--dry' in a:
-                return 0, 'HDD58: …\n  -> ПЕРЕНЕСЕНО → 78\\<тот же путь>: 1 файлов\nМожно перенести: 1 файлов, 0.00 ГБ.'
-            if '--recheck' in a:
-                return 0, 'Проверено'
-            return 0, 'Папка задания: X'
-        page.show_text = lambda title, text, ok=None: shown.append((text, ok)) or True
-        page.ask = lambda text: True
-        page.start_file = calls.append
-        with mock.patch.object(tp, 'run_hb', fake_run), mock.patch.object(tp, 'load', lambda *a, **k: self.rows()):
-            page.offer_move(page.rows[0])
-        self.assertIn('Предпросмотр', shown[0][0])
-        self.assertEqual(shown[0][1], 'Создать задание перемещения (1 файлов)')
-        self.assertEqual(calls[0], ('mvlist', '--task', 'Готово', '--dry'))
-        self.assertEqual(calls[1], ('mvlist', '--task', 'Готово'))
-        self.assertEqual(calls[2][:2], ('mvlist', '--recheck'))                   # перед запуском - проверка
-        self.assertTrue(str(calls[3]).endswith('Готово - разложить на источнике\\Запустить.cmd'))
 
     def test_queue_cmd_runs_one_after_another(self):
         dirs = []

@@ -270,8 +270,10 @@ class PartialCopyTest(MoveBase):
         offers, _done = tp.move_items(self.page_rows())
         mine = [o for o in offers if 'Поход 2010' in o['text']]
         self.assertEqual(len(mine), 1)
-        self.assertEqual((mine[0]['kind'], mine[0]['buttons']), ('wait', []))
-        self.assertIn('на 45 — скопировано; на 77 — ждёт запуска', mine[0]['text'])
+        # этап 9: кнопка «Переместить» есть, но неактивна; строка «На 45 скопировано… · на 77 ждёт запуска»
+        self.assertEqual((mine[0]['kind'], mine[0]['buttons'], mine[0]['disabled']), ('wait', ['Переместить'], True))
+        self.assertTrue(mine[0]['small'].startswith('На 45 скопировано'), mine[0]['small'])
+        self.assertTrue(mine[0]['small'].endswith(' · на 77 ждёт запуска'), mine[0]['small'])
         with self.assertRaises(SystemExit) as e:
             self.mv(razbor=HIKE45, dry=True)
         self.assertIn(f'«{HIKE77}» ещё не закончено', str(e.exception))
@@ -437,17 +439,14 @@ class TasksPageV3Test(unittest.TestCase):
 
     def test_page(self):
         rows = self.rows()
-        text = tp.headline_text(rows, queue=())
-        for line in ('Идёт копирование', 'Задание: HDD17 — Поход 2010 — Семейный архив', 'Откуда: HDD17 «Samsung 750» (K:)',
-                     'Куда: HDD45 «Бэкап фото и видео» (G:), HDD77 «Путешествия 2018–2025» (S:)',
-                     'Сделано: 1 234 из 5 678 файлов · 12.3 из 45.6 ГБ', 'Скорость: 85 МБ/с', 'Осталось: около 7 мин'):
-            self.assertIn(line, text.splitlines())
+        self.assertEqual(tp.state_text(rows[0])[0], 'Идёт · 85 МБ/с · осталось 7 мин')       # этап 9: всё в «Состоянии»
         page = tp.TasksPage(FakeWin())
         page.resize(1500, 900)
         page.render(rows, groups=[])
         QAPP.processEvents()
-        self.assertIn('Samsung 750', page.t.item(0, 7).text())
-        self.assertIn('<table', page.head.text())
+        self.assertIn('Samsung 750', page.t.item(0, 1).toolTip())                # названия дисков - в подсказке
+        self.assertEqual(page.t.item(0, 3).text(), '1 234 из 5 678')
+        self.assertFalse(page.t.item(0, 0).flags() & tp.Qt.ItemIsUserCheckable)   # у идущего галочки нет
         texts = [o['text'] for o in page.offers]
         self.assertTrue(any('Работа 2019' in t and 'Скопировано на Работа и Сафари (78)' in t for t in texts))
         sw = next(o for o in page.offers if 'Свадьба' in o['text'])
@@ -492,6 +491,164 @@ class TasksPageV3Test(unittest.TestCase):
         self.assertEqual(calls[1], ('mvlist', '--razbor', 'HDD17 — Работа 2019 — Работа и Сафари'))
         self.assertEqual(calls[2][:2], ('mvlist', '--recheck'))
         self.assertTrue(str(calls[3]).endswith('HDD17 — Работа 2019 — Работа и Сафари — перемещение\\Запустить.cmd'))
+
+
+class TasksPageMockupTest(unittest.TestCase):
+    """Этап 9 (16.11.2026): экран «Задания на копирование» по макету владельца."""
+
+    GIB = 1024 ** 3
+
+    def row(self, task, state, folder='Котуй 2026', direction='Работа и Сафари', disks=('HDD78',), targets=None,
+            group=None, total=5947, done=None, hashed=None, errors=0, skipped=0, **kw):
+        meta = {'носитель': 'HDD09', 'папка': folder, 'имя направления': direction, 'обязательные диски': list(disks),
+                'цели': list(targets or disks)}
+        if group:
+            meta['группа'] = group
+        done = total if done is None else done
+        r = dict(task=task, kind='копирование', state=state, total=total, done=done, good=done - errors - skipped,
+                 errors=errors, skipped=skipped, examples=[], journal='', labels={}, serials=set(), src_serial='S09',
+                 src='HDD09', src_letter='F:', targets=list(targets or disks), done_b=336.6 * self.GIB,
+                 total_b=336.6 * self.GIB, hashed=done if hashed is None else hashed, log_ts=0, meta=meta, left=0,
+                 disks='HDD09 → ' + ', '.join(targets or disks), last_res='')
+        r.update(kw)
+        return r
+
+    def family(self, s45, s77):
+        g = 'HDD09 — Свадьба — Семейный архив'
+        kw = dict(folder='Свадьба', direction='Семейный архив', disks=('HDD45', 'HDD77'), group=g, total=100)
+        return [self.row(g + ' — на 45', s45, targets=['HDD45'], **kw),
+                self.row(g + ' — на 77', s77, targets=['HDD77'], **dict(kw, done=0 if s77 == 'не запускалось' else None))]
+
+    def test_summary_and_texts(self):
+        run = self.row('A', 'идёт', done=4120, speed=410 * 1024 ** 2, eta=720, eta_text='~12 мин', ago=3)
+        stop = self.row('B', 'прервано', done=10, last_res='ОШИБКА: диск переполнен')
+        rows = [run, stop, self.row('C', 'не запускалось', done=0), self.row('D', 'готово с ошибками', errors=2),
+                self.row('E', 'готово'), self.row('F', 'состояние неизвестно', done=3)]
+        self.assertEqual(tp.summary(rows, queue=['C']), [('Идёт: 1', '#1565c0'), ('Ждут запуска: 1 (в очереди 1)', None),
+                                                          ('Прервано, с ошибками: 2', tp.RED), ('Готово: 1', '#2e7d32'),
+                                                          ('Неизвестно: 1', tp.GREY)])
+        self.assertEqual(tp.summary([])[2], ('Прервано, с ошибками: 0', None))          # не красная, если 0
+        self.assertEqual(tp.what_where(run), ('HDD09 · F:\\Котуй 2026', '→ Работа и Сафари — HDD78'))
+        fam = self.family('готово', 'не запускалось')[0]
+        self.assertEqual(tp.what_where(fam)[1], '→ Семейный архив — на 45 (HDD45)')
+        self.assertEqual(tp.what_where(dict(run, src_letter=''))[0], 'HDD09 · Котуй 2026')   # носитель не подключён
+        self.assertEqual(tp.state_text(run)[0], 'Идёт · 410 МБ/с · осталось 12 мин')
+        self.assertEqual(tp.state_text(stop)[0], 'Прервано · последняя запись: ОШИБКА: диск переполнен')
+        self.assertEqual(tp.state_text(dict(stop, last_res='скопирован, размер и SHA-256 совпали'))[0],
+                         'Прервано · повторный запуск продолжит')
+        self.assertEqual(tp.state_text(rows[2], queue=['C'])[0], 'В очереди')
+        self.assertEqual([tp.checkable(r) for r in rows], [False, True, True, False, True, False])
+        self.assertEqual([r['task'] for r in tp.run_all_set(rows)], ['B', 'C'])
+        page = tp.TasksPage(FakeWin())
+        page.render(rows, groups=[])
+        self.assertEqual(page.t.rowCount(), 5)                                     # «готово» - не в таблице
+        self.assertEqual(page.t.cellWidget(0, 1).text().split('<br>')[0], 'HDD09 · F:\\Котуй 2026')
+        self.assertEqual(page.t.item(0, 3).text(), '4 120 из 5 947')
+        self.assertEqual(page.t.item(3, 4).text(), '2')
+        self.assertEqual(page.t.item(3, 4).foreground().color().name(), tp.RED)
+        red = next(c for c in page.chips if c.text().startswith('Прервано'))
+        self.assertIn(tp.RED, red.styleSheet())
+
+    def test_move_block_and_family_branches(self):
+        page = tp.TasksPage(FakeWin())
+        page.render([self.row('W', 'готово')], groups=[])
+        it = page.offers[0]
+        self.assertEqual(it['line'], 'F:\\Котуй 2026 → F:\\Скопировано на Работа и Сафари (78)\\Котуй 2026')
+        self.assertEqual(it['small'], 'Копии проверены по хешу на диске 78 · 5 947 файлов, 336,6 ГБ')
+        btn = next(b for o, b in page.offer_buttons if o is it)
+        self.assertEqual(btn.text(), 'Переместить')
+        self.assertTrue(btn.isEnabled())
+        calls = []
+        page.move_v3 = lambda o: calls.append(o['copy_task'])                    # тот же вызов, что раньше
+        btn.click()
+        self.assertEqual(calls, ['W'])
+        # не все строки проверены по хешу - так и написано
+        page.render([self.row('W', 'готово', hashed=5000)], groups=[])
+        self.assertTrue(page.offers[0]['small'].startswith('Скопировано на диске 78; по журналу копирования SHA-256 сверен у 5 000 из 5 947'))
+        # Семейный архив: на 45 готово, на 77 ждёт - кнопка неактивна
+        page.render(self.family('готово', 'не запускалось'), groups=[])
+        it = page.offers[0]
+        self.assertEqual(it['small'], 'На 45 скопировано и проверено · на 77 ждёт запуска')
+        self.assertEqual(it['line'], 'F:\\Свадьба → F:\\Скопировано на Семейный архив (45 и 77)\\Свадьба')
+        btn = next(b for o, b in page.offer_buttons if o is it)
+        self.assertFalse(btn.isEnabled())
+        page.on_offer(it, 'Переместить')                                          # и вызов ничего не делает
+        self.assertEqual(calls, ['W'])
+        # оба диска готовы - обычная строка с активной кнопкой
+        page.render(self.family('готово', 'готово'), groups=[])
+        it = page.offers[0]
+        self.assertEqual(it['small'], 'Копии проверены по хешу на дисках 45 и 77 · 100 файлов, 336,6 ГБ')
+        self.assertTrue(next(b for o, b in page.offer_buttons if o is it).isEnabled())
+        # созданное, но не запущенное перемещение - «Запустить перемещение» (как раньше)
+        mv = dict(self.row('W — перемещение', 'не запускалось', total=3, done=0), kind='перемещение', meta=None,
+                  move_meta={'задание копирования': 'W', 'куда': 'Скопировано на Работа и Сафари (78)', 'папка': 'Котуй 2026',
+                             'создано_ts': 1})
+        page.render([self.row('W', 'готово'), mv], groups=[])
+        self.assertEqual(page.offers[0]['buttons'], ['Запустить перемещение'])
+        self.assertEqual(tp.what_where(mv)[1], '→ перемещение внутри носителя в «Скопировано на Работа и Сафари (78)»')
+        # пусто
+        page.render([], groups=[])
+        self.assertEqual(page.offers, [])
+        self.assertEqual(page.offer_lay.itemAt(0).widget().text(), tp.MOVE_EMPTY)
+
+    def test_code_review_fixes(self):
+        # 1. повтор тех же файлов не засчитывается дважды: по уникальному ключу (диск, путь без буквы тома)
+        k = lambda p: tp._file_key(('HDD78', p))                                    # noqa: E731
+        self.assertEqual(k('F:\\Котуй\\1.jpg'), k('g:\\котуй\\1.JPG'))            # буква носителя сменилась
+        orig = self.row('W', 'готово с ошибками', total=3, hashed=2, hashed_keys=frozenset({k('F:\\a'), k('F:\\b')}))
+        dup = self.row('W — повтор 1', 'готово', total=1, hashed=1, hashed_keys=frozenset({k('G:\\b')}))
+        self.assertTrue(tp.hash_words([orig], [dup]).startswith(
+            'Скопировано на диске 78; по журналу копирования SHA-256 сверен у 2 из 3'))   # было бы «проверены» (2+1)
+        new = dict(dup, hashed_keys=frozenset({k('F:\\c')}))
+        self.assertEqual(tp.hash_words([orig], [new]), 'Копии проверены по хешу на диске 78')
+        # 3. «готово с ошибками», источник - диск направления (блока перемещения нет): галочка есть
+        r = self.row('X', 'готово с ошибками', errors=1)
+        self.assertFalse(tp.checkable(r))                                          # повтор - кнопкой в блоке
+        r['meta']['перемещать на носителе'] = False
+        self.assertTrue(tp.checkable(r))
+        offers, _ = tp.move_items([r])
+        self.assertEqual(offers, [])                                               # блока нет - повтор только галочкой
+        page = tp.TasksPage(FakeWin())
+        page.render([r], groups=[])
+        page.t.item(0, 0).setCheckState(tp.Qt.Checked)
+        self.assertEqual(page.run_btn.text(), 'Запустить отмеченные (1)')
+        # 4. корень носителя: и None, и пустая строка, с буквой и без
+        for folder in (None, ''):
+            self.assertEqual(tp.what_where(self.row('R', 'готово', folder=folder))[0], 'HDD09 · F:\\ (файлы в корне)')
+            self.assertEqual(tp.what_where(self.row('R', 'готово', folder=folder, src_letter=''))[0],
+                             'HDD09 · (файлы в корне)')
+            self.assertEqual(tp.move_line('F:', 'HDD09', folder, 'Скопировано на Р (78)'),
+                             'F:\\ (файлы в корне) → F:\\Скопировано на Р (78)\\')
+        # 5. подпись «Готово»
+        self.assertEqual(page.done_t.horizontalHeaderItem(3).text(), 'Ошибок и пропусков')
+        # 6. «Обновить» много раз - плашки не копятся (4 плашки + растяжка)
+        for _ in range(5):
+            page.render([r], groups=[])
+        self.assertEqual(page.chips_lay.count(), 5)
+        self.assertEqual(len(page.chips), 4)
+
+    def test_done_list_collapsed(self):
+        page = tp.TasksPage(FakeWin())
+        page.show()
+        rows = [self.row('Готовое 1', 'готово', log_ts=time.mktime((2026, 11, 16, 12, 0, 0, 0, 0, -1))),
+                self.row('Идёт', 'идёт', done=1)]
+        page.render(rows, groups=[])
+        QAPP.processEvents()
+        self.assertEqual(page.done_btn.text(), '▸ Готово (1)')
+        self.assertTrue(page.done_t.isHidden())                                   # свёрнуто
+        page.done_btn.click()
+        self.assertFalse(page.done_t.isHidden())
+        self.assertEqual(page.done_btn.text(), '▾ Готово (1)')
+        self.assertEqual([page.done_t.item(0, c).text() for c in range(5)],
+                         ['Готовое 1', '5 947', '336,6', '0', '16.11.2026'])
+        page.done_t.selectRow(0)
+        self.assertEqual(page.current()['task'], 'Готовое 1')                     # «Открыть папку задания» - для неё
+        page.t.selectRow(0)
+        self.assertEqual(page.current()['task'], 'Идёт')                          # выделение - одно на обе таблицы
+        self.assertFalse(page.done_t.selectionModel().selectedRows())
+        page.done_btn.click()
+        self.assertTrue(page.done_t.isHidden())
+        page.close()
 
 
 if __name__ == '__main__':
