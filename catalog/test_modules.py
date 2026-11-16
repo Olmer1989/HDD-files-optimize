@@ -27,6 +27,16 @@ COMMANDS = {'missing', 'only', 'cmp', 'where', 'candel', 'mklist', 'mvlist', 'ma
             'directions', 'direction-add', 'direction-edit', 'directions-default', 'family-split', 'mark', 'razbor', 'razbor-tasks',
             'contested'}
 UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего ядро не импортирует никогда
+
+# Правило владельца 17.11.2026: файлы небольшие - каждая правка (особенно внешнего вида) затрагивает один небольшой
+# файл. Новый файл .py в catalog - не больше FILE_MAX строк. Файлы, уже превысившие предел, - долг: расти им нельзя,
+# только уменьшаться (разбиваются отдельными заданиями); после разбивки - убрать из списка.
+FILE_MAX = 500
+FILE_DEBT = {'razbor_page.py': 3137, 'service.py': 2438, 'test_razbor_page.py': 2082, 'commands_page.py': 1320,
+             'tasks_page.py': 1263, 'test_move_v3.py': 1210, 'filelist_window.py': 1096, 'hb_core/razbor.py': 1053,
+             'test_logic_v3.py': 944, 'hb_cmd/mvlist.py': 897, 'explorer_page.py': 841, 'directions_page.py': 820,
+             'test_hashbase.py': 814, 'test_directions_page.py': 813, 'explorer_diff.py': 718, 'disks_page.py': 679,
+             'build_pilot.py': 570, 'test_app.py': 519, 'test_copy_template_review.py': 515}
 PATHVARS = {'BASE_DIR', 'DB', 'SNAP', 'MANUAL', 'DECISIONS', 'EXCLUSIONS', 'ANSWERS', 'TEMPLATE', 'MOVE_TEMPLATE', 'TASKS',
             'DIRECTIONS', 'RAZBORY'}
 
@@ -47,6 +57,20 @@ def top(mod):
 
 
 class ModulesTest(unittest.TestCase):
+    def test_file_size(self):
+        """Правило владельца 17.11.2026: файл .py не больше FILE_MAX строк; долг из FILE_DEBT только уменьшается."""
+        bad = []
+        for p in CAT.rglob('*.py'):
+            rel = p.relative_to(CAT)
+            if '__pycache__' in rel.parts or any(x.startswith('.') for x in rel.parts):
+                continue
+            key = rel.as_posix()
+            n = len(p.read_text(encoding='utf-8').splitlines())
+            limit = max(FILE_MAX, FILE_DEBT.get(key, 0))
+            if n > limit:
+                bad.append(f'{key}: {n} строк (предел {limit})')
+        self.assertEqual(bad, [], 'Файл вырос сверх предела - вынесите часть в отдельный файл')
+
     def test_command_contract(self):
         seen = []
         for mod in hb_cli.command_modules():
