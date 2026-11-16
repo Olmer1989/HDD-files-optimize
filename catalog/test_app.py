@@ -56,9 +56,9 @@ class WindowTest(Base):
     def test_pages(self):
         ov = self.w.pages[0][1]
         ov.refresh()
-        self.assertTrue(wait(lambda: 'База собрана' in ov.text.toPlainText()))
-        self.assertIn('HDD45', ov.text.toPlainText())
-        self.assertIn('Задание 1', ov.text.toPlainText())                      # ждёт запуска
+        self.assertTrue(wait(lambda: ov.ov is not None and 'Считаю' not in ov.text.toPlainText()))
+        self.assertNotIn('База собрана', ov.text.toPlainText())                # второй круг: она - в подвале окна
+        self.assertNotIn('Задание 1', ov.text.toPlainText())                   # «Ждут запуска» убрано из «Обзора»
         self.w.open_page('Задания')
         tasks = self.w.page('Задания')
         self.assertTrue(wait(lambda: tasks.t.rowCount() == 1))

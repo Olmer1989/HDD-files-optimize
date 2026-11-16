@@ -361,18 +361,64 @@ def disks():
         c.close()
 
 
-def overview():
-    """Сводка для экрана «Обзор»: поколение базы, 45 и 77, предупреждения, задания."""
+EV_COLS = (hb.EV_SCAN, hb.EV_COPY, hb.EV_SIZE, hb.EV_USER, hb.EV_STALE)
+TASK_ATTENTION = ('готово с ошибками', 'прервано', 'состояние неизвестно')     # «идёт» - не ошибка
+
+
+def direction_disks(dirs=None):
+    """Диски всех направлений, у которых есть диск, по порядку направлений (без повторов)."""
+    dirs = directions() if dirs is None else dirs
+    return list(dict.fromkeys(x for d in dirs.values() for x in d.disks))
+
+
+def _unique_from_list(disk):
+    """База собрана до 16.11.2026 (в отчёте нет unique_info): числа - из того же файла списка, колонки по заголовку."""
+    import csv
+    path = hb.ANSWERS / (re.sub(r'[\\/:*?"<>|]', '_', f'исключения - больше нигде нет - {disk}') + '.tsv')
+    if not path.exists():
+        return dict(disk=disk, missing=True)
+    try:
+        with open(path, encoding='utf-8-sig', newline='') as f:
+            rows = list(csv.reader(f, delimiter='\t'))
+    except OSError:
+        return dict(disk=disk, missing=True)
+    head = rows[0] if rows else []
+    if 'путь' not in head or 'размер' not in head:
+        return dict(disk=disk, list=str(path), files=None)
+    i_p, i_s, i_t = head.index('путь'), head.index('размер'), head.index('тип') if 'тип' in head else None
+    body = [r for r in rows[1:] if len(r) > max(i_p, i_s)]
+    size = sum(int(r[i_s]) for r in body if r[i_s].isdigit())
+    small = sum(1 for r in body if i_t is not None and len(r) > i_t and r[i_t] == bp.T_SMALL)
+    nohash = sum(1 for r in body if os.path.splitext(r[i_p])[1].lower() in hb.NOHASH_VIDEO)
+    return dict(disk=disk, files=len(body), bytes=size, small=small, nohash=nohash, list=str(path))
+
+
+def overview(disks=None):
+    """Сводка для экрана «Обзор» (второй круг, 16.11.2026).
+    disks_info - по каждому диску направлений (все направления с диском; окно само отбирает отмеченные): буква («»),
+    свободно (ГиБ, если подключён), объём файлов (ГиБ), есть ли в базе, ev - число записей по степеням S/C/Z/U/X.
+    Один запрос по files на все диски (первичный ключ disk, path - читается только диапазон этих дисков).
+    unique - «файлы, которых больше нигде нет»: [dict(disk, files, bytes, small, nohash, list)] (list - путь к файлу
+    списка; нет файла - missing=True); skipped - журналы, которые программа не прочитала; warn - прочие предупреждения."""
+    disks = direction_disks() if disks is None else list(disks)
     c = ro()
     try:
         rep = hb.load_report(c)
         res = dict(built=c.execute("select value from meta where key='built'").fetchone()[0],
                    files=c.execute("select sum(total) from disks").fetchone()[0], disks=c.execute('select count(*) from disks').fetchone()[0],
-                   main={}, warn=sorted(rep['warn']) + [x for _, x in sorted(rep['unique'].items())],
-                   skipped=list(rep['skipped']))
-        for d in hb.MAIN:
-            ev = dict(c.execute("select ev, count(*) from files where disk=? group by ev", (d,)).fetchall())
-            res['main'][d] = dict(ev=ev, gib=(c.execute("select bytes from folders where disk=? and folder=''", (d,)).fetchone() or [0])[0] / hb.GIB)
+                   warn=sorted(rep['warn']), skipped=list(rep['skipped']), disks_info={})
+        info = {d: dict(ev={}, gib=0.0, in_base=False, letter='') for d in disks}
+        if disks:
+            q = ','.join('?' * len(disks))
+            for d, in c.execute(f'select disk from disks where disk in ({q})', disks):
+                info[d]['in_base'] = True
+            for d, ev, n in c.execute(f'select disk, ev, count(*) from files where disk in ({q}) group by disk, ev', disks):
+                info[d]['ev'][ev] = n
+            for d, b in c.execute(f"select disk, bytes from folders where folder='' and disk in ({q})", disks):
+                info[d]['gib'] = (b or 0) / hb.GIB
+        res['disks_info'] = info
+        uinfo = rep.get('unique_info') or {}
+        res['unique'] = [dict(uinfo[d], disk=d) if d in uinfo else _unique_from_list(d) for d in sorted(rep['unique'])]
     finally:
         c.close()
     jobs = bp.find_jobs()
@@ -381,16 +427,30 @@ def overview():
         vols = volumes()
     except (OSError, AttributeError):
         vols = {}
-    for d in hb.MAIN:
+    for d, m in res['disks_info'].items():
         letter = vols.get(serial_of.get(d, '?'))
-        res['main'][d]['letter'] = letter or ''
+        m['letter'] = letter or ''
         if letter:
             try:
-                res['main'][d]['free_gib'] = shutil.disk_usage(letter + '\\').free / hb.GIB
+                m['free_gib'] = shutil.disk_usage(letter + '\\').free / hb.GIB
             except OSError:
                 pass
     res['checked'] = time.strftime('%H:%M:%S')
     return res
+
+
+def attention(ov, tasks):
+    """«Требует внимания» по видам; пустые группы не включаются. -> [dict(key, title, items)]."""
+    groups = []
+    bad = [dict(task=t['task'], state=t['state'], done=t['done'], total=t['total'], errors=t['errors'])
+           for t in tasks if t['state'] in TASK_ATTENTION or (t['errors'] and t['state'] != 'не запускалось')]
+    for key, title, items in (('tasks', 'Задания с ошибками или прерванные', bad),
+                              ('logs', 'Журналы, которые программа не смогла прочитать', list(ov.get('skipped') or [])),
+                              ('unique', 'Файлы, которых больше нигде нет', list(ov.get('unique') or [])),
+                              ('warn', 'Прочие предупреждения базы', list(ov.get('warn') or []))):
+        if items:
+            groups.append(dict(key=key, title=title, items=items))
+    return groups
 
 
 def folder_children(disk, folder=''):

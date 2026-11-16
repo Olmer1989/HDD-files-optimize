@@ -25,6 +25,7 @@ def excluded_unique(c, report):
     """Фото и видео из исключённых папок, которых нет больше ни на одном носителе в базе (по SHA-256): их нельзя
     потерять при ручном переносе. Список - в «ответы», в отчёт сборки - одна строка на носитель."""
     report['unique'] = {}
+    report['unique_info'] = {}
     by_disk = collections.defaultdict(list)
     q = '''select e.disk, e.path, e.size, e.sha,
                   exists(select 1 from files g where g.name_lc=e.name_lc and g.size=e.size)
@@ -41,6 +42,9 @@ def excluded_unique(c, report):
                     sorted(rr))
         small = sum(1 for r in rr if r[2] == bp.T_SMALL)
         nohash = sum(1 for r in rr if os.path.splitext(r[0])[1].lower() in NOHASH_VIDEO)
+        # то же числами - для окна («Обзор» → «Требует внимания», 16.11.2026): без разбора строки
+        report['unique_info'][disk] = dict(files=len(rr), bytes=sum(r[1] or 0 for r in rr), small=small,
+                                           nohash=nohash, list=str(os.path.abspath(path)))
         report['unique'][disk] = (f'в исключённых папках {disk} {len(rr)} фото и видео ({gb(sum(r[1] for r in rr))} ГБ) нет больше '
                            f'ни на одном носителе в базе (из них мелких картинок {small}; видео .m2t/.dv, которым на других '
                            f'дисках хеш не считали, {nohash}) - не потерять при ручном переносе: {path}')

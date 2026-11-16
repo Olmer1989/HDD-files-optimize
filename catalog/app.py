@@ -115,10 +115,97 @@ def cell(text, right=False, color=None):
 
 # ---------- Обзор ----------
 
+DISK_HEAD = ['Диск', 'Подключён', 'Свободно', 'Общий объём\nфайлов, ГБ', 'Проверено по хешу\nпри сканировании',
+             'Скопировано программой,\nхеш сверен', 'Скопировано, сверен\nтолько размер',
+             'Со слов «Я сделал\nв Проводнике»', 'Изменились\nпосле проверки']
+# столбцы 4..8 - степени подтверждения S, C, Z, U, X (буквы владельцу не показываются); Z, U, X - не копия
+DISK_TIPS = {
+    3: 'Сколько места занимают все файлы этого диска по базе (последняя опись и записи копирования).',
+    4: 'Файлов, у которых хеш посчитан сканером по самому файлу — копия подтверждена.',
+    5: 'Файлов, скопированных программой (шаблоном копирования) со сверкой хеша прочитанного — копия подтверждена.',
+    6: 'Файлов, у которых при копировании сверен только размер (или «уже есть») — копия НЕ подтверждена.',
+    7: 'Файлов, записанных со слов владельца на странице «Я сделал в Проводнике» — копия НЕ подтверждена.',
+    8: 'Файлов, которые изменились после подсчёта хеша — копия НЕ подтверждена.'}
+RESCAN_TODO = 'Что делать: пересканировать папку — подключите диск, «Диски и папки» → «Пересканировать папку…».'
+WEAK_TODO = {
+    6: 'Что делать: пересчитать хеши спорных файлов — подключите диск, «Диски и папки» → «Пересканировать папку…» '
+       'с галочкой «Перечитать всё».',
+    7: RESCAN_TODO,
+    8: RESCAN_TODO}
+RED = '#c62828'
+MAX_DISK_ROWS = 8
+UNIQUE_NOTE = 'Файлы лежат в исключённых папках — не потерять при ручном переносе.'
+
+
+def gb_ru(x):
+    """15,9 - как пишет владелец."""
+    return gib(x).replace('.', ',')
+
+
+def shown_disks(dirs, checked):
+    """Нижняя таблица «Обзора»: диски отмеченных направлений по порядку; ничего не отмечено - диски всех направлений,
+    у которых есть диск. Отмеченное направление без диска (в окне его отметить нельзя, но файл выбора могли поправить
+    или диск сняли командой) - в приписку «у Н… диск не назначен». -> (диски, показаны ли все, приписка)."""
+    want = set(checked)
+    marked = [d for n, d in dirs.items() if n in want]
+    every = not marked
+    pick = [d for d in dirs.values() if d.disks] if every else marked
+    disks = list(dict.fromkeys(x for d in pick for x in d.disks))
+    if every:
+        note = 'галочек нет — показаны все' if disks else ''
+    else:
+        note = '; '.join(f'у {d.num} диск не назначен' for d in marked if not d.disks)
+    return disks, every, note
+
+
+def unique_li(u):
+    """Строка «HDD77 — 301 фото и видео, 15,9 ГБ» + «Открыть список»; уточнения - мелко второй строкой; без путей."""
+    import html as h
+    disk = h.escape(u['disk'])
+    if u.get('missing'):
+        return f'<li><b>{disk}</b> — файл списка не найден: пересоберите базу.</li>'
+    link = f' &nbsp;<a href="list:{disk}">Открыть список</a>'
+    if u.get('files') is None:
+        return f'<li><b>{disk}</b> — фото и видео, которых больше нигде нет{link}</li>'
+    more = []
+    if u.get('small'):
+        more.append(f'из них мелких картинок (меньше 50 КБ) — {u["small"]}')
+    if u.get('nohash'):
+        more.append(f'видео .m2t/.dv, которым на других дисках хеш не считали, — {u["nohash"]}')
+    note = h.escape('; '.join(more) + '. ' + UNIQUE_NOTE if more else UNIQUE_NOTE)
+    return (f'<li><b>{disk}</b> — {u["files"]} фото и видео, {gb_ru(u["bytes"] / hb.GIB)} ГБ{link}'
+            f'<br><span style="color:#777; font-size:8pt">{note}</span></li>')
+
+
+def attention_html(groups):
+    """«Требует внимания»: группы с заголовками; ссылки - tasks: (экран «Задания»), list:<диск> (файл списка)."""
+    import html as h
+    if not groups:
+        return '<p style="color:#2e7d32">Ничего не требует внимания.</p>'
+    out = []
+    for g in groups:
+        out.append(f'<h4 style="margin-bottom:2px">{h.escape(g["title"])}</h4><ul style="margin-top:2px">')
+        for x in g['items']:
+            if g['key'] == 'tasks':
+                out.append(f'<li>«{h.escape(x["task"])}» — {h.escape(x["state"])}: сделано {x["done"]} из '
+                           f'{x["total"]}, ошибок {x["errors"]}</li>')
+            elif g['key'] == 'unique':
+                out.append(unique_li(x))
+            else:
+                out.append(f'<li>{h.escape(str(x))}</li>')
+        out.append('</ul>')
+        if g['key'] == 'tasks':
+            out.append('<p style="margin-top:0"><a href="tasks:">Открыть Задания</a></p>')
+    return ''.join(out)
+
+
 class OverviewPage(QWidget):
+    """«Обзор» (второй круг, 16.11.2026): «Направления»; «Диски направлений: что на них лежит по базе» (диски
+    отмеченных направлений, иначе - всех); «Требует внимания» по группам. Строка «База собрана …» - в подвале окна."""
+
     def __init__(self, win):
         super().__init__()
-        self.win = win
+        self.win, self.ov, self.groups = win, None, []
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
         self.btn = QPushButton('Обновить')
@@ -128,43 +215,112 @@ class OverviewPage(QWidget):
         top.addWidget(self.btn)
         lay.addLayout(top)
         self.dirs = __import__('directions_page').DirectionsSection(win)     # «Направления» (логика v3, этап 4)
+        self.dirs.on_choice = self.paint_disks
+        self.dirs.on_saved = self.load
         lay.addWidget(self.dirs)
+        head = QHBoxLayout()
+        head.addWidget(QLabel('<b>Диски направлений: что на них лежит по базе</b>'))
+        self.all_note = QLabel('')
+        self.all_note.setStyleSheet('color:#8a8a8a')
+        head.addWidget(self.all_note)
+        head.addStretch()
+        lay.addLayout(head)
+        self.dt = table(DISK_HEAD)
+        self.dt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.dt.setSelectionMode(QAbstractItemView.NoSelection)
+        for j, tip in DISK_TIPS.items():
+            self.dt.horizontalHeaderItem(j).setToolTip(tip)
+        lay.addWidget(self.dt)
+        self.checked = QLabel('')
+        self.checked.setStyleSheet('color:gray')
+        lay.addWidget(self.checked)
+        lay.addWidget(QLabel('<b>Требует внимания</b>'))
         self.text = QTextBrowser()
+        self.text.setOpenLinks(False)
         self.text.setOpenExternalLinks(False)
-        lay.addWidget(self.text)
+        self.text.anchorClicked.connect(self.link)
+        lay.addWidget(self.text, 1)
 
     def refresh(self):
         self.dirs.refresh()
+        self.load()
+
+    def load(self):
         self.text.setHtml('<p>Считаю…</p>')
         self.win.bg.run(lambda: (sv.overview(), sv.tasks()), ok=self.render)
 
     def render(self, res):
         ov, tasks = res
-        h = [f'<p>База собрана <b>{ov["built"]}</b>: носителей {ov["disks"]}, файлов {ov["files"]:,}.</p>'.replace(',', ' ')]
-        h.append('<table cellpadding="6" border="1" style="border-collapse:collapse">'
-                 '<tr><th>Диск</th><th>Сейчас</th><th>Свободно</th><th>Учтено файлов, ГБ</th>'
-                 '<th>Подтверждено (S, C)</th><th>НЕ подтверждено (Z, U, X)</th></tr>')
-        for d, m in ov['main'].items():
+        self.ov = ov
+        self.groups = sv.attention(ov, tasks)
+        self.paint_disks()
+        self.checked.setText(f'Свободное место проверено в {ov["checked"]}.')
+        self.text.setHtml(attention_html(self.groups))
+
+    def current_dirs(self):
+        data = self.dirs.data
+        if data is not None:
+            return data['dirs'], self.dirs.checked()
+        return sv.directions(), __import__('directions_page').load_choice()
+
+    def paint_disks(self):
+        """Строки - диски отмеченных направлений (или всех); из уже полученных чисел, без запроса к базе."""
+        if self.ov is None:
+            return
+        dirs, checked = self.current_dirs()
+        disks, every, note = shown_disks(dirs, checked)
+        info = self.ov['disks_info']
+        missing = [d for d in disks if d not in info]
+        if missing and not getattr(self, '_reloading', False):     # диск назначен после подсчёта - посчитать заново
+            self._reloading = True
+            self.load()
+            return
+        self._reloading = False
+        disks = [d for d in disks if d in info]
+        self.all_note.setText(note)
+        self.dt.setRowCount(len(disks))
+        for i, d in enumerate(disks):
+            m = info[d]
             ev = m['ev']
-            conf = ev.get('S', 0) + ev.get('C', 0)
-            weak = ev.get('Z', 0) + ev.get('U', 0) + ev.get('X', 0)
-            free = f'{gib(m["free_gib"])} ГБ' if 'free_gib' in m else '—'
-            h.append(f'<tr><td><b>{d}</b></td><td>{m["letter"] or "не подключён"}</td><td align="right">{free}</td>'
-                     f'<td align="right">{gib(m["gib"])}</td><td align="right">{conf:,}</td>'
-                     f'<td align="right" style="color:{"#c62828" if weak else "#2e7d32"}">{weak:,}</td></tr>'.replace(',', ' '))
-        h.append(f'</table><p style="color:gray">Свободное место проверено в {ov["checked"]}.</p>')
-        att = []
-        for t in tasks:
-            if t['state'] not in ('готово', 'не запускалось'):
-                att.append(f'Задание «{t["task"]}»: {t["state"]} ({t["done"]} из {t["total"]}, ошибок {t["errors"]})')
-        waiting = [t['task'] for t in tasks if t['state'] == 'не запускалось']
-        att += [f'Журнал не прочитан программой: {x}' for x in ov['skipped']]
-        att += ov['warn']
-        h.append('<h3>Требует внимания</h3>')
-        h.append('<ul>' + ''.join(f'<li>{x}</li>' for x in att) + '</ul>' if att else '<p>Ничего.</p>')
-        if waiting:
-            h.append('<h3>Ждут запуска</h3><ul>' + ''.join(f'<li>{x}</li>' for x in waiting) + '</ul>')
-        self.text.setHtml(''.join(h))
+            free = f'{gb_ru(m["free_gib"])} ГБ' if 'free_gib' in m else '—'
+            vals = [d, m['letter'] or 'нет', free, gb_ru(m['gib'])] + \
+                [f'{ev.get(k, 0):,}'.replace(',', ' ') for k in sv.EV_COLS]
+            for j, v in enumerate(vals):
+                it = cell(v, right=j >= 2)
+                if j == 0:
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
+                    if not m.get('in_base'):
+                        it.setToolTip(f'{d}: в базе нет описи этого диска — числа нулевые.')
+                if j >= 6 and ev.get(sv.EV_COLS[j - 4], 0):
+                    it.setForeground(QColor(RED))
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
+                    it.setToolTip(DISK_TIPS[j] + '\n' + WEAK_TODO[j])
+                elif j >= 3:
+                    it.setToolTip(DISK_TIPS[j])
+                self.dt.setItem(i, j, it)
+        self.dt.resizeRowsToContents()
+        # высота - не больше MAX_DISK_ROWS строк, дальше прокрутка внутри таблицы («Требует внимания» не вытесняется)
+        h = self.dt.horizontalHeader().height() + sum(self.dt.rowHeight(i) for i in range(min(len(disks), MAX_DISK_ROWS))) + 6
+        self.dt.setFixedHeight(max(h, 60))
+
+    def list_path(self, disk):
+        u = next((x for g in self.groups if g['key'] == 'unique' for x in g['items'] if x.get('disk') == disk), None)
+        return (u or {}).get('list')
+
+    def link(self, url):
+        s = url.toString()
+        if s.startswith('tasks:'):
+            self.win.open_page('Задания')
+        elif s.startswith('list:'):
+            path = self.list_path(s[5:])
+            if path and os.path.exists(path):
+                os.startfile(path)
+            else:
+                QMessageBox.information(self, TITLE, 'Файл списка не найден — пересоберите базу.')
 
 
 # ---------- Задания ----------

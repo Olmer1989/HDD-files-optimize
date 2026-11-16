@@ -10,7 +10,7 @@ from PySide6.QtGui import QBrush, QColor, QFont
 ON_COLOR, OFF_COLOR = QColor('#1b5e20'), QColor('#8a8a8a')
 # Диски направлений (этап 5, 15.11.2026): назначенный направлению диск - оранжевый, это важнее «подключён»
 # (подключённость видна ещё жирным шрифтом, значком «●» и буквой); неподключённый назначенный - бледно-оранжевый.
-ASSIGNED_ON, ASSIGNED_OFF = '#e65100', '#e8a46a'
+ASSIGNED_ON, ASSIGNED_OFF = '#e65100', '#e8a46a'     # в диалоге: диск уже у другого направления
 SIZE_RE = re.compile(r'^\d[\d,.]*\s*\S+$')
 
 STATUS_RU = {'complete': 'полная',
@@ -96,6 +96,20 @@ def disk_color(connected, assigned):
     if assigned:
         return (ASSIGNED_ON, True) if connected else (ASSIGNED_OFF, False)
     return (ON_COLOR.name(), True) if connected else (OFF_COLOR.name(), False)
+
+
+# Таблица направлений (второй круг, 16.11.2026): диски направлений - зелёные; оранжевые - только у направлений,
+# отмеченных галочкой «Пишем команды»; неподключённые - бледнее (и подпись «не подключён» в тексте диска).
+DIR_ON, DIR_OFF = '#1b5e20', '#7fb582'
+# Список дисков диалога «Новое направление» / «Назначить диск»: строка с галочкой - голубой фон «выбран сейчас».
+SELECTED_BG = '#bbdefb'
+
+
+def dir_disk_color(connected, writing):
+    """Цвет диска в колонке «Диски» таблицы направлений. -> (цвет '#rrggbb', жирный)."""
+    if writing:
+        return (ASSIGNED_ON, True) if connected else (ASSIGNED_OFF, False)
+    return (DIR_ON, True) if connected else (DIR_OFF, False)
 
 
 def style_disk(set_data, connected, assigned):

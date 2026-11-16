@@ -248,7 +248,7 @@ class SectionTest(DirBase):
 
     def test_dialog_refusal_writes_nothing(self):
         s = self.section()
-        dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н3'], disks_only=True)
+        dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н3'], mode=dp.CARD)
         dlg.name.setText('Сафари')                                                   # прежнее имя другого направления
         before = hb.DIRECTIONS.read_bytes()
         dlg.write()
@@ -258,37 +258,72 @@ class SectionTest(DirBase):
         self.assertEqual(hb.DIRECTIONS.read_bytes(), before)
         self.assertEqual(self.win.errors, [])                                        # отказ - в диалоге, не ошибкой окна
 
-    def test_dialog_ack_for_removed_disk(self):
+    def test_card_edit_keeps_disks_without_confirm(self):
+        """Второй круг, п. 2: «Изменить…» - только карточка; правка описания у направления с диском и заданием на него
+        диски не меняет и не переспрашивает (была ошибка: диалог снимал собственный диск -> «Меняются диски…»)."""
         t = hb.TASKS / 'HDD90 — A — Работа'
         t.mkdir(parents=True)
         (t / 'список.tsv').write_text('HDD91\tA\\1.jpg\t100\tс хешем\t' + 'a' * 64 + '\n', encoding='utf-8')
         (t / 'разбор.json').write_text(json.dumps({'носитель': 'HDD90', 'направление': 'Н2', 'обязательные диски': ['HDD91'],
                                                    'цели': ['HDD91']}, ensure_ascii=False), encoding='utf-8')
+        self.assertTrue(sv.direction_usage('Н2')['tasks'])                          # задание на диск направления есть
         s = self.section()
-        dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н2'])
-        items = {dlg.disks.item(i).data(Qt.UserRole): dlg.disks.item(i) for i in range(dlg.disks.count())}
-        self.assertEqual(items['HDD91'].checkState(), Qt.Checked)
-        items['HDD91'].setCheckState(Qt.Unchecked)
-        items['HDD90'].setCheckState(Qt.Checked)
+        s.t.selectRow(self.row_of(s, 'Н2'))
+        made = []
+        orig = dp.DirectionDialog.exec
+        dp.DirectionDialog.exec = lambda self_: made.append(self_) or 0
+        try:
+            s.b_edit.click()
+        finally:
+            dp.DirectionDialog.exec = orig
+        dlg = made[0]
+        self.assertEqual(dlg.mode, dp.CARD)
+        self.assertIsNone(dlg.disks)                                                 # списка дисков нет
+        self.assertIsNone(dlg.values()['disks'])                                     # в сервис - «оставить как есть»
         asked = []
-        dlg.confirm_hook = lambda lines, ack: asked.append((lines, ack)) or (False, False)    # «Отмена»
-        before = hb.DIRECTIONS.read_bytes()
+        dlg.confirm_hook = lambda lines, ack: asked.append(lines) or (True, False)
+        dlg.desc.setText('рабочие проекты')
         dlg.write()
-        self.assertTrue(wait(lambda: asked and dlg.b_write.isEnabled()))
-        lines, ack = asked[0]
-        text = '\n'.join(lines)
-        self.assertEqual(ack, ['HDD91'])                                            # нужна галочка «Понимаю…»
-        self.assertIn('не запускалось', text)                                       # журналов нет
-        self.assertIn('направлению больше не засчитывается', text)                  # п. F
-        self.assertEqual(hb.DIRECTIONS.read_bytes(), before)
-        dlg.confirm_hook = lambda lines, ack: (True, True)                          # «Понимаю…» и «Сохранить»
-        dlg.write()
-        self.assertTrue(wait(lambda: sv.directions()['Н2'].disks == ('HDD90',)))
-        cd = dp.ConfirmDialog(s, ['строка'], ['HDD91'])                              # окно переспроса: без галочки нельзя
+        self.assertTrue(wait(lambda: sv.directions()['Н2'].desc == 'рабочие проекты'), dlg.view.toPlainText())
+        self.assertEqual(sv.directions()['Н2'].disks, ('HDD91',))                   # диски не изменились
+        self.assertEqual(asked, [])                                                  # переспроса нет
+        cd = dp.ConfirmDialog(s, ['строка'], ['HDD91'])                              # окно переспроса осталось: без галочки нельзя
         self.assertFalse(cd.ok.isEnabled())
         cd.ack.setChecked(True)
         self.assertTrue(cd.ok.isEnabled())
-        self.assertIn('больше не засчитывается', cd.ack.text())
+
+    def test_assign_only_without_disk(self):
+        """Второй круг, п. 3: «Назначить диск…» - только у направления без диска: только список дисков."""
+        s = self.section()
+        s.t.selectRow(self.row_of(s, 'Н2'))
+        self.assertFalse(s.b_disk.isEnabled())
+        made = []
+        orig = dp.DirectionDialog.exec
+        dp.DirectionDialog.exec = lambda self_: made.append(self_) or 0
+        try:
+            s.assign()                                                               # у направления с диском - ничего
+            self.assertEqual(made, [])
+            s.t.selectRow(self.row_of(s, 'Н3'))
+            self.assertTrue(s.b_disk.isEnabled())
+            s.b_disk.click()
+        finally:
+            dp.DirectionDialog.exec = orig
+        dlg = made[0]
+        self.assertEqual(dlg.mode, dp.ASSIGN)
+        self.assertFalse(dlg.card.isVisibleTo(dlg))                                  # карточки нет
+        self.assertFalse(dlg.b_write.isEnabled())                                    # диск не отмечен
+        it = {dlg.disks.item(i).data(Qt.UserRole): dlg.disks.item(i) for i in range(dlg.disks.count())}
+        self.assertEqual(it['HDD91'].flags(), Qt.NoItemFlags)                        # чужой - выбрать нельзя
+        it['HDD90'].setCheckState(Qt.Checked)
+        self.assertTrue(dlg.b_write.isEnabled())
+        self.assertEqual(dlg.values(), dict(num='Н3', name=None, disks=['HDD90'], kind=None, desc=None))
+        saved = []
+        s.on_saved = lambda: saved.append(1)
+        dlg.write()
+        self.assertTrue(wait(lambda: sv.directions()['Н3'].disks == ('HDD90',)))
+        d = sv.directions()['Н3']
+        self.assertEqual((d.name, d.kind), ('Без диска', hb.KIND_ALL))               # остальное не тронуто
+        self.assertTrue(wait(lambda: saved == [1]))                                  # «Обзор» перечитывается
 
     def test_unrecognized_kind_and_change_during_confirm(self):
         """Замечания 8 и 6: нераспознанное «что копировать» - все галочки сняты и «Сохранить» неактивна; поля
@@ -303,8 +338,10 @@ class SectionTest(DirBase):
         dlg.cat_boxes[hb.CAT_PHOTO].setChecked(True)
         self.assertTrue(dlg.b_write.isEnabled())
         dlg2 = dp.DirectionDialog(s, s.data, s.data['dirs']['Н1'])
-        items = {dlg2.disks.item(i).data(Qt.UserRole): dlg2.disks.item(i) for i in range(dlg2.disks.count())}
-        items['HDD77'].setCheckState(Qt.Unchecked)                                  # переспрос будет (данные на 77)
+        dlg2.desc.setText('семейное')
+        real = sv.direction_save_preview
+        sv.direction_save_preview = lambda **kw: dict(real(**kw), confirm=True)     # переспрос - на всякий случай
+        self.addCleanup(setattr, sv, 'direction_save_preview', real)
 
         def meddle(lines, ack):
             dlg2.name.setText('Другое имя')                                         # поменяли поле во время переспроса
@@ -364,30 +401,48 @@ class SectionTest(DirBase):
         self.assertEqual(s2.t.item(self.row_of(s2, 'Н2'), 5).text(), 'все файлы (кроме программ и временных)')
 
     def test_disk_colors(self):
-        """Этап 5, п. 1: оранжевый - назначен (бледный - не подключён), зелёный - подключён и свободен, серый - нет."""
+        """Второй круг, п. 1 и 4: в таблице диски зелёные; оранжевые - только у отмеченных галочкой (сразу при щелчке);
+        неподключённые - бледнее и с подписью «не подключён». В «Новом направлении» - голубой фон «выбран сейчас»."""
         import disk_ui
-        self.assertEqual(disk_ui.disk_color(True, True), (disk_ui.ASSIGNED_ON, True))
-        self.assertEqual(disk_ui.disk_color(False, True), (disk_ui.ASSIGNED_OFF, False))
-        self.assertEqual(disk_ui.disk_color(True, False), ('#1b5e20', True))
-        self.assertEqual(disk_ui.disk_color(False, False), ('#8a8a8a', False))
+        self.assertEqual(disk_ui.dir_disk_color(True, False), (disk_ui.DIR_ON, True))
+        self.assertEqual(disk_ui.dir_disk_color(False, False), (disk_ui.DIR_OFF, False))
+        self.assertEqual(disk_ui.dir_disk_color(True, True), (disk_ui.ASSIGNED_ON, True))
+        self.assertEqual(disk_ui.dir_disk_color(False, True), (disk_ui.ASSIGNED_OFF, False))
         s = self.section()
         s.data['disks'] = [dict(r, letter='Z:') if r['disk'] in ('HDD45', 'HDD90') else r for r in s.data['disks']]
         s.data['by'] = {r['disk']: r for r in s.data['disks']}
         s.render(s.data)
-        html = s.t.cellWidget(self.row_of(s, 'Н1'), 3).text()
-        self.assertIn(f'<b style="color:{disk_ui.ASSIGNED_ON}">● HDD45', html)      # назначен и подключён
-        self.assertIn(f'<span style="color:{disk_ui.ASSIGNED_OFF}">HDD77', html)    # назначен, не подключён
-        dlg = dp.DirectionDialog(s, s.data, s.data['dirs']['Н2'])
+        cell = lambda num: s.t.cellWidget(self.row_of(s, num), 3).text()
+        self.assertIn(f'<b style="color:{disk_ui.DIR_ON}">● HDD45', cell('Н1'))        # не отмечено - зелёный
+        self.assertIn(f'<span style="color:{disk_ui.DIR_OFF}">HDD77', cell('Н1'))       # не подключён - бледнее
+        self.assertIn('не подключён', cell('Н1'))
+        self.assertNotIn(disk_ui.ASSIGNED_ON, cell('Н1') + cell('Н2'))
+        s.t.item(self.row_of(s, 'Н1'), 0).setCheckState(Qt.Checked)                  # щелчок галочки - сразу
+        self.assertIn(f'<b style="color:{disk_ui.ASSIGNED_ON}">● HDD45', cell('Н1'))
+        self.assertIn(f'<span style="color:{disk_ui.ASSIGNED_OFF}">HDD77', cell('Н1'))
+        self.assertNotIn(disk_ui.ASSIGNED_OFF, cell('Н2'))                          # не отмеченное - зелёное
+        s.t.item(self.row_of(s, 'Н1'), 0).setCheckState(Qt.Unchecked)
+        self.assertNotIn(disk_ui.ASSIGNED_ON, cell('Н1'))
+        # диалог «Новое направление»: оранжевый - уже у другого направления; голубой фон - выбран сейчас
+        dlg = dp.DirectionDialog(s, s.data, None)
         it = {dlg.disks.item(i).data(Qt.UserRole): dlg.disks.item(i) for i in range(dlg.disks.count())}
         color = lambda d: it[d].data(Qt.ForegroundRole).color().name()
-        self.assertEqual(color('HDD45'), disk_ui.ASSIGNED_ON)                       # чужой (Н1), подключён
-        self.assertIn('у Н1 «Семейный архив»', it['HDD45'].text())
-        self.assertEqual(color('HDD77'), disk_ui.ASSIGNED_OFF)                      # чужой, не подключён
-        self.assertEqual(color('HDD91'), disk_ui.ASSIGNED_OFF)                      # свой, не подключён
+        self.assertEqual(color('HDD45'), disk_ui.ASSIGNED_ON)                       # у Н1, подключён
+        self.assertEqual(color('HDD77'), disk_ui.ASSIGNED_OFF)                      # у Н1, не подключён
         self.assertEqual(color('HDD90'), '#1b5e20')                                 # свободен, подключён
         self.assertEqual(dlg.disks.item(0).data(Qt.UserRole), 'HDD45')              # подключённые - сверху
+        self.assertIsNone(it['HDD90'].data(Qt.BackgroundRole))
+        it['HDD90'].setCheckState(Qt.Checked)                                        # щелчок - сразу голубой фон
+        self.assertEqual(it['HDD90'].data(Qt.BackgroundRole).color().name(), disk_ui.SELECTED_BG)
+        self.assertEqual(it['HDD90'].checkState(), Qt.Checked)                       # галочка остаётся
+        self.assertEqual(color('HDD90'), '#1b5e20')
+        it['HDD90'].setCheckState(Qt.Unchecked)
+        self.assertIsNone(it['HDD90'].data(Qt.BackgroundRole))
+        legend = ''.join(x.text() for x in dlg.findChildren(dp.QLabel))
+        self.assertIn('выбран сейчас', legend)
+        self.assertIn('уже у другого направления', legend)
         s.data['disks'] = [dict(r, letter='') if r['disk'] == 'HDD90' else r for r in s.data['disks']]
-        dlg2 = dp.DirectionDialog(s, s.data, s.data['dirs']['Н2'])
+        dlg2 = dp.DirectionDialog(s, s.data, None)
         it2 = {dlg2.disks.item(i).data(Qt.UserRole): dlg2.disks.item(i) for i in range(dlg2.disks.count())}
         self.assertEqual(it2['HDD90'].data(Qt.ForegroundRole).color().name(), '#8a8a8a')   # свободен, не подключён
 
@@ -407,6 +462,147 @@ class SectionTest(DirBase):
         self.assertEqual(got, [['Н2']])
         self.assertEqual(self.win.opened, [dp.RAZBOR_PAGE])
 
+
+
+class OverviewTest(DirBase):
+    """Второй круг, п. 5 и 6: нижняя таблица «Обзора» по дискам направлений и «Требует внимания» по группам."""
+
+    def page(self):
+        ov = app.OverviewPage(self.win)
+        ov.refresh()
+        self.assertTrue(wait(lambda: ov.ov is not None and ov.dirs.data is not None), self.win.errors)
+        return ov
+
+    def table(self, ov):
+        return [[ov.dt.item(i, j).text() for j in range(ov.dt.columnCount())] for i in range(ov.dt.rowCount())]
+
+    def test_service_counts_direction_disks(self):
+        import sqlite3
+        with sqlite3.connect(hb.DB) as c:                                            # временная база теста
+            c.execute("update files set ev='Z' where disk='HDD91'")
+            c.execute("update files set ev='U' where disk='HDD45' and path='X\\2.jpg'")
+        hb.close_last()
+        ov = sv.overview()
+        self.assertEqual(list(ov['disks_info']), ['HDD45', 'HDD77', 'HDD91'])        # все диски направлений, по порядку
+        self.assertEqual(ov['disks_info']['HDD45']['ev'], {'S': 1, 'U': 1})
+        self.assertEqual(ov['disks_info']['HDD77']['ev'], {'S': 1})
+        self.assertEqual(ov['disks_info']['HDD91']['ev'], {'Z': 1})
+        self.assertTrue(ov['disks_info']['HDD45']['in_base'])
+        self.assertAlmostEqual(ov['disks_info']['HDD45']['gib'] * hb.GIB, 300)
+        self.assertEqual(ov['disks_info']['HDD45']['letter'], '')
+        self.assertFalse(sv.overview(disks=['HDD99'])['disks_info']['HDD99']['in_base'])   # назначен, описи нет
+        self.assertNotIn('main', ov)
+        # окно: ничего не отмечено - все диски и приписка; отмечено Н2 - только его диск; Z/U/X красным с подсказкой
+        page = self.page()
+        rows = self.table(page)
+        self.assertEqual([r[0] for r in rows], ['HDD45', 'HDD77', 'HDD91'])
+        self.assertEqual(page.all_note.text(), 'галочек нет — показаны все')
+        self.assertEqual(rows[0][1], 'нет')                                          # не подключён
+        self.assertEqual(rows[0][2], '—')
+        heads = [page.dt.horizontalHeaderItem(j).text().replace('\n', ' ') for j in range(page.dt.columnCount())]
+        self.assertEqual(heads, ['Диск', 'Подключён', 'Свободно', 'Общий объём файлов, ГБ',
+                                 'Проверено по хешу при сканировании', 'Скопировано программой, хеш сверен',
+                                 'Скопировано, сверен только размер', 'Со слов «Я сделал в Проводнике»',
+                                 'Изменились после проверки'])
+        self.assertFalse(any(f'({x})' in ' '.join(heads) for x in 'SCZUX'))          # букв в заголовках нет
+        self.assertEqual(rows[0][4:], ['1', '0', '0', '1', '0'])
+        u = page.dt.item(0, 7)
+        self.assertEqual(u.foreground().color().name(), app.RED)
+        self.assertIn('пересканировать папку', u.toolTip())
+        z = page.dt.item(2, 6)
+        self.assertEqual(z.foreground().color().name(), app.RED)
+        self.assertIn('пересчитать хеши', z.toolTip())
+        self.assertNotEqual(page.dt.item(0, 6).foreground().color().name(), app.RED)    # 0 - не красным
+        s = page.dirs
+        s.t.item(self.row_of(s, 'Н2'), 0).setCheckState(Qt.Checked)                  # щелчок - сразу
+        self.assertEqual([r[0] for r in self.table(page)], ['HDD91'])
+        self.assertEqual(page.all_note.text(), '')
+        s.t.item(self.row_of(s, 'Н1'), 0).setCheckState(Qt.Checked)
+        self.assertEqual([r[0] for r in self.table(page)], ['HDD45', 'HDD77', 'HDD91'])
+        self.assertEqual(page.all_note.text(), '')
+        self.assertNotIn('База собрана', page.text.toPlainText())
+
+    def test_review_fixes(self):
+        """Проверка кода этапа 7: отмечено только направление без диска - не «показаны все»; задание «идёт» с
+        ошибками - в группе ошибок; высота таблицы дисков - не больше 8 строк."""
+        dirs = sv.directions()
+        self.assertEqual(app.shown_disks(dirs, []), (['HDD45', 'HDD77', 'HDD91'], True, 'галочек нет — показаны все'))
+        self.assertEqual(app.shown_disks(dirs, ['Н3']), ([], False, 'у Н3 диск не назначен'))
+        self.assertEqual(app.shown_disks(dirs, ['Н2', 'Н3']), (['HDD91'], False, 'у Н3 диск не назначен'))
+        self.assertEqual(app.shown_disks(dirs, ['Н2']), (['HDD91'], False, ''))
+        s = self.section()                                                           # в окне без диска не отметить
+        self.assertFalse(s.t.item(self.row_of(s, 'Н3'), 0).flags() & Qt.ItemIsUserCheckable)
+        tasks = [dict(task='Т1', state='идёт', done=2, total=9, errors=1),
+                 dict(task='Т2', state='идёт', done=2, total=9, errors=0),
+                 dict(task='Т3', state='не запускалось', done=0, total=9, errors=3),
+                 dict(task='Т4', state='готово', done=9, total=9, errors=0)]
+        g = sv.attention(dict(skipped=[], unique=[], warn=[]), tasks)
+        self.assertEqual([t['task'] for t in g[0]['items']], ['Т1'])
+        page = self.page()
+        many = {f'HDD{i}': dict(ev={}, gib=0.0, in_base=True, letter='') for i in range(100, 120)}
+        page.ov['disks_info'] = many
+        page.current_dirs = lambda: ({'Н9': type('D', (), dict(num='Н9', disks=tuple(many)))()}, [])
+        page.paint_disks()
+        self.assertEqual(page.dt.rowCount(), 20)
+        rows8 = page.dt.horizontalHeader().height() + sum(page.dt.rowHeight(i) for i in range(app.MAX_DISK_ROWS)) + 6
+        self.assertEqual(page.dt.height(), rows8)                                    # дальше - прокрутка внутри таблицы
+
+    def test_attention_groups(self):
+        self.assertEqual(sv.attention(dict(skipped=[], unique=[], warn=[]), []), [])
+        self.assertIn('Ничего не требует внимания', app.attention_html([]))
+        tasks = [dict(task='Т1', state='готово с ошибками', done=5, total=5, errors=2),
+                 dict(task='Т2', state='прервано', done=3, total=10, errors=0),
+                 dict(task='Т3', state='не запускалось', done=0, total=4, errors=0),
+                 dict(task='Т4', state='готово', done=4, total=4, errors=0),
+                 dict(task='Т5', state='идёт', done=1, total=4, errors=0),
+                 dict(task='Т6', state='состояние неизвестно', done=1, total=4, errors=0)]
+        g = sv.attention(dict(skipped=['Журнал копирования 1.tsv'], unique=[], warn=['ручные операции: непонятное']),
+                         tasks)
+        self.assertEqual([x['key'] for x in g], ['tasks', 'logs', 'warn'])           # пустая группа не показана
+        self.assertEqual([t['task'] for t in g[0]['items']], ['Т1', 'Т2', 'Т6'])
+        html = app.attention_html(g)
+        self.assertIn('Задания с ошибками или прерванные', html)
+        self.assertIn('«Т1» — готово с ошибками: сделано 5 из 5, ошибок 2', html)
+        self.assertIn('«Т6» — состояние неизвестно', html)
+        self.assertIn('href="tasks:"', html)
+        self.assertIn('Журналы, которые программа не смогла прочитать', html)
+        self.assertIn('Прочие предупреждения базы', html)
+        self.assertNotIn('Т3', html)                                                  # «Ждут запуска» - не здесь
+        # файлы, которых больше нигде нет: два носителя; числа - из отчёта сборки, путь - только в ссылке
+        sv.add_exclusion('HDD90', 'B')
+        sv.add_exclusion('HDD91', 'Z')
+        ov = sv.overview()
+        u = {x['disk']: x for x in ov['unique']}
+        self.assertEqual(set(u), {'HDD90', 'HDD91'})
+        self.assertEqual((u['HDD90']['files'], u['HDD90']['bytes'], u['HDD90']['small']), (2, 900, 2))
+        self.assertEqual((u['HDD91']['files'], u['HDD91']['bytes']), (1, 400))
+        self.assertTrue(Path(u['HDD90']['list']).exists())
+        self.assertTrue(all('нигде нет' not in w for w in ov['warn']))               # не дублируется в «прочих»
+        for d in ('HDD90', 'HDD91'):                                                 # база старой версии - из файла списка
+            old = sv._unique_from_list(d)
+            self.assertEqual({k: old[k] for k in ('files', 'bytes', 'small', 'nohash')},
+                             {k: u[d][k] for k in ('files', 'bytes', 'small', 'nohash')})
+        self.assertTrue(sv._unique_from_list('HDD99')['missing'])
+        page = self.page()
+        text = page.text.toPlainText()
+        self.assertIn('Файлы, которых больше нигде нет', text)
+        self.assertIn('HDD90 — 2 фото и видео, 0,0 ГБ', text)
+        self.assertIn('Открыть список', text)
+        self.assertIn('мелких картинок', text)
+        self.assertNotIn(str(hb.ANSWERS), page.text.toHtml().replace('href="list:', ''))   # длинного пути в тексте нет
+        self.assertIn('пересоберите базу', app.attention_html([dict(key='unique', title='x',
+                                                                    items=[dict(disk='HDD99', missing=True)])]))
+        opened = []
+        real = os.startfile
+        os.startfile = opened.append
+        try:
+            from PySide6.QtCore import QUrl
+            page.link(QUrl('list:HDD91'))
+            page.link(QUrl('tasks:'))
+        finally:
+            os.startfile = real
+        self.assertEqual(opened, [u['HDD91']['list']])
+        self.assertEqual(self.win.opened, ['Задания'])
 
 if __name__ == '__main__':
     unittest.main()

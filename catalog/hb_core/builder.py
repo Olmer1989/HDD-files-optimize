@@ -69,7 +69,7 @@ def load_report(c):
     row = c.execute("select value from meta where key='report'").fetchone()
     rep = json.loads(row[0]) if row else {}
     for k, v in (('logs', {}), ('old_logs', {}), ('skipped', []), ('manual', []), ('old', []), ('warn', []),
-                 ('partial', []), ('excluded', []), ('unique', {})):
+                 ('partial', []), ('excluded', []), ('unique', {}), ('unique_info', {})):
         rep.setdefault(k, v)
     rep['warn'] = set(rep['warn'])
     return rep
