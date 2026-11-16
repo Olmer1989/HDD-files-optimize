@@ -23,6 +23,7 @@ import hashbase as hb                                       # noqa: E402
 import service as sv                                        # noqa: E402
 import tasks_page as tp                                     # noqa: E402
 from hb_cmd import mvlist as mv                             # noqa: E402
+from hb_core import razbor as rz                            # noqa: E402
 from test_hashbase import LOG_HEAD, NS, S                   # noqa: E402
 from test_logic_v3 import H, SRC, V3Base                    # noqa: E402
 from test_tasks_move import FakeWin                         # noqa: E402
@@ -400,6 +401,360 @@ class TemplateRecoveryTest(unittest.TestCase):
         self.assertTrue((self.disk / 'A' / 'лишний.txt').exists())                   # остался на месте
         self.assertTrue((self.disk / FAMILY_ROOT / 'A' / '2.jpg').exists())
         self.assertNotIn('папка\tнамерение', (self.task / 'Намерение перемещения.tsv').read_text(encoding='utf-8'))
+
+
+R45 = 'Скопировано на Семейный архив 45'
+R4577 = 'Скопировано на Семейный архив 45 и 77'
+HIKE_FILES = (('Поход 2010\\Фото\\1.jpg', 100), ('Поход 2010\\Фото\\2.jpg', 200), ('Поход 2010\\Фото\\Thumbs.db', 5),
+              ('Поход 2010\\описание.doc', 10), ('Поход 2010\\Монтаж\\проект.prproj', 50),
+              ('Поход 2010\\Монтаж\\clip.mp4', 600), ('Поход 2010\\Монтаж\\clip копия.mp4', 600))
+
+
+class SecondPassTest(MoveBase):
+    """Этап 13: 45 и 77 - два направления; вторая копия - вторым проходом по «Скопировано на Семейный архив 45»,
+    затем переименование в «Скопировано на Семейный архив 45 и 77» (без вложенности). Шаблон - настоящий, на
+    временной папке вместо диска."""
+
+    def setUp(self):
+        super().setUp()
+        sv.add_direction(num='Н1', name='Семейный архив 45', disks=['HDD45'])
+        sv.add_direction(name='Семейный архив 77', disks=['HDD77'], kind=hb.KIND_MEDIA)      # Н4 в тестовых данных
+        self.n77 = hb.find_direction(sv.directions(), 'Семейный архив 77').num
+        self.files(*HIKE_FILES)
+
+    def log_all(self, task, stamp, fail=()):
+        """Журнал копирования по списку задания: всё скопировано (у файлов без хеша - хеш прочитанного DOC1)."""
+        lines = []
+        for f in (hb.TASKS / task / 'список.tsv').read_text(encoding='utf-8').splitlines():
+            t, path, size, kind, *sha = f.split('\t')
+            if path in fail:
+                lines.append((t, 'ОШИБКА: устройство не готово', int(size), '', path))
+            else:
+                lines.append((t, OK if sha and sha[0] else OK_NOHASH, int(size), (sha[0].lower() if sha and sha[0] else DOC1), path))
+        self.copy_log(task, stamp, lines)
+
+    def first_pass(self, fail=()):
+        """Поход 2010 -> Н1 (только 45): копия, проверка, перенос в «Скопировано на Семейный архив 45»."""
+        self.mark(('Поход 2010', 'Н1'))
+        res = sv.razbor_tasks(SRC, dry=False)
+        name = res['specs'][0]['name']
+        self.assertEqual(name, 'HDD60 — Поход 2010 — Семейный архив 45')            # один диск - без «— на 45»
+        self.assertEqual(res['specs'][0]['disks'], ['HDD45'])
+        self.log_all(name, '2025-01-01 10-00-00', fail)
+        text = self.mv(razbor=name, dry=True)
+        self.assertIn(f'«{R45}»', text)
+        self.mv(razbor=name)
+        task = hb.TASKS / (name + mv.V3_SUFFIX)
+        code, outp = run_ps(task, self.disk)
+        self.assertEqual(code, 0, outp)
+        # журнал переноса - «в прошлом» (июнь 2025), до журнала второй копии (июль 2025): сборка с нуля применяет журналы
+        # по времени, как было бы на самом деле (шаблон ставит в имя текущее время)
+        for log in task.glob('Журнал перемещения *.tsv'):
+            log.rename(log.with_name('Журнал перемещения 2025-06-01 10-00-00.tsv'))
+        hb.close_last()
+        return name
+
+    def second_task(self, mark_path):
+        self.mark((mark_path, self.n77))
+        res = sv.razbor_tasks(SRC, dry=False, only=[self.n77])
+        self.assertEqual(len(res['specs']), 1)
+        s = res['specs'][0]
+        self.assertEqual(s['targets'], ['HDD77'])
+        return s
+
+    def test_first_pass_45_only_then_subfolder_to_77(self):
+        self.first_pass()
+        # первый проход: на 45 скопировано и проверено - папка в «Скопировано на Семейный архив 45» (77 не нужен)
+        hike = self.disk / R45 / 'Поход 2010'
+        for rel in ('Фото/1.jpg', 'Фото/2.jpg', 'Фото/Thumbs.db', 'описание.doc', 'Монтаж/clip.mp4', 'Монтаж/clip копия.mp4'):
+            self.assertTrue((hike / rel).exists(), rel)
+        self.assertTrue((self.disk / 'Поход 2010' / 'Монтаж' / 'проект.prproj').exists())   # не подходит по типу - на месте
+        c = self.db()
+        self.assertIn((R45,), c.execute('select folder from moved_roots where disk=?', (SRC,)).fetchall())
+        # в разборе: без своей отметки - «уже перенесено»; исходная отметка Н1 внутрь не проникает
+        P = self.plan()
+        self.assertEqual(self.a(P, rz.O_MOVED)[0], 6 + 1)                     # + старая «ПЕРЕНЕСЕНО → 45 и 77»
+        self.assertEqual(self.a(P, rz.O_COPY, 'Н1'), (0, 0))
+        # отметка ВНУТРИ «Скопировано на …» для 77 - по нынешнему пути
+        pv = sv.marks_preview(SRC, [(R45 + '\\Поход 2010', self.n77)])
+        self.assertEqual(pv['fields'][0][1], R45 + '\\Поход 2010')
+        self.assertIn('отметка действует только там', pv['lines'][1])
+        s = self.second_task(R45 + '\\Поход 2010')
+        self.assertEqual(s['name'], 'HDD60 — Поход 2010 — Семейный архив 77')
+        rows = {r[1] for r in s['rows']}
+        # 1.jpg уже есть на 77 (по хешу) - не копируется; клип - один раз (дубль в задании)
+        self.assertEqual(rows, {R45 + '\\Поход 2010\\Фото\\2.jpg', R45 + '\\Поход 2010\\Монтаж\\clip копия.mp4',
+                                R45 + '\\Поход 2010\\описание.doc'})
+        P = self.plan()
+        self.assertEqual(self.a(P, rz.O_HAVE, self.n77), (1, 100))
+        self.log_all(s['name'], '2025-07-01 10-00-00')   # после журнала первого переноса
+        text = self.mv(razbor=s['name'], dry=True)
+        self.assertIn(f'«{R4577}»', text)
+        self.assertIn('папкой целиком', text)
+        self.mv(razbor=s['name'])
+        task = hb.TASKS / (s['name'] + mv.V3_SUFFIX)
+        whole = (task / 'папки целиком.tsv').read_text(encoding='utf-8').rstrip('\n').split('\t')
+        self.assertEqual(whole[:2] + whole[4:], [R45 + '\\Поход 2010', R4577, R45])
+        meta = json.loads((task / 'перемещение.json').read_text(encoding='utf-8'))
+        self.assertEqual((meta['куда'], meta['снять'], meta['части']), (R4577, R45, ['Семейный архив 45', 'Семейный архив 77']))
+        self.assertEqual((task / 'корни.tsv').read_text(encoding='utf-8'), f'{R45}\tизвестен\n{R4577}\tновый\n')
+        rows = [x.split('\t') for x in (task / 'перемещение.tsv').read_text(encoding='utf-8').splitlines()]
+        self.assertTrue(all(r[3] == R4577 and r[6] == R45 for r in rows))
+        self.assertIn('HDD45', rows[0][5])                                    # обязательные: и 45, и 77
+        self.assertIn('HDD77', rows[0][5])
+        code, outp = run_ps(task, self.disk)
+        self.assertEqual(code, 0, outp)
+        self.assertIn('перенесена целиком', outp)
+        new = self.disk / R4577 / 'Поход 2010'                                 # без вложенности
+        self.assertTrue((new / 'Фото' / '1.jpg').exists())
+        self.assertFalse((self.disk / R4577 / R45).exists())
+        self.assertFalse((self.disk / R45 / 'Поход 2010').exists())
+        hb.close_last()
+        c = self.db()
+        self.assertEqual(sorted(x for (x,) in c.execute('select folder from moved_roots where disk=?', (SRC,))), [R45, R4577])
+        self.assertTrue(c.execute('select 1 from files where disk=? and path=?',
+                                  (SRC, R4577 + '\\Поход 2010\\Фото\\1.jpg')).fetchone())
+        self.assertFalse(c.execute('select 1 from files where disk=? and path like ?', (SRC, R45 + '\\%')).fetchone())
+        P = self.plan()
+        self.assertEqual(self.a(P, rz.O_MOVED)[0], 6 + 1)                     # всё «уже перенесено»
+        self.assertIn('Можно перенести: 0 файлов', self.mv(razbor=s['name'], dry=True))    # второй раз - нечего
+        # «Задания»: строка переноса - без вложенности
+        self.assertEqual(tp.move_line('F:', SRC, R45 + '\\Поход 2010', R4577), f'F:\\{R45}\\Поход 2010 → F:\\{R4577}\\Поход 2010')
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+        self.assertIn('ИТОГ: совпала', self.printed)                             # сборка по шагам = с нуля
+
+    def test_whole_copied_folder_renamed(self):
+        self.first_pass()
+        s = self.second_task(R45)                                              # отмечена вся «Скопировано на …»
+        self.assertEqual(s['name'], f'HDD60 — {R45} — Семейный архив 77')
+        self.log_all(s['name'], '2025-07-01 10-00-00')   # после журнала первого переноса
+        self.mv(razbor=s['name'])
+        task = hb.TASKS / (s['name'] + mv.V3_SUFFIX)
+        whole = (task / 'папки целиком.tsv').read_text(encoding='utf-8').rstrip('\n').split('\t')
+        self.assertEqual(whole[:2] + whole[4:], [R45, R4577, R45])
+        code, outp = run_ps(task, self.disk)
+        self.assertEqual(code, 0, outp)
+        self.assertFalse((self.disk / R45).exists())                           # одно переименование всей папки
+        self.assertTrue((self.disk / R4577 / 'Поход 2010' / 'Монтаж' / 'clip.mp4').exists())
+        intent = (task / 'Намерение перемещения.tsv').read_text(encoding='utf-8')
+        self.assertIn(f'\tпапка\tнамерение\t{R45}\t{R4577}\t', intent)
+        self.assertIn(f'\tкорень\tсоздан\t\t{R4577}\t', intent)                # записано ПОСЛЕ удачного переименования
+        self.assertLess(intent.index('\tпапка\tнамерение\t'), intent.index('\tкорень\tсоздан\t'))
+        hb.close_last()
+        c = self.db()
+        self.assertIn((R4577,), c.execute('select folder from moved_roots where disk=?', (SRC,)).fetchall())
+        self.assertEqual(c.execute('select count(*) from files where disk=? and path like ?', (SRC, R4577 + '\\%')).fetchone()[0], 6)
+
+    def test_not_confirmed_on_45_stays(self):
+        """Гарантия: в «… 45 и 77» переезжает только то, что подтверждено по SHA-256 и на 45, и на 77."""
+        self.first_pass()
+        # «потеря» копии клипа на 45: журнал первого прохода говорит, что клип на 45 не записан
+        first = hb.TASKS / 'HDD60 — Поход 2010 — Семейный архив 45'
+        log = next(first.glob('Журнал копирования *.tsv'))
+        log.write_text(log.read_text(encoding='utf-8-sig').replace(f'{OK}\t600\t{H[20]}', 'ОШИБКА: устройство не готово\t600\t'),
+                       encoding='utf-8-sig')
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+        s = self.second_task(R45 + '\\Поход 2010')
+        self.log_all(s['name'], '2025-07-01 10-00-00')   # после журнала первого переноса
+        text = self.mv(razbor=s['name'], dry=True)
+        self.assertIn(f'Остаются на месте - {mv.R_ERR}: 1 файлов', text)        # клип: на 45 ошибка копирования
+        self.assertIn(f'Остаются на месте - {mv.R_NONE}: 1 файлов', text)       # его дубль: на 45 копии нет
+        self.assertIn('по файлам', text)
+        self.mv(razbor=s['name'])
+        task = hb.TASKS / (s['name'] + mv.V3_SUFFIX)
+        moved = {x.split('\t')[0] for x in (task / 'перемещение.tsv').read_text(encoding='utf-8').splitlines()}
+        self.assertNotIn(R45 + '\\Поход 2010\\Монтаж\\clip.mp4', moved)
+        code, outp = run_ps(task, self.disk)
+        self.assertEqual(code, 0, outp)
+        self.assertTrue((self.disk / R45 / 'Поход 2010' / 'Монтаж' / 'clip.mp4').exists())    # остался
+        self.assertTrue((self.disk / R4577 / 'Поход 2010' / 'Фото' / '2.jpg').exists())
+
+    def test_move_metas_only_own_disk_and_done(self):
+        """Проверка ядра, п. 1: записи переносов - только этого носителя и только выполненные (есть журнал)."""
+        for name, disk, done in (('A', SRC, True), ('B', 'HDD61', True), ('C', SRC, False)):
+            t = hb.TASKS / name
+            t.mkdir(parents=True)
+            (t / mv.V3_META).write_text(json.dumps({'версия': 3, 'носитель': disk, 'куда': R45}), encoding='utf-8')
+            if done:
+                (t / 'Журнал перемещения 2025-01-01 10-00-00.tsv').write_text(
+                    'время\tрезультат\tразмер\tsha-256\tоткуда\tкуда\n10:00\tперемещён\t1\t\tK:\\a\tK:\\b\n',
+                    encoding='utf-8-sig')
+        self.assertEqual([m['носитель'] for m in mv.move_metas(SRC)], [SRC])
+        self.assertEqual(len(mv.move_metas()), 2)
+
+    def test_no_history_refused(self):
+        """П. 2 в работе: запись первого переноса (перемещение.json) потеряна, журнал есть - второй проход не
+        предлагается (на какие диски копия уже подтверждена, неизвестно)."""
+        name = self.first_pass()
+        (hb.TASKS / (name + mv.V3_SUFFIX) / mv.V3_META).unlink()
+        s = self.second_task(R45 + '\\Поход 2010')
+        self.log_all(s['name'], '2025-07-01 10-00-00')
+        with self.assertRaises(SystemExit) as e:
+            self.mv(razbor=s['name'], dry=True)
+        self.assertIn('не найдена история этой папки', str(e.exception))
+
+    def test_file_in_root_of_copied_folder(self):
+        """П. 5: файл прямо в корне «Скопировано на …» - история по его исходному пути («корень.jpg»), обязателен 45."""
+        first = hb.TASKS / 'Копия корня на 45'                       # задание копирования первого прохода
+        first.mkdir(parents=True)
+        (first / 'тома.tsv').write_text(f'{SRC}\tAAAA0060\nHDD45\tAAAA0045\n', encoding='utf-8')
+        (first / 'список.tsv').write_text(f'HDD45\tкорень.jpg\t80\tс хешем\t{H[26].upper()}\n', encoding='utf-8')
+        self.copy_log('Копия корня на 45', '2025-01-01 10-00-00', [('HDD45', OK, 80, H[26], 'корень.jpg')])
+        mvt = hb.TASKS / 'Перенос корня'                              # выполненный перенос в R45
+        mvt.mkdir()
+        (mvt / 'тома.tsv').write_text(f'{SRC}\tAAAA0060\n', encoding='utf-8')
+        (mvt / mv.V3_META).write_text(json.dumps({'версия': 3, 'носитель': SRC, 'куда': R45, 'имя направления':
+                                                  'Семейный архив 45', 'обязательные диски': ['HDD45']}), encoding='utf-8')
+        (mvt / 'Журнал перемещения 2025-06-01 10-00-00.tsv').write_text(
+            'время\tрезультат\tразмер\tsha-256\tоткуда\tкуда\n'
+            f'10:00\tперемещён\t80\t{H[26]}\tK:\\корень.jpg\tK:\\{R45}\\корень.jpg\n', encoding='utf-8-sig')
+        hb.close_last()
+        s = self.second_task(R45)
+        self.assertEqual([r[1] for r in s['rows']], [R45 + '\\корень.jpg'])
+        self.log_all(s['name'], '2025-07-01 10-00-00')
+        self.mv(razbor=s['name'])
+        task = hb.TASKS / (s['name'] + mv.V3_SUFFIX)
+        row = (task / 'перемещение.tsv').read_text(encoding='utf-8').split('\t')
+        self.assertEqual((row[0], row[3], row[5], row[6].strip()),
+                         (R45 + '\\корень.jpg', R4577, 'копия подтверждена: HDD45, HDD77', R45))
+        self.assertEqual(mv.dest_path(row), R4577 + '\\корень.jpg')
+        # без копии на 45 (журнал первого копирования - ошибка) - остаётся на месте
+        log = next(first.glob('Журнал копирования *.tsv'))
+        log.write_text(log.read_text(encoding='utf-8-sig').replace(OK, 'ОШИБКА: устройство не готово'), encoding='utf-8-sig')
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+        self.assertIn(f'Остаются на месте - {mv.R_ERR}: 1 файлов', self.mv(razbor=s['name'], dry=True))
+
+    def test_all_have_manifest_without_tasks(self):
+        """Копировать нечего (всё уже есть на диске по хешу): манифест пишется и без новых заданий - перенос
+        предлагается «Заданиями» (раньше манифест писался, только если были новые задания); повтор - не дублирует."""
+        self.mark(('Поход 2010\\Фото', 'Н1'))                                  # 1.jpg и 2.jpg уже есть на 45
+        res = sv.razbor_tasks(SRC, dry=False)
+        self.assertEqual(res['specs'], [])
+        self.assertIsNotNone(res['manifest'])
+        self.assertEqual([g['state'] for g in res['states']], [rz.G_HAVE])
+        self.assertIsNone(sv.razbor_tasks(SRC, dry=False)['manifest'])
+        groups = tp.latest_manifest_groups()
+        self.assertEqual([g['group']['folder'] for g in groups], ['Поход 2010\\Фото'])
+        self.assertIn(f'«{R45}»', self.mv(razbor_manifest=res['manifest'].name, group='Поход 2010\\Фото', dry=True))
+
+    def test_names_and_refusals(self):
+        self.assertEqual(hb.copied_folder('Семейный архив 45', ['HDD45']), R45)          # без «(45)»
+        self.assertEqual(hb.copied_folder('Семейный архив 45', ['HDD80']), R45 + ' (80)')  # диск сменили - видно
+        self.assertEqual(hb.copied_folder('Архив 2045', ['HDD45']), 'Скопировано на Архив 2045 (45)')
+        self.assertEqual(hb.copied_folder('Семейный архив 45 и 77', ['HDD77']), R4577 + ' (77)')
+        self.assertEqual(hb.copied_folder('Фильмы', ['HDD55']), 'Скопировано на Фильмы (55)')
+        j = lambda *p: hb.copied_join(list(p))
+        self.assertEqual(j('Семейный архив 45', 'Семейный архив 77'), R4577)
+        self.assertEqual(j('Семейный архив 77', 'Семейный архив 45'), R4577)            # порядок проходов не важен
+        self.assertEqual(j('Семейный архив 45 и 77', 'Семейный архив 77'), R4577)       # повтор - то же имя (отказ)
+        self.assertEqual(j('Семейный архив 45 и 77', 'Фильмы (55)'), R4577 + ', Фильмы (55)')
+        self.assertEqual(j('Фильмы (55)', 'Работа (78)'), 'Скопировано на Работа (78) и Фильмы (55)')
+        self.assertEqual(j('Фильмы (55)', 'Работа (78)', 'Друзья (81)'),
+                         'Скопировано на Друзья (81), Работа (78) и Фильмы (55)')
+        self.assertEqual(hb.copied_parts(R4577 + ', Фильмы (55)'), ['Семейный архив 45 и 77', 'Фильмы (55)'])
+        src = dict(direction='Семейный архив 77', disks=['HDD77'], disk=SRC)
+        m45 = {'куда': R45, 'носитель': SRC, 'обязательные диски': ['HDD45'], 'имя направления': 'Семейный архив 45'}
+        m4577 = dict(m45, куда=R4577, части=['Семейный архив 45', 'Семейный архив 77'], **{'обязательные диски': ['HDD77']})
+        with self.assertRaises(SystemExit):
+            mv.second_dest(R4577, src, metas=[m4577])                                # 77 уже в имени
+        with self.assertRaises(SystemExit):
+            mv.second_dest(R45, dict(direction='x' * 30, disks=['HDD91'], disk=SRC),
+                           metas=[dict(m45, части=['y' * 30, 'z' * 30, 'w' * 30])])  # длиннее 120 знаков
+        self.assertEqual(mv.second_dest(R45, src, metas=[m45])[:3:2], (R4577, {'HDD45'}))
+        # проверка ядра, п. 2: истории папки нет - отказ, а не молчаливая потеря диска 45
+        with self.assertRaises(SystemExit) as e:
+            mv.second_dest(R45, src, metas=[])
+        self.assertIn('не найдена история этой папки', str(e.exception))
+        # п. 1: то же имя «Скопировано на …» на другом носителе - не наша история
+        other = dict(m45, носитель='HDD61', **{'обязательные диски': ['HDD91']})
+        self.assertEqual(mv.second_dest(R45, src, metas=[m45, other])[2], {'HDD45'})
+        with self.assertRaises(SystemExit):
+            mv.second_dest(R45, src, metas=[other])
+        # старая «ПЕРЕНЕСЕНО → …»: как раньше - сама не отмечается, внутри отметка по исходному пути
+        with self.assertRaises(sv.Refused):
+            sv.marks_preview(SRC, [('ПЕРЕНЕСЕНО → 45 и 77', 'Н2')])
+
+
+class TemplateSecondPassTest(unittest.TestCase):
+    """Шаблон 1.2 без базы: колонка «снять», сбой после переименования всей «Скопировано на …»."""
+    setUp, tearDown, put = TemplateRecoveryTest.setUp, TemplateRecoveryTest.tearDown, TemplateRecoveryTest.put
+
+    def plan2(self, items, whole=(), roots=((R45, 'известен'), (R4577, 'новый')), strip=R45):
+        (self.task / 'перемещение.tsv').write_text(''.join(f'{r}\t{s}\t0\t{R4577}\t{"AB" * 32}\tпроверка\t{strip}\n'
+                                                           for r, s in items), encoding='utf-8')
+        (self.task / 'папки целиком.tsv').write_text(''.join(f'{w}\t{R4577}\t{n}\t0\t{strip}\n' for w, n in whole),
+                                                     encoding='utf-8')
+        (self.task / 'корни.tsv').write_text(''.join(f'{a}\t{b}\n' for a, b in roots), encoding='utf-8')
+
+    def test_strip_by_files(self):
+        items = [(R45 + '\\A\\1.jpg', 10), (R45 + '\\A\\2.jpg', 20)]
+        self.plan2(items)
+        for rel, size in items:
+            self.put(rel, size)
+        code, outp = run_ps(self.task, self.disk)
+        self.assertEqual(code, 0, outp)
+        self.assertTrue((self.disk / R4577 / 'A' / '1.jpg').exists())
+        self.assertEqual(sorted(r[5][r[5].index(R4577):] for r in journal(self.task) if r[1] == 'перемещён'),
+                         [R4577 + '\\A\\1.jpg', R4577 + '\\A\\2.jpg'])
+        self.assertEqual(hb.moved_rel(f'K:\\{R45}\\A\\1.jpg', f'K:\\{R4577}\\A\\1.jpg'),
+                         (R45 + '\\A\\1.jpg', R4577 + '\\A\\1.jpg'))
+
+    def test_strip_only_known_program_folder(self):
+        items = [(R45 + '\\A\\1.jpg', 10)]
+        self.plan2(items, roots=((R45, 'новый'), (R4577, 'новый')))                 # R45 не создана программой
+        self.put(items[0][0], 10)
+        code, outp = run_ps(self.task, self.disk)
+        self.assertEqual(code, 1, outp)
+        self.assertIn('снять', outp)
+        self.assertTrue((self.disk / R45 / 'A' / '1.jpg').exists())
+        self.plan2(items, strip='')                                                   # без «снять» - старое правило
+        code, outp = run_ps(self.task, self.disk)
+        self.assertEqual(code, 1, outp)
+        self.assertIn('уже лежит в служебной папке', outp)
+
+    def test_crash_after_whole_root_rename(self):
+        items = [(R45 + '\\A\\1.jpg', 10), (R45 + '\\Б\\2.jpg', 20)]
+        self.plan2(items, whole=[(R45, 2)])
+        for rel, size in items:                                                       # «сбой» после переименования
+            self.put(rel.replace(R45, R4577), size)
+        (self.task / 'Намерение перемещения.tsv').write_text(
+            'время\tоперация\tвид\tсостояние\tоткуда\tкуда\tфайлов\n'
+            f'2026-11-16 10:00:01\tx-1\tпапка\tнамерение\t{R45}\t{R4577}\t2\n', encoding='utf-8')
+        code, outp = run_ps(self.task, self.disk)
+        self.assertEqual(code, 0, outp)
+        self.assertEqual(sorted(r[1] for r in journal(self.task)), ['уже перемещён', 'уже перемещён'])
+        intent = (self.task / 'Намерение перемещения.tsv').read_text(encoding='utf-8')
+        self.assertIn(f'\tкорень\tсоздан\t\t{R4577}\t', intent)
+        self.assertIn('\tx-1\tпапка\tвыполнено\t', intent)
+
+    def test_old_and_empty_strip_column(self):
+        """П. 6: задание без 7-й колонки (1.1) и с пустой «снять» - прежнее поведение, шаблон не падает."""
+        for tail in ('', '\t'):
+            (self.task / 'перемещение.tsv').write_text(f'A\\1.jpg\t10\t0\t{R4577}\t{"AB" * 32}\tпроверка{tail}\n',
+                                                     encoding='utf-8')
+            (self.task / 'папки целиком.tsv').write_text(f'A\t{R4577}\t1\t0{tail}\n', encoding='utf-8')
+            (self.task / 'корни.tsv').write_text(f'{R4577}\tновый\n', encoding='utf-8')
+            self.put('A\\1.jpg', 10)
+            code, outp = run_ps(self.task, self.disk)
+            self.assertEqual(code, 0, outp)
+            self.assertTrue((self.disk / R4577 / 'A' / '1.jpg').exists(), tail)
+            shutil.rmtree(self.disk)
+            for x in self.task.glob('Журнал перемещения *.tsv'):
+                x.unlink()
+            (self.task / 'Намерение перемещения.tsv').unlink()
+
+    def test_whole_root_rename_foreign_target(self):
+        items = [(R45 + '\\A\\1.jpg', 10)]
+        self.plan2(items, whole=[(R45, 1)])
+        self.put(items[0][0], 10)
+        (self.disk / R4577).mkdir()                                                   # чужая папка с тем же именем
+        code, outp = run_ps(self.task, self.disk)
+        self.assertEqual(code, 1, outp)
+        self.assertIn('программа её не создавала', outp)
+        self.assertTrue((self.disk / R45 / 'A' / '1.jpg').exists())
 
 
 class TasksPageV3Test(unittest.TestCase):

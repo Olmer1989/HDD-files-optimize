@@ -52,11 +52,19 @@ def cmd_directions_default(a):
     _write(lambda: sv.directions_batch_preview(sv.DEFAULT_DIRECTIONS), lambda: sv.add_directions_batch(sv.DEFAULT_DIRECTIONS), a)
 
 
-NAMES = ('directions', 'direction-add', 'direction-edit', 'directions-default')
+def cmd_family_split(a):
+    """Этап 13: Н1 «Семейный архив» (45 и 77) -> Н1 «Семейный архив 45» (45) + Н7 «Семейный архив 77» (77)."""
+    import service as sv
+    _write(sv.family_split_preview, sv.family_split, a)
+
+
+NAMES = ('directions', 'direction-add', 'direction-edit', 'directions-default', 'family-split')
 HELP = {'directions': 'направления разбора: имя, диски, что копировать, папка на носителе',
         'direction-add': 'новое направление разбора (предпросмотр; запись - с --yes)',
         'direction-edit': 'переименовать направление, сменить или добавить диск, что копировать (предпросмотр; --yes)',
-        'directions-default': 'завести направления по ответам владельца 15.11.2026 (предпросмотр; --yes)'}
+        'directions-default': 'завести направления по ответам владельца 15.11.2026 (предпросмотр; --yes)',
+        'family-split': 'разделить «Семейный архив» на Н1 «Семейный архив 45» и Н7 «Семейный архив 77» (предпросмотр; --yes)'}
+GUI = {'family-split': False}      # разовый переход данных (этап 13) - только из командной строки
 # для окна «Архив дисков» (раздел «Команды»); свой экран «Направления» - этап 5а
 GUI_GROUP = 'Разбор носителя (v3)'
 GUI_ORDER = {'directions': 1, 'direction-add': 5, 'direction-edit': 6, 'directions-default': 7}
@@ -96,10 +104,10 @@ def add_args(p, name):
         p.add_argument('--former', action='append', help='добавить прежнее имя')
         p.add_argument('--note')
         p.add_argument('--yes', action='store_true', help='записать (без него - только предпросмотр)')
-    elif name == 'directions-default':
+    elif name in ('directions-default', 'family-split'):
         p.add_argument('--yes', action='store_true', help='записать (без него - только предпросмотр)')
 
 
 def run(a):
     {'directions': cmd_directions, 'direction-add': cmd_direction_add, 'direction-edit': cmd_direction_edit,
-     'directions-default': cmd_directions_default}[a.cmd](a)
+     'directions-default': cmd_directions_default, 'family-split': cmd_family_split}[a.cmd](a)

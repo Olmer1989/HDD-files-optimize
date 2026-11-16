@@ -24,7 +24,7 @@ LEVELS = {'paths': 0, 'consts': 0, 'schema': 1, 'util': 1, 'report': 2, 'sources
 COMMANDS = {'missing', 'only', 'cmp', 'where', 'candel', 'mklist', 'mvlist', 'manual', 'fix-manual', 'decide',
             'exclude', 'tasks', 'stats', 'build', 'folders', 'find', 'rebuild', 'family-plan', 'family-check',
             'recovery-plan', 'recovery-staging', 'rescan-plan',
-            'directions', 'direction-add', 'direction-edit', 'directions-default', 'mark', 'razbor', 'razbor-tasks',
+            'directions', 'direction-add', 'direction-edit', 'directions-default', 'family-split', 'mark', 'razbor', 'razbor-tasks',
             'contested'}
 UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего ядро не импортирует никогда
 PATHVARS = {'BASE_DIR', 'DB', 'SNAP', 'MANUAL', 'DECISIONS', 'EXCLUSIONS', 'ANSWERS', 'TEMPLATE', 'MOVE_TEMPLATE', 'TASKS',
@@ -105,7 +105,7 @@ class ModulesTest(unittest.TestCase):
             if not show:
                 hidden.add(name)
         self.assertEqual(hidden, {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist',
-                                  'manual', 'fix-manual', 'mklist', 'decide', 'exclude', 'rescan-plan'})
+                                  'manual', 'fix-manual', 'mklist', 'decide', 'exclude', 'rescan-plan', 'family-split'})
 
     def test_visible_commands_have_window_texts(self):
         # окно «Архив дисков»: у каждой видимой команды есть понятный заголовок и группа (GUI_TITLE, GUI_GROUP)

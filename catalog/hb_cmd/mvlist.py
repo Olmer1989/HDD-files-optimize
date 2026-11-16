@@ -18,8 +18,8 @@ import sys
 from pathlib import Path
 import build_pilot as bp
 from hb_core import paths
-from hb_core.consts import EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, MAIN, OLD_LOGS, SEP
-from hb_core.util import gb, is_moved_dir, moved_folder, out, prefix_cond, rel_of
+from hb_core.consts import COPIED_PREFIX, EV_COPY, EV_SCAN, EV_SIZE, FOLDER_MOVES, MAIN, OLD_LOGS, SEP
+from hb_core.util import copied_tail, gb, is_moved_dir, moved_folder, out, prefix_cond, rel_of
 from hb_core.sources import log_time, read_tsv, serial_map
 from hb_core.db import connect
 from hb_core.query import check_disk, decision_of, decisions_for
@@ -436,10 +436,12 @@ def v3_task_name(src):
     return base + V3_SUFFIX
 
 
-def _decisive(ms, path):
-    """Решающая отметка пути: самая глубокая из него самого и его папок (как маршрут разбора)."""
+def _decisive(ms, path, roots=()):
+    """Решающая отметка пути: самая глубокая из него самого и его папок (как маршрут разбора). Внутри «Скопировано на
+    …» (roots) - только отметки, поставленные внутри неё; отметка всего носителя туда не проникает (этап 13)."""
     parts = path.split(SEP) if path else []
-    for i in range(len(parts), -1, -1):
+    low = 1 if parts and parts[0] in roots and parts[0].startswith(COPIED_PREFIX) else 0
+    for i in range(len(parts), low - 1, -1):
         m = ms.get(SEP.join(parts[:i]))
         if m:
             return m
@@ -467,9 +469,66 @@ def _copy_tasks(src, serials, jobs):
     return res
 
 
+def _moved_done(task):
+    """Перенос задания перемещения выполнялся: в его журнале есть строка «перемещён» или «уже перемещён»."""
+    for log in Path(task).glob('Журнал перемещения *.tsv'):
+        if any(len(f) >= 2 and f[1] in ('перемещён', 'уже перемещён') for f in read_tsv(log)[1:]):
+            return True
+    return False
+
+
+def move_metas(disk=None):
+    """Записи ВЫПОЛНЕННЫХ заданий перемещения v3 (перемещение.json и журнал с «перемещён») этого носителя -> [dict]:
+    части имени и обязательные диски служебных папок. Одно имя «Скопировано на …» на разных носителях - норма,
+    поэтому - только свой носитель (проверка ядра этапа 13, п. 1)."""
+    res = []
+    for root in (paths.TASKS, bp.OUT_DIR):
+        root = Path(root)
+        if root.exists():
+            for d in sorted(root.iterdir()):
+                m = _json(d / V3_META) if (d / V3_META).exists() else None
+                if m and m.get('версия') == 3 and (disk is None or m.get('носитель') == disk) and _moved_done(d):
+                    res.append(m)
+    return res
+
+
+def second_dest(r1, src, metas=None):
+    """Второй проход (этап 13): папка, в которую переименуется служебная r1 после копии на диски src. -> (r2, части,
+    диски r1 по записям переносов). Части r1 - из записей заданий перемещения («части»; у первого прохода - хвост его
+    направления). Отказ (sys.exit): нет записи выполненного переноса в r1 на этом носителе (история папки неизвестна -
+    обязательный диск первого прохода не теряется молча; проверка ядра этапа 13, п. 2), диски src уже учтены в r1,
+    имя длинное."""
+    from hb_core.util import COPIED_NAME_MAX, copied_join, copied_tail
+    metas = move_metas(src.get('disk')) if metas is None else metas
+    parts, r1_disks = [], set()
+    for m in metas:
+        if m.get('куда') != r1 or (src.get('disk') and m.get('носитель') != src['disk']):
+            continue
+        r1_disks |= set(m.get('обязательные диски') or [])
+        own = m.get('части') or ([copied_tail(m.get('имя направления', ''), m['обязательные диски'])]
+                                 if m.get('обязательные диски') else [])
+        for t in own:
+            if t.casefold() not in {x.casefold() for x in parts}:
+                parts.append(t)
+    if not parts or not r1_disks:
+        sys.exit(f'«{r1}»: не найдена история этой папки (задание перемещения, которое её создало на {src.get("disk")}, '
+                 'и его журнал) - на какие диски копия уже подтверждена, неизвестно. Перемещение не предлагается: '
+                 'верните папку задания перемещения в «Запускаемые скрипты» или решите вручную.')
+    tail = copied_tail(src['direction'], src['disks'])
+    r2 = copied_join(parts + [tail])
+    if r2 == r1 or (r1_disks and set(src['disks']) <= r1_disks):
+        sys.exit(f'«{r1}»: копия на {", ".join(src["disks"])} в имени этой папки уже учтена - переименовывать некуда.')
+    if len(r2) > COPIED_NAME_MAX:
+        sys.exit(f'Имя «{r2}» длиннее {COPIED_NAME_MAX} знаков: папка не переименовывается (путь на носителе станет '
+                 'слишком длинным). Решите вручную.')
+    return r2, parts + [tail], r1_disks
+
+
 def plan_v3(c, jobs, src, only=None):
-    """Расчёт переноса одной папки разбора без записи на диск. only - только эти пути (повторная проверка)."""
-    from hb_core.consts import C_EMPTY, C_JUNK, COPIED_PREFIX
+    """Расчёт переноса одной папки разбора без записи на диск. only - только эти пути (повторная проверка).
+    Этап 13: папка внутри «Скопировано на A» (или сама она) - второй проход: файлы переезжают в «Скопировано на A и B»
+    с тем же путём внутри (без вложенности); обязательны и диски, которых требовал перенос в A."""
+    from hb_core.consts import C_EMPTY, C_JUNK
     from hb_core.directions import MarkSet, mark_rows, read_directions, table_bytes
     from hb_core.util import class_of, copied_folder
     disk, F = src['disk'], src['folder']
@@ -482,21 +541,35 @@ def plan_v3(c, jobs, src, only=None):
     if not src['disks']:
         sys.exit(f'У направления «{src["direction"]}» в задании нет дисков - перемещать некуда.')
     roots = rz.moved_roots(c, disk)
-    if F and F.split(SEP, 1)[0] in roots:
-        sys.exit(f'«{F}» уже лежит в служебной папке переноса: второй раз папка не перемещается.')
+    copied = {r for r in roots if r.startswith(COPIED_PREFIX)}
+    r1 = F.split(SEP, 1)[0] if F else None
+    if r1 not in copied:
+        r1 = None
+    if F and F.split(SEP, 1)[0] in roots and not r1:
+        sys.exit(f'«{F}» уже лежит в старой служебной папке «ПЕРЕНЕСЕНО → …»: второй раз папка не перемещается.')
     ms = MarkSet.build(mark_rows(disk, table_bytes(paths.DECISIONS)), dirs)
-    m = _decisive(ms, F or '')
+    m = _decisive(ms, F or '', copied)
     if not m or m.row != src['mark_row'] or m.verdict != src['mark'] or m.num != src['num']:
         sys.exit(f'Отметка папки «{F or ROOT_WORD}» изменилась после подготовки задания (было «{src["mark"]}», строка '
                  f'{src["mark_row"]}; сейчас «{m.verdict if m else "нет отметки"}»). Разберите носитель заново.')
-    dest = copied_folder(src['direction'], src['disks'])
-    copied = {r for r in roots if r.startswith(COPIED_PREFIX)}
+    r1_disks = set()
+    if r1:
+        dest, parts_, r1_disks = second_dest(r1, src)
+    else:
+        dest, parts_ = copied_folder(src['direction'], src['disks']), None
+
+    def new_of(path):
+        """Путь после переноса: «A\\x» -> «<dest>\\A\\x»; второй проход: «<r1>\\x» -> «<dest>\\x», «<r1>» -> «<dest>»."""
+        if r1:
+            rest = path[len(r1) + 1:] if path.startswith(r1 + SEP) else ''
+            return dest + (SEP + rest if rest else '')
+        return dest + SEP + path
     known = dest in copied
     dcond, dargs = rz.inside_cond('path', dest)
     if not known and c.execute(f'select 1 from files where disk=? and {dcond} limit 1', [disk] + dargs).fetchone():
         sys.exit(f'На {disk} уже есть папка «{dest}», но её создала не программа (журнала перемещения нет). '
                  'Переименуйте её на диске или пересканируйте - иначе файлы смешаются.')
-    base = set(src['disks']) - {disk}
+    base = (set(src['disks']) | r1_disks) - {disk}
     planned, events, _tasks = history(disk, jobs)
     full = c.execute('select scanned from disks where disk=?', (disk,)).fetchone()
     rz_seen = (full[0] or 0) if full else 0
@@ -533,11 +606,11 @@ def plan_v3(c, jobs, src, only=None):
         total[1] += size
         if only is not None and path not in only:
             continue
-        mm = _decisive(ms, path)
+        mm = _decisive(ms, path, copied)
         if not mm or mm.row != src['mark_row']:
             stay(R_OWN, size)
             continue
-        new = dest + SEP + path
+        new = new_of(path)
         if len('X:' + SEP + new) > MAX_PATH:
             stay(R_LONG, size)
             continue
@@ -547,12 +620,22 @@ def plan_v3(c, jobs, src, only=None):
         cls = class_of(path, nm or path.rsplit(SEP, 1)[-1].lower(), size)
         if cls in (C_JUNK, C_EMPTY):
             junk.append((path, size, mt if mt is not None else '', dest, (sha or '').upper(),
-                         'мусор или пустой файл - едет вместе с папкой'))
+                         'мусор или пустой файл - едет вместе с папкой') + ((r1,) if r1 else ()))
             continue
-        evs = events.get(path, {})
-        req = (base | set(planned.get(path, {})) | set(evs)) - {disk}
-        if req & set(MAIN):
-            req |= set(MAIN)
+        # история копирования - по ВСЕМ путям этого файла на этом носителе: при втором проходе это исходный путь и тот
+        # же путь внутри каждой служебной «Скопировано на …» (они только верхнего уровня, путь внутри сохраняется)
+        if r1:
+            rest = path[len(r1) + 1:]
+            evs, plan_t = collections.defaultdict(list), set()
+            for p_ in [rest] + [x + SEP + rest for x in sorted(copied)]:
+                for t, lst in events.get(p_, {}).items():
+                    evs[t] = evs[t] + lst
+                plan_t |= set(planned.get(p_, {}))
+        else:
+            evs, plan_t = events.get(path, {}), set(planned.get(path, {}))
+        # прежнее правило «45 - значит и 77» в логике v3 не действует (этап 13: 45 и 77 - разные направления, вторая
+        # копия - вторым проходом); обязательны все диски, куда файл ставили задания копирования с этого носителя
+        req = (base | plan_t | set(evs)) - {disk}
         h = sha.lower() if sha else None
         if not h:
             if mt is None:
@@ -575,7 +658,7 @@ def plan_v3(c, jobs, src, only=None):
                 why = R_ERR
             elif okd:
                 why = R_WEAK
-            elif d in planned.get(path, {}):
+            elif d in plan_t:
                 why = R_WAIT
             else:
                 why = R_NONE
@@ -583,7 +666,8 @@ def plan_v3(c, jobs, src, only=None):
         if why:
             stay(why, size)
             continue
-        lines.append((path, size, mt if mt is not None else '', dest, h.upper(), 'копия подтверждена: ' + ', '.join(sorted(req))))
+        lines.append((path, size, mt if mt is not None else '', dest, h.upper(), 'копия подтверждена: ' + ', '.join(sorted(req)))
+                     + ((r1,) if r1 else ()))
     if lines:
         lines += junk
     else:
@@ -594,24 +678,42 @@ def plan_v3(c, jobs, src, only=None):
     if F and only is None and lines and len(lines) == total[0] and not stays:
         ic, ia = rz.inside_cond('path', F)
         issues = c.execute(f'select count(*) from issues where disk=? and {ic}', [disk] + ia).fetchone()[0]
-        fc, fa = rz.inside_cond('path', dest + SEP + F)
+        target = new_of(F)
+        fc, fa = rz.inside_cond('path', target)
         busy = c.execute(f'select 1 from files where disk=? and (path = ? or {fc}) limit 1',
-                         [disk, dest + SEP + F] + fa).fetchone()
+                         [disk, target] + fa).fetchone()
         if not issues and not busy:
-            whole.append((F, dest, len(lines), sum(r[1] for r in lines)))
+            whole.append((F, dest, len(lines), sum(r[1] for r in lines)) + ((r1,) if r1 else ()))
     return dict(src=src, dest=dest, known=known, roots=sorted(copied), lines=lines, stays=dict(stays), total=total,
-                whole=whole, via=dict(via))
+                whole=whole, via=dict(via), strip=r1, parts=parts_)
+
+
+def dest_path(row):
+    """Строка перемещение.tsv -> путь после переноса (7-я колонка «снять» - второй проход, этап 13)."""
+    path, folder = row[0], str(row[3]).strip()
+    strip = str(row[6]).strip() if len(row) >= 7 else ''
+    if strip and path.startswith(strip + SEP):
+        return folder + SEP + path[len(strip) + 1:]
+    return folder + SEP + path
 
 
 def report_v3(res):
     src = res['src']
     where = src['folder'] or ROOT_WORD
-    out(f'{src["disk"]}: перенести папку «{where}» в «{res["dest"]}» (по сведениям базы)')
     n_, b_ = len(res['lines']), sum(r[1] for r in res['lines'])
-    if res['lines']:
-        how = 'папкой целиком, одним переименованием' if res['whole'] else 'по файлам, все пути сохраняются'
-        out(f'  -> {src["disk"]}:\\{res["dest"]}\\{src["folder"] or ""}{SEP if src["folder"] else ""}…: '
-            f'{_n(n_)} файлов, {gb(b_)} ГБ - {how}')
+    how = 'папкой целиком, одним переименованием' if res['whole'] else 'по файлам, все пути сохраняются'
+    if res.get('strip'):
+        r1 = res['strip']
+        inner = where[len(r1) + 1:] if where.startswith(r1 + SEP) else ''
+        out(f'{src["disk"]}: вторая копия ({", ".join(src["disks"])}) - «{where}» переедет в «{res["dest"]}» '
+            '(по сведениям базы)')
+        if res['lines']:
+            out(f'  -> {src["disk"]}:\\{res["dest"]}\\{inner + SEP if inner else ""}…: {_n(n_)} файлов, {gb(b_)} ГБ - {how}')
+    else:
+        out(f'{src["disk"]}: перенести папку «{where}» в «{res["dest"]}» (по сведениям базы)')
+        if res['lines']:
+            out(f'  -> {src["disk"]}:\\{res["dest"]}\\{src["folder"] or ""}{SEP if src["folder"] else ""}…: '
+                f'{_n(n_)} файлов, {gb(b_)} ГБ - {how}')
     out(f'Всего в папке по описи: {_n(res["total"][0])} файлов, {gb(res["total"][1])} ГБ.')
     for why, (k, b) in sorted(res['stays'].items()):
         out(f'Остаются на месте - {why}: {_n(k)} файлов, {gb(b)} ГБ')
@@ -645,6 +747,7 @@ def _write_task_v3(name, res, serial):
         'обязательные диски': src['disks'], 'отметка': src['mark'], 'строка отметки': src['mark_row'],
         'группа': src.get('group'),
         'перемещать на носителе': src['allowed'], 'куда': res['dest'], 'целиком': bool(res['whole']),
+        'снять': res.get('strip'), 'части': res.get('parts') or [copied_tail(src['direction'], src['disks'])],
         'файлов': len(res['lines']), 'байт': sum(r[1] for r in res['lines']), 'всего в папке': res['total'],
         'остаток': res['stays'], 'создано': time.strftime('%d.%m.%Y %H:%M'), 'создано_ts': time.time()})
     (task / 'Как запустить.txt').write_text(
@@ -680,9 +783,10 @@ def recheck_v3(c, jobs, task, meta):
                mark_row=meta['строка отметки'], allowed=meta.get('перемещать на носителе', True), group=meta.get('группа'))
     rows = [f for f in read_tsv(task / 'перемещение.tsv') if len(f) >= 4]
     res = plan_v3(c, jobs, src, only={f[0] for f in rows})
-    ok = {r[0] for r in res['lines']}
-    bad = [f[0] for f in rows if f[0] not in ok and not
-           c.execute('select 1 from files where disk=? and path=?', (src['disk'], f[3].strip() + SEP + f[0])).fetchone()]
+    # строка верна, только если совпадают путь, папка назначения и «снять» (этап 13: второй проход)
+    ok = {(r[0], str(r[3]), str(r[6]) if len(r) >= 7 else '') for r in res['lines']}
+    bad = [f[0] for f in rows if (f[0], f[3].strip(), f[6].strip() if len(f) >= 7 else '') not in ok and not
+           c.execute('select 1 from files where disk=? and path=?', (src['disk'], dest_path(f))).fetchone()]
     if bad:
         out(f'Задание перемещения устарело: {len(bad)} из {len(rows)} файлов больше не проходят проверку '
             f'(например «{bad[0]}»).')

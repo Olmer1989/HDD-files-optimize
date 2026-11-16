@@ -20,6 +20,7 @@ from hb_core.consts import (C_DOC, C_JUNK, CAT_DOC, CAT_OF_TYPE, EV_COPY, EV_SCA
                             F_NEVER, F_OTHER, F_PHOTO, F_PROJ, F_TEXT, F_VIDEO, JUNK_NAMES, MAIN, N_TYPES,
                             NEVER_COPY_EXT, SEP)
 from hb_core.derived import sub_of_other
+from hb_core.consts import COPIED_PREFIX
 from hb_core.util import is_moved_dir, parent_of, prefix_cond
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
 from hb_core.query import _keys
@@ -116,6 +117,65 @@ def original_of(path, roots):
     return path, False
 
 
+def copied_roots(roots):
+    """Служебные папки логики v3 («Скопировано на …» из журнала перемещения) - в отличие от старых «ПЕРЕНЕСЕНО → …»."""
+    return {r for r in roots if r.startswith(COPIED_PREFIX)}
+
+
+def mark_path(path, roots):
+    """Путь, по которому хранится отметка папки (этап 13): внутри «Скопировано на …» (и сама эта папка) - НЫНЕШНИЙ путь,
+    отметка действует только там; внутри старой «ПЕРЕНЕСЕНО → …» - исходный путь (как раньше; сама папка - '')."""
+    head = (path or '').split(SEP, 1)[0]
+    if head in roots and head.startswith(COPIED_PREFIX):
+        return path
+    return original_of(path, roots)[0] if path else ''
+
+
+def is_second(r, roots):
+    """Маршрут от отметки, поставленной внутри «Скопировано на …» (второй проход, этап 13): такая папка ведёт себя
+    как обычная (копировать / уже есть / не подходит), а не как «уже перенесено»."""
+    m = r.mark
+    return bool(r.moved and m is not None and m.path and m.path.split(SEP, 1)[0] in roots
+                and m.path.startswith(COPIED_PREFIX))
+
+
+def folder_routes(order, marks, dirs, roots):
+    """Действующая отметка каждой папки (order - папки от корня вглубь). Одна функция для расчёта (planner) и окна:
+    - корень - отметка всего носителя;
+    - старая «ПЕРЕНЕСЕНО → …»: сама - «уже перенесено» (отметка носителя туда не наследуется), внутри - только явные
+      отметки ИСХОДНОГО пути;
+    - «Скопировано на …» (этап 13): действуют только отметки, поставленные внутри неё (по нынешнему пути, самая
+      глубокая решает; саму папку тоже можно отметить); исходные отметки и отметка носителя внутрь не проникают -
+      без своей отметки там «уже перенесено»;
+    - остальные - своя отметка или маршрут родителя."""
+    route = {}
+    for f in order:
+        if not f:
+            m = marks.get('')
+            route[f] = _mark_route(m, dirs) if m else NONE_ROUTE
+            continue
+        top = f.split(SEP, 1)[0]
+        if top in roots:
+            if top.startswith(COPIED_PREFIX):
+                m = marks.get(f)
+                if m:
+                    route[f] = _mark_route(m, dirs, True)
+                elif f == top:
+                    route[f] = Route(R_NONE, None, None, True)
+                else:
+                    route[f] = route.get(parent_of(f), Route(R_NONE, None, None, True))
+                continue
+            if f == top:
+                route[f] = Route(R_NONE, None, None, True)       # отметка всего носителя сюда не наследуется
+                continue
+            m = marks.get(f[len(top) + 1:])
+            route[f] = _mark_route(m, dirs, True) if m else route.get(parent_of(f), Route(R_NONE, None, None, True))
+            continue
+        m = marks.get(f)
+        route[f] = _mark_route(m, dirs) if m else route.get(parent_of(f), NONE_ROUTE)
+    return route
+
+
 def _group(route, physical_folder, roots):
     """Ключ задания: (номер строки решающей отметки, папка группы). Отметка всего носителя делится по папкам верхнего
     уровня; файлы прямо в корне - ROOT_GROUP."""
@@ -203,22 +263,8 @@ def planner(c, disk, dirs, marks, detail=False):
                     db[p][i] -= own[f][3][i]
 
     # ---------- маршрут по папкам ----------
-    route = {}
-    for f in folders:
-        if not f:
-            m = marks.get('')
-            route[f] = _mark_route(m, dirs) if m else NONE_ROUTE
-            continue
-        top = f.split(SEP, 1)[0]
-        if top in roots:
-            if f == top:
-                route[f] = Route(R_NONE, None, None, True)       # отметка всего носителя сюда не наследуется
-                continue
-            m = marks.get(f[len(top) + 1:])
-            route[f] = _mark_route(m, dirs, True) if m else route[parent_of(f)]
-            continue
-        m = marks.get(f)
-        route[f] = _mark_route(m, dirs) if m else route[parent_of(f)]
+    route = folder_routes(folders, marks, dirs, roots)
+    copied = copied_roots(roots)
 
     # ---------- файлы с собственной отметкой ----------
     folder_lc = {f.lower() for f in folders}
@@ -226,8 +272,8 @@ def planner(c, disk, dirs, marks, detail=False):
     cand = []
     for m in marks.by_key.values():
         if m.path and m.path.lower() not in folder_lc:
-            cand.append((m.path, m, False))
-            cand += [(r + SEP + m.path, m, True) for r in roots]
+            cand.append((m.path, m, m.path.split(SEP, 1)[0] in copied))
+            cand += [(r + SEP + m.path, m, True) for r in roots if r not in copied]   # исходный путь - только в старых
     if cand:
         got = _probe_all(c, disk, [p for p, _, _ in cand])
         for p, m, moved in cand:
@@ -361,7 +407,7 @@ def planner(c, disk, dirs, marks, detail=False):
         """-> (исход, номер, недостающие диски)."""
         if r.state == R_DIR:
             d = dirs[r.num]
-            if r.moved:
+            if r.moved and not is_second(r, copied):
                 if d.disks and eligible(d, k, dok):
                     miss = [x for x in d.disks if not mask & bit[x]]
                     if miss:
@@ -412,7 +458,7 @@ def planner(c, disk, dirs, marks, detail=False):
         if o != O_COPY:
             return
         g['copy'][0] += 1; g['copy'][1] += size
-        if r.moved:
+        if r.moved and not is_second(r, copied):
             P.moved_copy[0] += 1; P.moved_copy[1] += size
             g['moved'] += 1
         for d in miss:
@@ -489,7 +535,7 @@ def planner(c, disk, dirs, marks, detail=False):
             if o != O_COPY:
                 continue
             g['copy'][0] += n; g['copy'][1] += b
-            if r.moved:
+            if r.moved and not is_second(r, copied):
                 P.moved_copy[0] += n; P.moved_copy[1] += b
                 g['moved'] += n
             if detail:

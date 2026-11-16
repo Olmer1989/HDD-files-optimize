@@ -205,8 +205,21 @@ class StepsTest(WindowTest):
         self.w.show()
         QAPP.processEvents()
         ov = self.w.page('Обзор')
-        QTest.mouseClick(ov.steps.plates[1].label, Qt.LeftButton)               # щелчок мышью по тексту плашки
+        import directions_page
+        # «2. Что копируем» - как «Дальше: выбрать папки на носителе»: без отмеченного диска не переходит
+        with mock.patch.object(directions_page, 'chosen', return_value=[]):
+            QTest.mouseClick(ov.steps.plates[1].label, Qt.LeftButton)
+        self.assertEqual(self.w.nav.currentRow(), 0)
+        self.assertTrue(self.w.statusBar().currentMessage().startswith('Сначала отметьте диск'))
+        self.assertTrue(ov.steps.last_hint.startswith('Сначала отметьте диск'))
+        used = []
+        rz_page = self.w.page('Разбор носителя')
+        with mock.patch.object(directions_page, 'chosen', return_value=['Н3']), \
+                mock.patch.object(rz_page, 'use_choice', lambda: used.append(1)):
+            QTest.mouseClick(ov.steps.plates[1].label, Qt.LeftButton)           # щелчок мышью по тексту плашки
         self.assertEqual(self.w.nav.currentRow(), names_all.index('Разбор носителя'))
+        self.assertEqual(used, [1])                                             # выбор - в списки «Разбора»
+        self.w.page(disk_ui.TASKS_PAGE).steps.open(1)                           # и с «Заданий» - так же (уже там - ничего)
         QTest.mouseClick(self.w.page('Разбор носителя').steps.plates[2], Qt.LeftButton)   # по самой плашке
         self.assertEqual(self.w.nav.currentRow(), names_all.index(disk_ui.TASKS_PAGE))
         self.w.page(disk_ui.TASKS_PAGE).steps.open(2)                            # текущий шаг - ничего

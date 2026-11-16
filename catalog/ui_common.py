@@ -102,6 +102,8 @@ def table(headers, stretch=0):
 STEPS = (('Обзор', '1. Куда копируем', 'выберите диск'),
          ('Разбор носителя', '2. Что копируем', 'папки на носителе'),
          (disk_ui.TASKS_PAGE, '3. Копирование', 'запуск заданий'))
+STEP_RAZBOR = 1                                    # «2. Что копируем» - как кнопка «Дальше: выбрать папки на носителе»
+NEED_DISK = 'Сначала отметьте диск: галочка у направления в «Обзоре» («1. Куда копируем»).'
 STEP_NOW = ('#e3f2fd', '#1e88e5', '#0d47a1')       # фон, рамка, текст текущего шага
 STEP_OTHER = ('#f1f3f5', '#d0d7de', '#5f6b76')
 
@@ -163,10 +165,36 @@ class StepsBar(QWidget):
             lay.addWidget(p, 1)
 
     def open(self, i):
-        """Щелчок по плашке i (тесты зовут напрямую)."""
+        """Щелчок по плашке i (тесты зовут напрямую). «2. Что копируем» работает как кнопка «Дальше: выбрать папки на
+        носителе» (16.11.2026): нужен отмеченный в «Обзоре» диск (направление с диском); выбор сохранён, «Разбор»
+        ставит его в списки (use_choice) и открывается; ничего не отмечено - не переходит, подсказка «Сначала отметьте
+        диск». «3. Копирование» открывает задания всегда."""
         p = self.plates[i]
-        if i != self.current and p.can_open():
-            self.win.open_page(p.page_name)
+        if i == self.current or not p.can_open():
+            return
+        if i == STEP_RAZBOR:
+            import directions_page                              # не на уровне модуля: directions_page - страница окна
+            try:
+                ok = bool(directions_page.chosen())
+            except Exception:                                   # noqa: BLE001 - таблиц нет: как «ничего не выбрано»
+                ok = False
+            if not ok:
+                self.say_choose(p)
+                return
+            page = self.win.page(p.page_name) if hasattr(self.win, 'page') else None
+            if page is not None and hasattr(page, 'use_choice'):
+                page.use_choice()
+        self.win.open_page(p.page_name)
+
+    def say_choose(self, plate):
+        """Подсказка у плашки и в строке состояния: перехода нет."""
+        from PySide6.QtWidgets import QToolTip
+        text = NEED_DISK
+        if hasattr(self.win, 'statusBar'):
+            self.win.statusBar().showMessage(text, 8000)
+        if plate.isVisible():
+            QToolTip.showText(plate.mapToGlobal(plate.rect().bottomLeft()), text, plate)
+        self.last_hint = text
 
 
 def cell(text, right=False, color=None):

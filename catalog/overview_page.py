@@ -15,7 +15,7 @@ import explorer_page           # noqa: E402
 
 from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal   # noqa: E402
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QTextDocument                     # noqa: E402
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFrame, QHBoxLayout, QHeaderView, QLabel,  # noqa: E402
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel,  # noqa: E402
                                QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSplitter,
                                QStackedWidget, QStyle, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -40,21 +40,24 @@ DISK_HEAD = ['Диск', 'Всего, ГБ', 'при сканировании', 
              'со слов «Я сделал в Проводнике»', 'хеш устарел (файл изменён)', 'Хеш не считался']
 C_NOHASH = 7
 # столбцы 2..6 - степени подтверждения S, C, Z, U, X (буквы владельцу не показываются); Z, U, X - не копия
+# подсказки заголовков (16.11.2026, замечание 5 владельца): у каждого столбца - только про свой столбец, 1-2 строки
 DISK_TIPS = {
-    1: 'Сколько места занимают все файлы этого диска по базе (последняя опись и записи копирования).',
-    2: 'Файлов, у которых хеш посчитан сканером по самому файлу — копия подтверждена.',
-    3: 'Файлов, скопированных программой (шаблоном копирования) со сверкой хеша прочитанного — копия подтверждена.',
-    4: 'Файлов, у которых при копировании сверен только размер (или «уже есть») — копия НЕ подтверждена.',
-    5: 'Файлов, записанных со слов владельца на странице «Я сделал в Проводнике» — копия НЕ подтверждена.',
-    6: 'После подсчёта хеша у файла поменялись размер или дата. Пересканируйте папку, чтобы пересчитать хеш.',
-    7: 'Файлов, у которых хеш не считался (обычно это файлы не фото и не видео). Чтобы посчитать хеш — пересканируйте '
-       'папки (раздел «Диски и папки» → пересканирование).'}
-RESCAN_TODO = 'Что делать: пересканировать папку — подключите диск, «Диски и папки» → «Пересканировать выбранные».'
-WEAK_TODO = {
-    4: 'Что делать: пересчитать хеши спорных файлов — подключите диск, «Диски и папки» → «Пересканировать выбранные» '
-       'с галочкой «Перечитать всё».',
-    5: RESCAN_TODO,
-    6: 'Как: подключите диск, «Диски и папки» → «Пересканировать выбранные».'}
+    0: 'Номер диска по журналу сканирования и буква, если диск подключён.',
+    1: 'Сколько места занимают все файлы диска по базе.',
+    2: 'Хеш посчитан сканером по самому файлу —\nкопия подтверждена.',
+    3: 'Скопировано программой со сверкой хеша —\nкопия подтверждена.',
+    4: 'При копировании сверен только размер —\nкопия НЕ подтверждена.',
+    5: 'Записано вручную в «Я сделал в Проводнике» —\nкопия НЕ подтверждена.',
+    6: 'Хеш посчитан, но потом файл изменился (размер или дата).',
+    7: 'Хеш у этих файлов не считали (обычно это не фото и не видео).'}
+GROUP_TIPS = {'Копии проверены по хешу': 'Копия файла подтверждена по SHA-256.',
+              'Копии не проверены': 'Файл в базе есть, но копия хешем не подтверждена.'}
+# под таблицей - одна короткая строка на каждое красное число (замечание 4 владельца)
+TODO_LINE = {
+    4: ('{n} {files} — при копировании сверен только размер, копия не подтверждена',
+        'пересчитать хеши (пересканировать с «Перечитать всё»)'),
+    5: ('{n} {files} {checked} — {written} вручную в «Я сделал в Проводнике»', 'пересканировать эти папки'),
+    6: ('у {n} {files_gen} хеш устарел — файл изменён после подсчёта', 'пересканировать эти папки')}
 RED = '#c62828'
 UNIQUE_NOTE = 'Файлы лежат в исключённых папках — не потерять при ручном переносе.'
 CARD_CSS = 'QFrame#card { background:#ffffff; border:1px solid #d0d7de; border-radius:6px; }'
@@ -95,8 +98,38 @@ def disk_rows(disks, info):
         name = f'{d} · {m["letter"]}' if m.get('letter') else d
         cells = [name, gb_ru(m['gib'])] + [n_ru(x) for x in nums]
         red = {j for j in (4, 5, 6) if nums[j - 2]}
-        out.append(dict(disk=d, cells=cells, red=red, nohash=nums[-1], in_base=bool(m.get('in_base'))))
+        out.append(dict(disk=d, cells=cells, red=red, nohash=nums[-1], in_base=bool(m.get('in_base')), nums=nums))
     return out
+
+
+def files_word(n):
+    n = abs(int(n or 0))
+    if n % 10 == 1 and n % 100 != 11:
+        return 'файл'
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return 'файла'
+    return 'файлов'
+
+
+def todo_items(rows):
+    """Что сделать с красными числами: [(диск, столбец, текст строки, текст действия)] - по строке на число."""
+    out = []
+    for r in rows:
+        for j in sorted(r['red']):
+            n = r['nums'][j - 2]
+            what, act = TODO_LINE[j]
+            one = n % 10 == 1 and n % 100 != 11
+            out.append((r['disk'], j, what.format(n=n_ru(n), files=files_word(n), files_gen='файла' if one else 'файлов',
+                                                  checked='не проверен' if one else 'не проверены',
+                                                  written='записан' if one else 'записаны'), act))
+    return out
+
+
+def rescan_tip(disk, n):
+    """Подсказка кнопки «Пересканировать» - по пунктам."""
+    gen = 'файла' if n % 10 == 1 and n % 100 != 11 else 'файлов'
+    return (f'Пересканировать {disk}\n• посчитает хеш у {n_ru(n)} {gen} без хеша\n'
+            '• нужен подключённый диск\n• откроет «Диски и папки» с этим диском')
 
 
 def disk_table_html(rows):
@@ -131,14 +164,124 @@ def disk_table_html(rows):
 
 
 def todo_html(rows):
-    """Под таблицей - что делать с красными числами (подсказок у ячеек HTML-таблицы нет)."""
+    """Под таблицей - по короткой строке на каждое красное число: «⚠ HDD55: 432 файла не проверены — записаны вручную
+    в «Я сделал в Проводнике». Что сделать: пересканировать эти папки → Перейти» (ссылка - «Диски и папки» с этим
+    диском). Раньше здесь была общая «стена текста» по столбцам (замечание 4 владельца, 16.11.2026)."""
     import html as h
-    cols = sorted({j for r in rows for j in r['red']})
-    if not cols:
-        return ''
-    lines = [f'<b style="color:{RED}">{h.escape(DISK_HEAD[j])}</b> ({", ".join(r["disk"] for r in rows if j in r["red"])}): '
-             f'{h.escape(DISK_TIPS[j])} {h.escape(WEAK_TODO[j])}' for j in cols]
+    lines = [f'<span style="color:{RED}">⚠</span> <b>{h.escape(d)}</b>: {h.escape(what)}. Что сделать: {h.escape(act)} → '
+             f'<a href="rescan:{h.escape(d)}">Перейти</a>' for d, _j, what, act in todo_items(rows)]
     return '<br>'.join(lines)
+
+
+class DiskTable(QFrame):
+    """Таблица «Диски направлений» из настоящих виджетов (16.11.2026, замечания 4-5 владельца): двухуровневый
+    заголовок, у каждого заголовка - своя короткая подсказка (общей подсказки на всю таблицу нет); столбец «Диск» по
+    самому длинному имени («HDD55 · I:» не обрезается); «Пересканировать» - маленькая кнопка с подсказкой по пунктам
+    (открывает «Диски и папки» с этим диском, on_rescan)."""
+    LINE = '#d0d7de'
+
+    def __init__(self, on_rescan):
+        super().__init__()
+        self.on_rescan = on_rescan
+        self.setObjectName('disktable')
+        self.setStyleSheet(f'QFrame#disktable {{ border:1px solid {self.LINE}; background:#ffffff; }}')
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(0)
+        self.heads, self.buttons, self.cells, self.rows = {}, {}, [], []
+
+    def _cell(self, text, r, c, rs=1, cs=1, head=False, sub=False, right=False, tip=''):
+        lab = QLabel(text)
+        lab.setTextFormat(Qt.RichText)
+        lab.setWordWrap(False)
+        bg = '#eef2f6' if head else '#f6f8fa' if sub else '#ffffff'
+        weight = 'bold' if head else 'normal'
+        lab.setStyleSheet(f'QLabel {{ background:{bg}; font-weight:{weight}; padding:4px 8px; '
+                          f'border-right:1px solid {self.LINE}; border-bottom:1px solid {self.LINE}; }}')
+        al = Qt.AlignRight if right else (Qt.AlignHCenter if (head or sub) and c else Qt.AlignLeft)
+        lab.setAlignment(al | Qt.AlignVCenter)
+        if tip:
+            lab.setToolTip(tip)
+        self.grid.addWidget(lab, r, c, rs, cs)
+        return lab
+
+    def clear(self):
+        while self.grid.count():
+            w = self.grid.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        self.heads, self.buttons, self.cells = {}, {}, []
+
+    def set_rows(self, rows):
+        import html as h
+        self.clear()
+        self.rows = rows
+        self.heads['Диск'] = self._cell('Диск', 0, 0, 2, 1, head=True, tip=DISK_TIPS[0])
+        self.heads['Всего, ГБ'] = self._cell('Всего, ГБ', 0, 1, 2, 1, head=True, tip=DISK_TIPS[1])
+        col = 2
+        for title, subs in DISK_GROUPS:
+            self.heads[title] = self._cell(h.escape(title), 0, col, 1, len(subs), head=True, tip=GROUP_TIPS[title])
+            for k, s_ in enumerate(subs):
+                self.heads[s_] = self._cell(HEAD_BREAKS.get(s_, h.escape(s_)), 1, col + k, sub=True,
+                                            tip=DISK_TIPS[DISK_HEAD.index(s_)])
+            col += len(subs)
+        self.heads['Хеш не считался'] = self._cell('Хеш не<br>считался', 0, col, 2, 1, head=True, tip=DISK_TIPS[C_NOHASH])
+        fm = QFontMetrics(self.font())
+        bold = QFont(self.font())
+        bold.setBold(True)
+        fmb = QFontMetrics(bold)
+        name_w = max([fmb.horizontalAdvance(r['cells'][0]) + (0 if r['in_base'] else fm.horizontalAdvance(' (нет описи)'))
+                      for r in rows] + [fm.horizontalAdvance('Диск')]) + 24
+        self.grid.setColumnMinimumWidth(0, name_w)
+        for i, r in enumerate(rows):
+            c = r['cells']
+            name = '<b>' + h.escape(c[0]) + '</b>' + ('' if r['in_base'] else ' <span style="color:#8a8a8a">(нет описи)</span>')
+            line = [self._cell(name, 2 + i, 0)]
+            for j in range(1, C_NOHASH):
+                v = h.escape(c[j])
+                if j in r['red']:
+                    v = f'<b style="color:{RED}">{v}</b>'
+                line.append(self._cell(v, 2 + i, j, right=True))
+            box = QWidget()
+            box.setObjectName('nohash')
+            box.setStyleSheet(f'QWidget#nohash {{ background:#ffffff; border-right:1px solid {self.LINE}; '
+                              f'border-bottom:1px solid {self.LINE}; }}')
+            hl = QHBoxLayout(box)
+            hl.setContentsMargins(8, 2, 6, 2)
+            hl.setSpacing(6)
+            num = QLabel(h.escape(c[C_NOHASH]))
+            num.setStyleSheet('background:transparent; border:none')
+            hl.addStretch(1)
+            hl.addWidget(num)
+            if r['nohash']:
+                b = QPushButton('Пересканировать')
+                b.setCursor(Qt.PointingHandCursor)
+                b.setStyleSheet('QPushButton { font-size:8pt; padding:1px 8px; border:1px solid #1e88e5; '
+                                'border-radius:4px; color:#0d47a1; background:#e3f2fd; }'
+                                'QPushButton:hover { background:#bbdefb; }')
+                b.setToolTip(rescan_tip(r['disk'], r['nohash']))
+                b.clicked.connect(lambda _=False, d=r['disk']: self.on_rescan(d))
+                hl.addWidget(b)
+                self.buttons[r['disk']] = b
+            self.grid.addWidget(box, 2 + i, C_NOHASH)
+            line.append(num)
+            self.cells.append(line)
+
+    def text(self):
+        """Текст таблицы построчно (для проверок): ячейки через « | »."""
+        doc = QTextDocument()
+        out = []
+        for lab in self.heads.values():
+            doc.setHtml(lab.text())
+            out.append(doc.toPlainText())
+        lines = [' | '.join(out)]
+        for line in self.cells:
+            vals = []
+            for lab in line:
+                doc.setHtml(lab.text())
+                vals.append(doc.toPlainText())
+            lines.append(' | '.join(vals))
+        return '\n'.join(lines)
 
 
 def unique_li(u):
@@ -260,16 +403,22 @@ class OverviewPage(QWidget):
         head.addWidget(self.all_note)
         head.addStretch()
         lay.addLayout(head)
-        self.dt = HtmlLabel()
-        self.dt.setWordWrap(False)
-        self.dt.setToolTip('\n'.join(f'{DISK_HEAD[j]}: {t}' for j, t in DISK_TIPS.items()))
-        self.dt.linkActivated.connect(self.link_text)
+        self.dt = DiskTable(lambda d: self.link_text('rescan:' + d))   # без общей подсказки на всю таблицу
+        self.dt_empty = QLabel('<span style="color:#8a8a8a">Дисков нет: назначьте диски направлениям.</span>')
+        self.dt_wrap = QWidget()
+        wl = QHBoxLayout(self.dt_wrap)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.addWidget(self.dt)
+        wl.addWidget(self.dt_empty)
+        wl.addStretch(1)
         self.todo = QLabel('')
         self.todo.setWordWrap(True)
-        self.todo.setStyleSheet('font-size:9pt; color:#444')
+        self.todo.setTextFormat(Qt.RichText)
+        self.todo.setStyleSheet('color:#333')
+        self.todo.linkActivated.connect(self.link_text)
         self.checked = QLabel('')
         self.checked.setStyleSheet('color:gray')
-        self.disk_card = card(self.dt, self.todo, self.checked)
+        self.disk_card = card(self.dt_wrap, self.todo, self.checked)
         lay.addWidget(self.disk_card)
         lay.addSpacing(10)
         lay.addWidget(QLabel('<b>Требует внимания</b>'))
@@ -316,8 +465,9 @@ class OverviewPage(QWidget):
         disks = [d for d in disks if d in info]
         self.all_note.setText(note)
         self.rows = disk_rows(disks, info)
-        self.dt.setHtml(disk_table_html(self.rows) if self.rows else
-                        '<span style="color:#8a8a8a">Дисков нет: назначьте диски направлениям.</span>')
+        self.dt.set_rows(self.rows)
+        self.dt.setVisible(bool(self.rows))
+        self.dt_empty.setVisible(not self.rows)
         t = todo_html(self.rows)
         self.todo.setText(t)
         self.todo.setVisible(bool(t))

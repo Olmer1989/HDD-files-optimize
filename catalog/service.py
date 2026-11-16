@@ -477,9 +477,14 @@ def folder_mark(path, ms, dirs, roots):
     """Решение владельца для папки «Диски и папки» (16.11.2026) - действующая отметка разбора v3: своя или от ближайшей
     отмеченной родительской папки (весь носитель - тоже). Служебная папка переноса - своя пометка; отметка носителя в
     неё не наследуется (как в ядре). -> dict(kind 'dir'/'skip'/'unset'/'service'/'' , text, own, src)."""
-    if path and SEP not in path and path in roots:
+    top = path.split(SEP, 1)[0] if path else ''
+    copied = top in roots and top.startswith(hb.COPIED_PREFIX)     # этап 13: отметки внутри - по нынешнему пути
+    if path and SEP not in path and path in roots and not (copied and ms.get(path) is not None):
         return dict(kind='service', text='уже перенесено', own=True, src='')
-    orig, inside = hb.original_of(path, roots) if path else ('', False)
+    if copied:
+        orig, inside = path, True
+    else:
+        orig, inside = hb.original_of(path, roots) if path else ('', False)
     p = orig
     while True:
         m = ms.get(p)
@@ -1101,6 +1106,77 @@ def add_directions_batch(items):
     return pv
 
 
+# ---------- этап 13: 45 и 77 - два направления (переход данных; решение владельца 16.11.2026, вариант Б) ----------
+FAMILY_OLD = 'Семейный архив'
+FAMILY_45, FAMILY_77 = 'Семейный архив 45', 'Семейный архив 77'
+
+
+def family_split_preview(dirs=None, root=None, c=None):
+    """Переход данных: Н1 «Семейный архив» (HDD45 + HDD77) -> Н1 «Семейный архив 45» (HDD45) и новое Н7 «Семейный архив
+    77» (HDD77). Отметки Н1 остаются за Н1 (они хранят номер), прежнее имя «Семейный архив» записывается в прежние
+    имена Н1 (старые «раздел: Семейный архив» - тоже Н1). Таблица только дописывается. Повтор после частичной записи
+    продолжает (Н1 уже без 77, Н7 нет - дописывается только Н7). Ничего не пишет. -> dict(fields, lines)."""
+    import dataclasses
+    dirs = dict(directions() if dirs is None else dirs)
+    n1 = dirs.get('Н1')
+    if n1 is None:
+        raise Refused('Нет направления Н1 - переходить не из чего.')
+    lines, fields = [], []
+    old = set(n1.disks) == {'HDD45', 'HDD77'} and n1.name == FAMILY_OLD
+    half = n1.disks == ('HDD45',) and n1.name == FAMILY_45
+    holder = hb.direction_of_disk(dirs, 'HDD77')
+    if half and holder is not None:
+        raise Refused(f'Переход уже сделан: Н1 «{n1.name}» (HDD45), {holder.num} «{holder.name}» (HDD77).')
+    if not (old or half):
+        raise Refused(f'Н1 сейчас «{n1.name}», диски {", ".join(n1.disks) or "не назначены"}: ожидалось «{FAMILY_OLD}» '
+                      'на HDD45 и HDD77 (или уже «Семейный архив 45» на HDD45). Ничего не делаю - решите вручную.')
+    c = c or db()
+    if old:
+        pv = direction_preview(num='Н1', name=FAMILY_45, disks=['HDD45'], kind=n1.kind, dirs=dirs, c=c,
+                               note='копия 1 из 2: вторая - Н7 «Семейный архив 77»')
+        nd = pv['direction']
+        dirs['Н1'] = nd
+        fields.append(pv['fields'])
+        lines.append(f'Н1: «{n1.name}» (HDD45, HDD77) -> «{nd.name}» (HDD45); прежнее имя «{n1.name}» сохраняется '
+                     f'(старые отметки «раздел: {n1.name}» - тоже Н1). Папка на носителе после переноса: «{nd.folder()}».')
+    pv = direction_preview(name=FAMILY_77, disks=['HDD77'], kind=n1.kind, dirs=dirs, c=c,
+                           note='копия 2 из 2: первая - Н1 «Семейный архив 45»')
+    nd = pv['direction']
+    if nd.num != 'Н7':
+        raise Refused(f'Новое направление получило бы номер {nd.num}, а не Н7 (номера заняты иначе, чем ожидалось). '
+                      'Ничего не делаю - решите вручную.')
+    if n1.desc:
+        nd = dataclasses.replace(nd, desc=n1.desc)
+    fields.append(hb.direction_row(nd))
+    lines.append(f'Н7 (новое): «{nd.name}» (HDD77), что копировать - как у Н1 ({nd.kind}). Папка на носителе после '
+                 f'переноса: «{nd.folder()}»; после второй копии - «{hb.copied_join([hb.copied_tail(FAMILY_45, ["HDD45"]), hb.copied_tail(FAMILY_77, ["HDD77"])])}».')
+    use = direction_usage('Н1', dirs, root)
+    marks = use['marks']
+    lines.append('Отметки папок Н1 остаются за Н1 (то есть пойдут только на 45): ' +
+                 ('; '.join(f'{d}: {n}' for d, n in sorted(marks.items())) if marks else 'отметок Н1 нет') + '.')
+    both = [t for t in use['tasks'] if set(t['disks']) >= {'HDD45', 'HDD77'}]
+    if both:
+        lines.append(f'Задания, созданные раньше на 45 и 77 ({len(both)}): остаются как есть - их перенос по-прежнему '
+                     'ждёт копий на обоих дисках и идёт в «Скопировано на Семейный архив (45 и 77)»: '
+                     + '; '.join(t['name'] for t in both[:5]) + ('…' if len(both) > 5 else '') + '.')
+    else:
+        lines.append('Заданий на 45 и 77 прежнего вида нет.')
+    lines.append('Будет дописано в «направления.tsv» строк: ' + str(len(fields)) + ' (старые строки не меняются; копия '
+                 'таблицы до записи - в «_БАЗА\\архив таблиц»).')
+    return dict(fields=fields, lines=lines)
+
+
+def family_split():
+    """Запись перехода (family_split_preview) под замком таблиц: все проверки заново, копия таблицы, одна запись."""
+    with TableLock():
+        snap = _read_snapshot()
+        pv = family_split_preview(hb.parse_directions(snap['directions']))
+        _ensure_directions()
+        backup(hb.DIRECTIONS)
+        pv['line'] = append_rows(hb.DIRECTIONS, pv['fields'])
+    return pv
+
+
 def mark_verdict(text, dirs):
     """Текст отметки владельца -> (решение для решения.tsv, направление или None)."""
     t = (text or '').strip()
@@ -1146,7 +1222,8 @@ def marks_preview(disk, rows, c=None, snap=None):
         path = (path or '').strip().strip(SEP)
         if path:
             real = _real_path(c, disk, check_rel(path), roots)
-            orig, inside = hb.original_of(real, roots)
+            orig = hb.mark_path(real, roots)              # этап 13: внутри «Скопировано на …» - нынешний путь
+            inside = real.split(SEP, 1)[0] in roots
             if not orig:
                 raise Refused(f'«{real}» - служебная папка переноса; отметьте папки внутри неё.')
         else:
@@ -1166,8 +1243,9 @@ def marks_preview(disk, rows, c=None, snap=None):
             continue
         n, size, _ = files_under(c, disk, real)
         what = hb.mark_text(None if verdict == hb.MARK_INHERIT else hb.Mark(*hb.parse_verdict(verdict, dirs)[:3]), dirs)
-        line = f'{where} → {what}: {n} файлов, {hb.gb(size)} ГБ' + (' (папка уже перенесена; отметка - по исходному пути)'
-                                                                    if inside else '')
+        line = f'{where} → {what}: {n} файлов, {hb.gb(size)} ГБ' + (
+            '' if not inside else ' (папка в «Скопировано на …»: отметка действует только там)' if orig == real else
+            ' (папка уже перенесена; отметка - по исходному пути)')
         if d and disk in d.disks:
             line += f' - {disk} сам диск этого направления: копируется на остальные его диски, перемещать нельзя'
         if verdict == hb.MARK_INHERIT and cur and cur.legacy:
@@ -1259,6 +1337,26 @@ def same_task(meta, disk, s):
             and meta.get('что копировать') == s['kind'] and set(s['targets']) <= set(meta.get('цели') or []))
 
 
+def _new_have_groups(disk, states):
+    """Группы «все подходящие уже есть», которых ещё нет в готовых манифестах этого носителя (та же папка, строка
+    отметки и направление). Без манифеста перенос такой папки не предлагается (этап 13: вторая копия, когда на втором
+    диске всё уже есть по хешу). -> [группа]."""
+    import json
+    have = [g for g in states if g['state'] == hb.G_HAVE]
+    if not have:
+        return []
+    known = set()
+    for p in sorted(hb.RAZBORY.glob(f'{disk} *.json')) if hb.RAZBORY.exists() else []:
+        try:
+            m = json.loads(p.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if m.get('статус') == 'готово':
+            known |= {(g.get('folder'), g.get('mark_row'), g.get('num')) for g in m.get('группы', [])
+                      if g.get('state') == hb.G_HAVE}
+    return [g for g in have if (g['folder'], g['mark_row'], g['num']) not in known]
+
+
 def razbor_tasks(disk, dry=True, only=None):
     """Задания копирования по отметкам: одно задание - одна группа (решающая отметка + папка), её направление и ОДИН
     диск назначения (этап 5: на 45 и на 77 - отдельные задания одной группы, поле «группа» в разбор.json). Всё под замком таблиц: снимок, расчёт, проверка имён, публикация (два генератора одновременно не работают).
@@ -1295,8 +1393,8 @@ def razbor_tasks(disk, dry=True, only=None):
                     break
                 s['name'], i = f'{base} ({i})', i + 1
         res = dict(plan=P, specs=specs, states=states, dry=dry, manifest=None)
-        if dry or not [s for s in specs if not s.get('exists')]:
-            return res
+        if dry or not ([s for s in specs if not s.get('exists')] or _new_have_groups(disk, states)):
+            return res                                   # этап 13: «всё уже есть» - манифест и без новых заданий
         stamp = time.strftime('%Y-%m-%d %H-%M-%S')
         hb.RAZBORY.mkdir(parents=True, exist_ok=True)
         manifest = hb.RAZBORY / f'{disk} {stamp}.json'

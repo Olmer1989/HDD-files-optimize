@@ -65,7 +65,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox, QDial
 
 from hb_core import api as hb
 from hb_core import razbor as rz
-from hb_core.consts import CAT_OF_TYPE, N_TYPES
+from hb_core.consts import CAT_OF_TYPE, COPIED_PREFIX, N_TYPES
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
 import directions_page
 import disk_ui
@@ -258,19 +258,22 @@ def head_html(d, rows, space=None):
     for x in d.disks:
         r = by.get(x) or {'disk': x, 'label': '', 'letter': ''}
         name = disk_ui.disk_name(r) or x
-        parts.append(esc(f'{r["letter"]} {name}' if r.get('letter') else name) + ('' if r.get('letter') else ' ' + OFF_PILL))
+        parts.append(esc(f'{r["letter"]} {name}' if r.get('letter') else name))
+    pill = '' if all((by.get(x) or {}).get('letter') for x in d.disks) else ' ' + OFF_PILL
     word = 'Диски' if len(d.disks) > 1 else 'Диск'
     free = []
     for x in d.disks:
         b = free_of(x, rows, space)
         if b is not None:
             free.append(f'{x} — {gb(b)} ГБ' if len(d.disks) > 1 else f'{gb(b)} ГБ')
-    sub = f'<span style="color:{ORANGE}"><b>{esc(d.num)} {esc(d.name)}</b></span> · {esc(hdds(d))} {JOURNAL}'
+    # 16.11.2026 (замечание 3 владельца): имя направления - в строке заголовка через тире, оранжевым:
+    # «Диск: I: My Book — Н3 Фильмы»; вторая строка - номер HDD по журналу и свободное место
+    sub = f'{esc(hdds(d))} {JOURNAL}'
     if free:
         sub += ' · свободно ' + esc(', '.join(free))
     if len(d.disks) > 1:
         sub += ' · ' + COUNT_WORDS.get(len(d.disks), f'{len(d.disks)} заданий')
-    return (f'{word}: ' + ' и '.join(parts) + '<br>'
+    return (f'{word}: ' + ' и '.join(parts) + f' — <span style="color:{ORANGE}">{esc(d.num)} {esc(d.name)}</span>{pill}<br>'
             f'<span style="font-size:10pt; font-weight:normal; color:#33691e">{sub}</span>')
 
 
@@ -489,11 +492,17 @@ class Model:
 
     # --- пути ---
     def is_service(self, f):
-        """Сама служебная папка переноса («ПЕРЕНЕСЕНО → …», «Скопировано на …» из журнала): отметить нельзя."""
-        return bool(f) and SEP not in f and f in self.roots
+        """Сама старая служебная папка переноса («ПЕРЕНЕСЕНО → …»): отметить нельзя. «Скопировано на …» (этап 13) -
+        можно: её и папки внутри отмечают для ДРУГОГО направления (вторая копия)."""
+        return bool(f) and SEP not in f and f in self.roots and not f.startswith(COPIED_PREFIX)
+
+    def is_copied(self, f):
+        """Сама папка «Скопировано на …» из журнала перемещения (этап 13)."""
+        return bool(f) and SEP not in f and f in self.roots and f.startswith(COPIED_PREFIX)
 
     def orig(self, f):
-        return rz.original_of(f, self.roots)[0] if f else ''
+        """Путь, по которому хранится отметка папки: исходный, а внутри «Скопировано на …» - нынешний (этап 13)."""
+        return rz.mark_path(f, self.roots) if f else ''
 
     def markable(self, f):
         return f in self.folders and not self.is_service(f)
@@ -515,27 +524,10 @@ class Model:
         return hb.MarkSet.build(self.tree['rows'], self.dirs, self.draft_rows())
 
     def routes(self, ms):
-        """Действующая отметка каждой папки - как в ядре (hb_core.razbor.planner, раздел «маршрут по папкам»):
-        корень - отметка всего носителя; служебная папка переноса - ничего (отметка носителя туда не наследуется);
-        внутри неё - только явные отметки исходного пути; иначе - своя отметка или маршрут родителя."""
-        route = {}
-        for f in self.order:
-            if not f:
-                m = ms.get('')
-                route[f] = rz._mark_route(m, self.dirs) if m else rz.NONE_ROUTE
-                continue
-            top = f.split(SEP, 1)[0]
-            parent = route.get(hb.parent_of(f), rz.NONE_ROUTE)
-            if top in self.roots:
-                if f == top:
-                    route[f] = rz.Route(R_NONE, None, None, True)
-                    continue
-                m = ms.get(f[len(top) + 1:])
-                route[f] = rz._mark_route(m, self.dirs, True) if m else parent
-                continue
-            m = ms.get(f)
-            route[f] = rz._mark_route(m, self.dirs) if m else parent
-        return route
+        """Действующая отметка каждой папки - та же функция, что в ядре (hb_core.razbor.folder_routes): корень -
+        отметка всего носителя; «ПЕРЕНЕСЕНО → …» - внутри только явные отметки исходного пути; «Скопировано на …» -
+        только отметки, поставленные внутри неё (этап 13); иначе - своя отметка или маршрут родителя."""
+        return rz.folder_routes(self.order, ms, self.dirs, self.roots)
 
     def recalc(self):
         self.full_ms = self.ms()
@@ -618,6 +610,8 @@ class Model:
         """Идёт ли родитель папки f в направление num с учётом ещё не применённых изменений пакета pending
         {исходный путь (нижний регистр): решение}. Правила - те же, что Model.routes: служебная папка переноса - не
         направление; самая глубокая своя отметка решает."""
+        if f in self.roots:
+            return False                                  # служебная папка: отметка носителя в неё не проникает
         for a in self.ancestors(f):
             if self.is_service(a):
                 return False
@@ -625,11 +619,15 @@ class Model:
             if key in pending:
                 v = pending[key]
                 if v == INHERIT:
+                    if self.is_copied(a):
+                        return False
                     continue
                 kind, n = hb.parse_verdict(v, self.dirs)[:2]
                 return kind == R_DIR and n == num
             if self.full_ms.by_key.get(key) is not None:
                 return self.is_dir(self.route.get(a), num)
+            if self.is_copied(a):
+                return False                              # отметка носителя в «Скопировано на …» не проникает
         return False
 
     def own_after(self, f, pending):
@@ -754,12 +752,17 @@ class Model:
         if r.state == R_DIR:
             d = self.dirs.get(r.num)
             t = d.label() if d else str(r.num)
-            return t + (' — дополнительная копия (папка уже перенесена)' if r.moved else '')
+            return t + (self.moved_word(r) if r.moved else '')
         if r.state == R_SKIP:
             return 'не копировать' + (f' (старое «{r.mark.label}»)' if r.mark is not None and r.mark.legacy else '')
         if r.state == R_UNSET:
             return hb.mark_text(r.mark, self.dirs)
         return 'уже перенесено' if r.moved else 'не отмечено'
+
+    def moved_word(self, r):
+        if rz.is_second(r, self.roots):
+            return ' — ещё одна копия (папка уже в «Скопировано на …»)'
+        return ' — дополнительная копия (папка уже перенесена)'
 
     def mode_text(self, r):
         if r.mark is None:
@@ -834,7 +837,7 @@ class Model:
             kind, d = 'dir', self.dirs.get(r.num)
             head = f'{r.num} {d.label() if d else ""}'.strip()
             if r.moved:
-                head += ' — дополнительная копия (папка уже перенесена)'
+                head += self.moved_word(r)
             bg = dir_colors(r.num)[0 if own else 1]
         elif r.state == R_SKIP:
             kind, head, bg = 'skip', self.label(r)[:1].upper() + self.label(r)[1:], SKIP_OWN if own else SKIP_INH
@@ -881,7 +884,7 @@ class Model:
                 if ident(self.route[ch]) == ident(self.route[f]):
                     k += ms[ch]
             ms[f] = k
-        return {f: bool(f) and not self.is_service(f) and ms[f] > 0 for f in self.order}
+        return {f: bool(f) and f not in self.roots and ms[f] > 0 for f in self.order}
 
     # --- «Уже есть» ---
     def set_have(self, have, disks_):
@@ -955,7 +958,7 @@ class Model:
             types = types_all if near.get(f) else types_far
             full = sum(bits.values())
             for mask, c in masks.items():
-                if r.moved and mask & full == full:
+                if r.moved and not rz.is_second(r, self.roots) and mask & full == full:
                     continue                              # перенесено и есть везде - в «отмечено» не входит (ядро)
                 n = sum(c[k] for k in types)
                 if not n:

@@ -486,9 +486,11 @@ def _folder_word(folder):
 
 
 def move_line(letter, disk, folder, dest):
-    """«F:\\Котуй 2026 → F:\\Скопировано на Работа и Сафари (78)\\Котуй 2026» (тот же путь, что считает mvlist)."""
+    """«F:\\Котуй 2026 → F:\\Скопировано на Работа и Сафари (78)\\Котуй 2026» (тот же путь, что считает mvlist).
+    Второй проход (этап 13): «F:\\Скопировано на A\\Поход → F:\\Скопировано на A и B\\Поход» - без вложенности."""
     src = _loc(letter, disk, folder) + ('' if folder else ' (файлы в корне)')
-    dst = _loc(letter, disk, dest + '\\' + (folder or ''))
+    r1, rest = hb.copied_inside(folder or '')
+    dst = _loc(letter, disk, dest + ('\\' + rest if rest else '') if r1 else dest + '\\' + (folder or ''))
     return f'{src} → {dst}'
 
 
@@ -547,6 +549,10 @@ def latest_manifest_groups(root=None):
     return [v for v in best.values() if v['group'].get('state') == hb.G_HAVE]
 
 
+def r1_of(folder):
+    return hb.copied_inside(folder or '')[0]
+
+
 def move_items(rows, groups=()):
     """Блоки под таблицей: (можно переместить [dict], готово [dict]). Считается заново по файлам заданий."""
     offers, done, waiting = [], [], []
@@ -562,6 +568,12 @@ def move_items(rows, groups=()):
             moves.setdefault(key, []).append(r)
     for v in moves.values():
         v.sort(key=lambda x: x['move_meta'].get('создано_ts', 0))
+    parts_of = {}                                        # этап 13: части имени «Скопировано на …» по записям переносов
+    for r in rows:
+        mm = r.get('move_meta') or {}
+        if mm.get('куда') and mm.get('части'):
+            parts_of.setdefault(mm['куда'], [])
+            parts_of[mm['куда']] += [t for t in mm['части'] if t not in parts_of[mm['куда']]]
 
     def done_items(key, disks, labels, folder, src_disk):
         keys = key if isinstance(key, list) else [key]
@@ -603,7 +615,7 @@ def move_items(rows, groups=()):
         if any(x['state'] not in DONE for x in members) or any(g['state'] == 'идёт' for g in group):
             if len(members) > 1:                             # не все диски группы скопированы - перемещать рано
                 parts = [member_word(x) for x in members]
-                dest = hb.copied_folder(m.get('имя направления', ''), disks) if disks else '…'
+                dest = hb.move_dest(folder, m.get('имя направления', ''), disks, parts_of.get(r1_of(folder))) if disks else '…'
                 small = ' · '.join(parts)
                 waiting.append(dict(text=f'Папка «{_folder_word(folder)}»: ' + '; '.join(parts) + '. Переместить на '
                                          f'носителе можно, когда копии будут на {disks_words(disks, labels)}.',
@@ -615,7 +627,7 @@ def move_items(rows, groups=()):
                                   f'источник {src} — диск направления, на нём ничего не перемещается.',
                              task=r['task'], left=0, reasons={}, ok=True))
             continue
-        dest = hb.copied_folder(m.get('имя направления', ''), disks) if disks else '…'
+        dest = hb.move_dest(folder, m.get('имя направления', ''), disks, parts_of.get(r1_of(folder))) if disks else '…'
         # задание переноса могло быть создано по ЛЮБОМУ заданию группы (mvlist --razbor «… — на 77» из командной строки)
         mv = sorted((x for t in members for x in moves.get(t['task'], [])),
                     key=lambda x: x['move_meta'].get('создано_ts', 0))
@@ -667,7 +679,8 @@ def move_items(rows, groups=()):
             continue
         key = ('манифест', g['manifest'], gr.get('folder'))
         mv = moves.get(key, [])
-        dest = hb.copied_folder(gr.get('direction', ''), gr.get('disks') or []) if gr.get('disks') else '…'
+        dest = (hb.move_dest(gr.get('folder'), gr.get('direction', ''), gr.get('disks') or [],
+                                parts_of.get(hb.copied_inside(gr.get('folder') or '')[0])) if gr.get('disks') else '…')
         gdisks = gr.get('disks') or []
         base = dict(manifest=g['manifest'], group=_folder_word(gr.get('folder')), folder=gr.get('folder'), dest=dest,
                     disk=g['disk'], line=move_line(g.get('letter') or '', g['disk'], gr.get('folder'), dest),

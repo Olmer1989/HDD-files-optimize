@@ -396,10 +396,15 @@ class MovedRootsTest(V3Base):
         self.assertTrue(c.execute('select 1 from files where disk=? and path=?', (SRC, root + '\\Работа\\схема.jpg')).fetchone())
         self.mark(('', 'Н1'), ('Работа', 'Н2'))
         P = self.plan()
-        self.assertEqual(self.a(P, rz.O_MOVED), (1, 300))            # старая «ПЕРЕНЕСЕНО» (носитель не наследуется)
-        # служебная по журналу: отметка исходной «Работа» действует и там; схемы нет на 91 - копируется дополнительно
-        self.assertEqual(self.a(P, rz.O_COPY, 'Н2'), (2, 70 + 20))   # + отчёт.doc, оставшийся на старом месте
-        self.assertEqual(P.moved_copy, [1, 70])
+        # старая «ПЕРЕНЕСЕНО» (носитель не наследуется) + схема в «Скопировано на …»: этап 13 - исходная отметка
+        # «Работа» внутрь «Скопировано на …» не проникает (там действуют только отметки, поставленные внутри)
+        self.assertEqual(self.a(P, rz.O_MOVED), (2, 300 + 70))
+        self.assertEqual(self.a(P, rz.O_COPY, 'Н2'), (1, 20))        # отчёт.doc, оставшийся на старом месте
+        self.assertEqual(P.moved_copy, [0, 0])
+        self.mark((root + '\\Работа', 'Н2'))                         # отметка внутри служебной - по нынешнему пути
+        P = self.plan()
+        self.assertEqual(self.a(P, rz.O_COPY, 'Н2'), (2, 70 + 20))   # схемы нет на 91 - копируется (второй проход)
+        self.assertEqual(P.moved_copy, [0, 0])
         hb.close_last()
         self.quiet(hb.cmd_rebuild, NS())
         self.assertIn('ИТОГ: совпала', self.printed)                  # сборка по шагам = с нуля (moved_roots тоже)
@@ -414,6 +419,77 @@ class MovedRootsTest(V3Base):
         self.assertEqual(self.a(P, rz.O_COPY, 'Н1'), (1, 10))
         self.assertEqual(P.info['roots'], [])
         self.assertEqual(hb.disk_nums(['HDD78', 'HDD77', 'HDD45']), '45, 77 и 78')
+
+
+class FamilySplitTest(V3Base):
+    """Этап 13: переход данных Н1 «Семейный архив» (45 + 77) -> Н1 «Семейный архив 45» (45) + Н7 «Семейный архив 77»."""
+
+    def setUp(self):
+        super().setUp()
+        for d in ('HDD78', 'HDD55'):
+            make_disk(self.scans, d, 'AAAA00' + d[3:], [])
+        hb.DIRECTIONS.unlink()
+        self.quiet(hb.connect)
+        sv.add_directions_batch(sv.DEFAULT_DIRECTIONS)                 # как в настоящих данных: Н1..Н6
+        self.mark(('Поход 2010', 'Н1'), ('Работа', 'Н2'))
+        hb.ensure_tables()
+        with open(hb.DECISIONS, 'a', encoding='utf-8') as f:
+            f.write(f'{SRC}\tДрузья\tраздел: Семейный архив\tстарое\n')
+
+    def test_preview_write_and_repeat(self):
+        before = hb.DIRECTIONS.read_bytes()
+        pv = sv.family_split_preview()
+        self.assertEqual(hb.DIRECTIONS.read_bytes(), before)            # предпросмотр ничего не пишет
+        text = '\n'.join(pv['lines'])
+        self.assertIn('«Семейный архив» (HDD45, HDD77) -> «Семейный архив 45» (HDD45)', text)
+        self.assertIn('Н7 (новое): «Семейный архив 77» (HDD77)', text)
+        self.assertIn('«Скопировано на Семейный архив 45 и 77»', text)
+        self.assertIn(f'{SRC}: 2', text)                 # отметки Н1 по носителям (и старый «раздел: Семейный архив»)
+        self.assertIn('Заданий на 45 и 77 прежнего вида нет', text)
+        self.assertEqual(len(pv['fields']), 2)
+        self.quiet(hb.main, ['family-split'])                           # команда без --yes - только предпросмотр
+        self.assertIn('Это предпросмотр, ничего не записано', self.printed)
+        self.assertEqual(hb.DIRECTIONS.read_bytes(), before)
+        self.quiet(hb.main, ['family-split', '--yes'])
+        d = sv.directions()
+        self.assertEqual((d['Н1'].name, d['Н1'].disks, d['Н1'].kind), ('Семейный архив 45', ('HDD45',), hb.KIND_MEDIA))
+        self.assertIn('Семейный архив', d['Н1'].former)
+        self.assertEqual((d['Н7'].name, d['Н7'].disks, d['Н7'].kind), ('Семейный архив 77', ('HDD77',), hb.KIND_MEDIA))
+        self.assertTrue(hb.DIRECTIONS.read_bytes().startswith(before))   # таблица только дописана
+        # отметки Н1 остались за Н1 (только 45); старый «раздел: Семейный архив» - тоже Н1
+        P = self.plan()
+        self.assertEqual(set(P.part_b), {'HDD45', 'HDD78'})
+        self.assertEqual(self.a(P, rz.O_COPY, 'Н7'), (0, 0))
+        self.assertEqual({g['folder']: g['num'] for g in rz.group_states(P)}['Друзья'], 'Н1')
+        self.assertEqual(d['Н1'].folder(), 'Скопировано на Семейный архив 45')
+        self.assertEqual(d['Н7'].folder(), 'Скопировано на Семейный архив 77')
+        with self.assertRaises(sv.Refused) as e:                         # повтор - уже сделано
+            sv.family_split_preview()
+        self.assertIn('Переход уже сделан', str(e.exception))
+
+    def test_continue_after_partial_write(self):
+        sv.add_direction(num='Н1', name='Семейный архив 45', disks=['HDD45'])   # «сбой» после первой строки
+        pv = sv.family_split_preview()
+        self.assertEqual(len(pv['fields']), 1)                          # дописывается только Н7
+        sv.family_split()
+        self.assertEqual(sv.directions()['Н7'].disks, ('HDD77',))
+
+    def test_unexpected_state_refused(self):
+        sv.add_direction(num='Н1', name='Другой архив')                 # диски 45 и 77, но имя не «Семейный архив»
+        with self.assertRaises(sv.Refused):
+            sv.family_split_preview()
+        sv.add_direction(num='Н1', name='Семейный архив')
+        dirs = sv.directions()
+        before = dict(dirs)
+        sv.family_split_preview(dirs)                                    # переданный словарь не меняется
+        self.assertEqual(dirs, before)
+        sv.add_direction(name='Ещё', disks=[])                          # Н7 занят - новое получило бы Н8
+        with self.assertRaises(sv.Refused) as e:
+            sv.family_split_preview()
+        self.assertIn('Н8, а не Н7', str(e.exception))
+        sv.add_direction(num='Н1', disks=['HDD45'])                      # Н1 без 77, но имя прежнее
+        with self.assertRaises(sv.Refused):
+            sv.family_split_preview()
 
 
 class ContestedTest(V3Base):

@@ -593,20 +593,37 @@ class OverviewTest(DirBase):
         self.assertEqual(app.DISK_HEAD, ['Диск', 'Всего, ГБ', 'при сканировании', 'скопировано программой',
                                          'сверен только размер', 'со слов «Я сделал в Проводнике»',
                                          'хеш устарел (файл изменён)', 'Хеш не считался'])
-        html = page.dt.text()
-        for x in ('Копии проверены по хешу', 'Копии не проверены', 'colspan="2"', 'colspan="3"', 'Хеш не<br>считался'):
+        dt = page.dt
+        html = dt.text()
+        for x in ('Копии проверены по хешу', 'Копии не проверены', 'Хеш не'):
             self.assertIn(x, html)                                                   # двухуровневый заголовок
+        g = dt.grid
+        pos = {name: g.getItemPosition(g.indexOf(lab)) for name, lab in dt.heads.items()}
+        self.assertEqual(pos['Копии проверены по хешу'][2:], (1, 2))                 # (строк, столбцов)
+        self.assertEqual(pos['Копии не проверены'][2:], (1, 3))
         for gone in ('Подключён', 'Свободно'):
             self.assertNotIn(gone, html)                                             # они - в строках направлений
         self.assertFalse(any(f'({x})' in html for x in 'SCZUX'))                     # букв в заголовках нет
         self.assertEqual(rows[0][2:], ['1', '0', '0', '1', '0', '0'])
-        self.assertNotIn('rescan:HDD45', html)                                       # 0 - без ссылки
+        self.assertNotIn('HDD45', dt.buttons)                                        # 0 - без кнопки
         self.assertEqual(page.rows[0]['red'], {5})                                   # U - красным
         self.assertEqual(page.rows[2]['red'], {4})                                   # Z - красным
-        self.assertIn(f'<b style="color:{app.RED}">1</b>', html)
-        todo = page.todo.text()
-        self.assertIn('пересканировать папку', todo)                                 # что делать - под таблицей
-        self.assertIn('пересчитать хеши', todo)
+        self.assertIn(f'<b style="color:{app.RED}">1</b>', dt.cells[0][5].text())
+        # замечание 4: под таблицей - по короткой строке на каждое красное число, со ссылкой «Перейти»
+        todo = page.todo.text().split('<br>')
+        self.assertEqual(len(todo), 2)
+        plain = page.todo.text()
+        self.assertIn('<b>HDD45</b>: 1 файл не проверен — записан вручную в «Я сделал в Проводнике». Что сделать: '
+                      'пересканировать эти папки → <a href="rescan:HDD45">Перейти</a>', plain)
+        self.assertIn('<b>HDD91</b>: 1 файл — при копировании сверен только размер, копия не подтверждена. Что '
+                      'сделать: пересчитать хеши', plain)
+        # замечание 5: подсказка - у каждого заголовка своя и короткая; общей на всю таблицу нет
+        self.assertEqual(dt.toolTip(), '')
+        tips = {name: lab.toolTip() for name, lab in dt.heads.items()}
+        self.assertEqual(len(set(tips.values())), len(tips))
+        self.assertTrue(all(t and t.count('\n') <= 1 for t in tips.values()), tips)
+        self.assertIn('«Я сделал в Проводнике»', tips['со слов «Я сделал в Проводнике»'])
+        self.assertNotIn('Проводник', tips['сверен только размер'])
         s = page.dirs
         s.set_checked('Н2', True)                  # щелчок - сразу
         self.assertEqual([r[0] for r in self.table(page)], ['HDD91'])
@@ -697,6 +714,23 @@ class OverviewTest(DirBase):
         self.assertEqual(opened, [u['HDD91']['list']])
         self.assertEqual(self.win.opened, ['Задания на копирование'])
 
+    def test_disk_column_not_cut(self):
+        """Замечание 4 (16.11.2026): столбец «Диск» шире - «HDD55 · I:» не обрезается (и «(нет описи)» тоже)."""
+        info = {'HDD55': dict(ev={'S': 3, 'U': 432}, letter='I:', gib=1.0, in_base=True),
+                'HDD99': dict(ev={}, letter='', gib=0, in_base=False)}
+        rows = app.disk_rows(['HDD55', 'HDD99'], info)
+        t = app.DiskTable(lambda d: None)
+        t.set_rows(rows)
+        t.resize(t.sizeHint())
+        t.show()
+        QAPP.processEvents()
+        for line in t.cells:
+            lab = line[0]
+            self.assertGreaterEqual(lab.width(), lab.sizeHint().width(), lab.text())
+        self.assertIn('HDD55 · I:', t.text())
+        self.assertEqual(app.todo_items(rows)[0][2], '432 файла не проверены — записаны вручную в «Я сделал в Проводнике»')
+        t.close()
+
     def test_nohash_column_and_rescan_link(self):
         """Третий круг: столбец «Хеш не считался» (степень N) со ссылкой «Пересканировать» - раздел «Диски и папки»
         на этом диске; «Изменились после проверки» теперь «Хеш устарел (файл изменён)»."""
@@ -714,15 +748,21 @@ class OverviewTest(DirBase):
         page = self.page()
         rows = self.table(page)
         i91 = [r[0] for r in rows].index('HDD91')
-        lab = page.dt
-        self.assertIn('href="rescan:HDD91">Пересканировать', lab.text())
-        self.assertIn('Чтобы посчитать хеш', lab.toolTip())
+        dt = page.dt
+        b = dt.buttons['HDD91']                                                      # настоящая кнопка
+        self.assertIsInstance(b, app.QPushButton)
+        self.assertEqual(b.text(), 'Пересканировать')
+        self.assertEqual(b.toolTip().split('\n'), ['Пересканировать HDD91', '• посчитает хеш у 1 файла без хеша',
+                                                    '• нужен подключённый диск',
+                                                    '• откроет «Диски и папки» с этим диском'])
         self.assertTrue(rows[i91][app.C_NOHASH].startswith('1'))
         self.assertEqual(page.rows[0]['red'], {6})                                   # HDD45: X - красным
-        self.assertIn('поменялись размер или дата', page.todo.text())
-        lab.linkActivated.emit('rescan:HDD91')
+        self.assertIn('HDD45</b>: у 1 файла хеш устарел — файл изменён после подсчёта', page.todo.text())
+        b.click()
         self.assertEqual(self.win.opened[-1], 'Диски и папки')
         self.assertEqual(shown, ['HDD91'])
+        page.todo.linkActivated.emit('rescan:HDD45')                                 # «Перейти» под таблицей
+        self.assertEqual(shown, ['HDD91', 'HDD45'])
 
 class DisksServiceTest(DirBase):
     """«Диски и папки» (этап 10): решение владельца плашкой - действующая отметка разбора; «чего нет на дисках

@@ -132,10 +132,86 @@ def disk_nums(disks):
 
 
 def copied_folder(name, disks):
-    """Папка на носителе после переноса (логика v3): «Скопировано на Семейный архив (45 и 77)»."""
+    """Папка на носителе после переноса (логика v3): «Скопировано на Семейный архив (45 и 77)»; у направления, чьё
+    имя уже кончается РОВНО номерами его дисков, скобок нет: «Семейный архив 45» (диск 45) -> «Скопировано на
+    Семейный архив 45» (этап 13)."""
+    return COPIED_PREFIX + copied_tail(name, disks)
+
+
+NUMS_TAIL = re.compile(r'^(.*?\S) (\d+(?:, \d+)* и \d+|\d+)$')      # «<основа> 45», «<основа> 45 и 77», «… 45, 77 и 80»
+COPIED_NAME_MAX = 120                                             # длиннее - второй проход отказывает (путь на носителе)
+
+
+def copied_tail(name, disks):
+    """Имя после «Скопировано на »: «<имя> (<номера>)» или само имя, если его хвост - ровно список номеров дисков
+    направления (сравнение целым списком: «Архив 2045» при диске 45 и «Семейный архив 45 и 77» при диске 77 - со
+    скобками)."""
     if not disks:
         raise ValueError('у направления нет дисков')
-    return f'{COPIED_PREFIX}{name} ({disk_nums(disks)})'
+    nums = disk_nums(disks)
+    m = NUMS_TAIL.match(name or '')
+    if m and m.group(2) == nums:
+        return name
+    return f'{name} ({nums})'
+
+
+def _tail_group(tail):
+    """Часть имени -> (основа, [числа]) для «<основа> <список чисел>» или (часть, None) - неделимая часть."""
+    m = NUMS_TAIL.match(tail)
+    if m:
+        return m.group(1), re.findall(r'\d+', m.group(2))
+    return tail, None
+
+
+def _and_list(items):
+    return items[0] if len(items) == 1 else ', '.join(items[:-1]) + ' и ' + items[-1]
+
+
+def copied_join(parts):
+    """Имя папки после второго (третьего…) прохода по частям - хвостам направлений (этап 13): части «<основа> <числа>»
+    с одной основой сливаются, числа по возрастанию; группы - по алфавиту. «Семейный архив 45» + «Семейный архив 77» ->
+    «Скопировано на Семейный архив 45 и 77» (порядок проходов не важен); разные основы - через « и », а если внутри
+    группы уже есть « и » - через запятую: «Семейный архив 45 и 77, Фильмы (55)»."""
+    groups, order = {}, []
+    for t in parts:
+        stem, nums = _tail_group(t.strip())
+        key = (stem.casefold(), nums is None)
+        if key not in groups:
+            groups[key] = (stem, set())
+            order.append(key)
+        if nums:
+            groups[key][1].update(nums)
+    texts = []
+    for key in sorted(order, key=lambda k: (k[0], k[1])):
+        stem, nums = groups[key]
+        texts.append(f'{stem} {_and_list(sorted(nums, key=int))}' if nums else stem)
+    if len(texts) > 1 and any(' и ' in x for x in texts):
+        return COPIED_PREFIX + ', '.join(texts)
+    return COPIED_PREFIX + _and_list(texts)
+
+
+def copied_parts(root):
+    """Части имени служебной папки, если записей о них нет: «Скопировано на Семейный архив 45 и 77» -> [«Семейный
+    архив 45 и 77»] (copied_join сам делит числа); составное имя «A, B» - по запятой. -> [хвосты]."""
+    tail = root[len(COPIED_PREFIX):] if root.startswith(COPIED_PREFIX) else root
+    return [x.strip() for x in tail.split(', ')] if ', ' in tail and not NUMS_TAIL.match(tail) else [tail]
+
+
+def move_dest(folder, name, disks, parts=None):
+    """Куда переедет папка разбора folder направления name с дисками disks (для показа; решает mvlist): обычная папка -
+    «Скопировано на <направление>»; внутри «Скопировано на A» - «Скопировано на A и B» (этап 13; parts - части A по
+    записям переносов, None - по имени)."""
+    r1, _rest = copied_inside(folder or '')
+    if r1 is None:
+        return copied_folder(name, disks)
+    return copied_join(list(parts if parts else copied_parts(r1)) + [copied_tail(name, disks)])
+
+
+def copied_inside(path):
+    """Путь внутри служебной папки «Скопировано на …» (первая часть пути) -> (служебная папка, остаток) или (None, path).
+    Только по имени: служебная ли папка на самом деле, решает база (moved_roots)."""
+    head, _, tail = (path or '').partition(SEP)
+    return (head, tail) if head.startswith(COPIED_PREFIX) else (None, path)
 
 
 def _disk_order(disk):
@@ -178,4 +254,9 @@ def moved_rel(src, dst):
             rel = SEP.join(parts[i + 1:])
             if rel and src == root + SEP + rel:
                 return rel, part + SEP + rel
+            # этап 13, второй проход: «<корень>\Скопировано на A\rel» -> «<корень>\Скопировано на A и B\rel»
+            if rel and part.startswith(COPIED_PREFIX) and src.startswith(root + SEP + COPIED_PREFIX):
+                head, _, tail = src[len(root) + 1:].partition(SEP)
+                if tail == rel and head != part:
+                    return head + SEP + rel, part + SEP + rel
     return None, None

@@ -280,9 +280,14 @@ class LayoutTest(PageBase):
         d3 = types.SimpleNamespace(num='Н3', name='Фильмы', disks=('HDD55',))
         h = rp.head_html(d3, [dict(disk='HDD55', label='WD20 - 2 ТБ - My Book', letter='I:')],
                          {'HDD55': ('I:', 421 * 1024 ** 3, 2000 * 1024 ** 3, 4096)})
-        self.assertIn('Диск: I: My Book<br>', h)
+        # замечание 3 (16.11.2026): «Диск: I: My Book — Н3 Фильмы» (направление оранжевым в той же строке)
+        self.assertTrue(h.startswith(f'Диск: I: My Book — <span style="color:{rp.ORANGE}">Н3 Фильмы</span><br>'), h)
         self.assertNotIn('не подключён', h)
-        self.assertIn('HDD55 по журналу сканирования дисков · свободно 421,0 ГБ', h)
+        self.assertEqual(h.split('<br>')[1], '<span style="font-size:10pt; font-weight:normal; color:#33691e">HDD55 по '
+                                             'журналу сканирования дисков · свободно 421,0 ГБ</span>')
+        off = rp.head_html(d3, [dict(disk='HDD55', label='WD20 - 2 ТБ - My Book', letter='')])
+        self.assertTrue(off.startswith(f'Диск: My Book — <span style="color:{rp.ORANGE}">Н3 Фильмы</span> <span'), off)
+        self.assertIn('не подключён', off.split('<br>')[0])
         self.assertNotIn('задани', h)
         for x in (h, rp.carrier_text(rows[0]), rp.dest_text(d1, rows)):
             self.assertNotIn('ТБ)', x)                                          # ни модели, ни объёма
@@ -1311,6 +1316,62 @@ class MovedPartialTest(PageBase):
         self.rescan('HDD77', 'AAAA0077', 'Y', base77 + [('Y\\z.jpg', 300, H[25])])   # z.jpg - и на 77
         P = self.check((2, 20 + 70), {'HDD45': (0, 0), 'HDD77': (0, 0)})
         self.assertEqual(P.part_a.get((rz.O_MOVED, None), (0, 0)), [1, 300])
+
+
+
+class CopiedRootMarksTest(V3Base):
+    """Этап 13: «Скопировано на …» (из журнала перемещения) и папки внутри можно отметить для ДРУГОГО направления;
+    отметка - по нынешнему пути, действует только там; отметка носителя и исходные отметки внутрь не проникают."""
+    ROOT = 'Скопировано на Работа (91)'
+
+    def setUp(self):
+        super().setUp()
+        os.utime(next(self.scans.glob('HDD60 - тест/*')) / 'inventory.sqlite', (1580000000, 1580000000))
+        t = self.out / 'Перенос HDD60'
+        t.mkdir()
+        (t / 'тома.tsv').write_text('HDD60\tAAAA0060\n', encoding='utf-8')
+        (t / 'Журнал перемещения 2025-01-01 00-00-00.tsv').write_text(
+            'время\tрезультат\tразмер\tsha-256\tоткуда\tкуда\n'
+            f'10:00\tперемещён\t70\t{H[21]}\tK:\\Работа\\схема.jpg\tK:\\{self.ROOT}\\Работа\\схема.jpg\n',
+            encoding='utf-8-sig')
+        self.quiet(hb.connect)
+        self.mark(('', 'Н1'), ('Работа', 'Н2'))
+
+    def test_marks_inside_copied_root(self):
+        R = self.ROOT
+        m = rp.Model(sv.razbor_tree(SRC))
+        self.assertIn(R, m.roots)
+        self.assertFalse(m.is_service(R))
+        self.assertTrue(m.markable(R))
+        self.assertTrue(m.is_service(MOVED))                                 # старая «ПЕРЕНЕСЕНО» - по-прежнему нет
+        # без своей отметки - «уже перенесено»: ни отметка носителя (Н1), ни исходная «Работа» (Н2) не проникают
+        self.assertEqual((m.route[R].state, m.route[R + '\\Работа'].state), (rp.R_NONE, rp.R_NONE))
+        self.assertEqual(m.look(R + '\\Работа')['kind'], 'moved')
+        ck = m.check(R, 'Н1', 'only')
+        self.assertEqual((ck['on'], ck['checkable']), (False, True))
+        # галочка всей служебной папки для Н1 - отметка по нынешнему пути; подпапка - вместе с ней (серая)
+        pairs = m.include_pairs([R], 'Н1')
+        self.assertEqual(pairs, [(R, sv.directions()['Н1'].verdict())])
+        m.set_marks(pairs)
+        self.assertEqual(list(m.drafts), [R.lower()])
+        self.assertEqual(m.drafts[R.lower()]['path'], R)
+        r = m.route[R + '\\Работа']
+        self.assertEqual((r.state, r.num), (rp.R_DIR, 'Н1'))
+        self.assertTrue(rz.is_second(r, m.roots))
+        self.assertIn('ещё одна копия', m.look(R + '\\Работа')['tip'])
+        self.assertTrue(m.check(R + '\\Работа', 'Н1', 'only')['gray'])
+        self.assertEqual(m.route['Работа'].num, 'Н2')                        # исходная папка - не задета
+        # запись и ядро: отметка хранится нынешним путём, ядро считает так же, как окно
+        sv.add_marks_batch(SRC, m.batch()[0])
+        P = sv._plan(SRC)
+        self.assertEqual(P.errors, [])
+        self.assertEqual(P.part_a[(rz.O_COPY, 'Н1')][1] >= 70, True)          # схема (нет на 45 и 77) - копировать
+        groups = {g['folder']: g for g in rz.group_states(P)}
+        self.assertEqual(groups[R]['num'], 'Н1')
+        dirs = sv.directions()
+        ms = hb.MarkSet.build(hb.mark_rows(SRC, hb.table_bytes(hb.DECISIONS)), dirs)
+        self.assertEqual(sv.folder_mark(R + '\\Работа', ms, dirs, m.roots)['text'], 'Н1 Семейный архив')
+        self.assertEqual(sv.folder_mark(R, ms, dirs, m.roots)['own'], True)
 
 
 if __name__ == '__main__':
