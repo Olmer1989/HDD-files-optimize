@@ -45,7 +45,7 @@ import hb_cli                                   # только описание 
 from hb_core import api as hb
 import service as sv
 from disk_ui import (ON_COLOR, OFF_COLOR, SIZE_RE, as_row, disk_key, disk_text, disk_title,  # noqa: F401
-                     split_disks, style_item)   # общее с разделом «Диски и папки»
+                     split_disks, style_item, TASKS_PAGE)   # общее с разделом «Диски и папки»
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QGuiApplication
@@ -195,9 +195,10 @@ class DiskCombo(QComboBox):
     """Выбор одного носителя: подключённые сверху (●, жирным), разделитель, отключённые серым.
     Значение - номер носителя (itemData); setCurrentText('HDD17') выбирает его по номеру."""
 
-    def __init__(self, optional, empty=ALL_DISKS):
+    def __init__(self, optional, empty=ALL_DISKS, text_fn=None):
         super().__init__()
         self.optional, self.empty = optional, empty
+        self.text_fn = text_fn or disk_text            # «Разбор носителя» пишет строку по-своему (буква, название, HDD)
         self.setPlaceholderText(CHOOSE_DISK)
         self.setMinimumWidth(260)
         self.setMaxVisibleItems(25)
@@ -211,12 +212,12 @@ class DiskCombo(QComboBox):
             self.addItem(self.empty, '')
         on, off = split_disks(rows)
         for r in on:
-            self.addItem(disk_text(r), r['disk'])
+            self.addItem(self.text_fn(r), r['disk'])
             style_item(lambda role, v, i=self.count() - 1: self.setItemData(i, v, role), True)
         if on and off:
             self.insertSeparator(self.count())
         for r in off:
-            self.addItem(disk_text(r), r['disk'])
+            self.addItem(self.text_fn(r), r['disk'])
             style_item(lambda role, v, i=self.count() - 1: self.setItemData(i, v, role), False)
         self.setCurrentText(cur)
         self.blockSignals(False)
@@ -1142,7 +1143,7 @@ class CommandsPage(QWidget):
         self.buttons()
         if self.form().task_buttons:
             if QMessageBox.question(self, TITLE, f'Создать задание «{self.form().value("name")}» в «Запускаемые '
-                                    'скрипты»?\n\nЗапускаете его вы — в разделе «Задания».') != QMessageBox.Yes:
+                                    'скрипты»?\n\nЗапускаете его вы — в разделе «Задания на копирование».') != QMessageBox.Yes:
                 return
             self.start(args)
             return
@@ -1263,8 +1264,8 @@ class CommandsPage(QWidget):
             self.win.statusBar().showMessage('Записано. Применяю к базе…', 5000)
             self.win.apply_new()
         if code == 0 and self.task_dir is not None and self.task_dir.exists():
-            if QMessageBox.question(self, TITLE, f'Создано задание «{self.task_dir.name}». Перейти в «Задания»?') == QMessageBox.Yes:
-                self.win.open_page('Задания')
+            if QMessageBox.question(self, TITLE, f'Создано задание «{self.task_dir.name}». Перейти в «Задания на копирование»?') == QMessageBox.Yes:
+                self.win.open_page(TASKS_PAGE)
 
     def mark_move(self, form):
         """Галочка «разложить после копирования»: пометка в папке созданного задания (sv.mark_task_move)."""

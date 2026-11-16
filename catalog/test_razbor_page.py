@@ -1,4 +1,4 @@
-"""Страница «Разбор носителя» (логика v3, этап 2, 15.11.2026) без экрана (Qt offscreen) на временных данных.
+"""Страница «Разбор носителя» (логика v3, этапы 2, 6, 8; 15-16.11.2026) без экрана (Qt offscreen) на временных данных.
 
 Запуск из корня проекта:  py -m unittest catalog.test_razbor_page
 Настоящие диски, таблицы и задания не используются.
@@ -117,50 +117,51 @@ class PageBase(V3Base):
 
 class TreeTest(PageBase):
     def test_tree_inheritance_exceptions_and_display(self):
+        """Этап 8: колонка галочек слева; своя отметка D - активная галочка и зелёный фон; подпапки - серая
+        неактивная галочка, бледный текст, тот же фон; служебная папка и весь носитель - без галочки."""
         self.open()
         root = self.p.items['']
-        names = {root.child(i).text(0) for i in range(root.childCount())}
+        names = {root.child(i).text(rp.C_NAME) for i in range(root.childCount())}
         self.assertTrue({'Поход 2010', 'Работа', 'Друзья', 'Документы', 'Смешанная', MOVED} <= names, names)
+        self.assertEqual(self.p.dest, 'Н1')                       # «Обзор» пуст, режима нет - первое с диском
+        self.assertTrue(self.p.mode_only.isChecked())
         self.assertIn('режим не выбран', self.to(''))
-        self.assertEqual(self.to('Поход 2010'), 'не отмечено')
         self.assertEqual(self.item('Поход 2010').text(rp.C_FILES), '7')
         self.assertEqual(self.item('Поход 2010').text(rp.C_PHOTO), '2')
-        # режим «всё - в Семейный архив»: черновик пустого пути, у папок - серым «от режима»
-        self.p.mode_dir.setCurrentIndex(self.p.mode_dir.findData(N1))
-        self.p.mode_all.setChecked(True)
-        self.assertEqual(self.p.model.drafts['']['verdict'], N1)
-        self.assertEqual(self.to('Поход 2010'), '• Семейный архив (45 и 77) — от режима')
-        it = self.item('Поход 2010')                                             # унаследованное - бледный цвет Н1
-        self.assertEqual(it.background(rp.C_NAME).color().name(), rp.dir_colors('Н1')[1])
+        self.assertIsNone(root.data(rp.C_CHECK, rp.Qt.CheckStateRole))           # весь носитель - режим, не галочка
+        self.assertIsNone(self.item(MOVED).data(rp.C_CHECK, rp.Qt.CheckStateRole))
+        it = self.item('Поход 2010')
+        self.assertEqual(it.checkState(rp.C_CHECK), rp.Qt.Unchecked)
+        self.assertTrue(it.flags() & rp.Qt.ItemIsUserCheckable)
+        it.setCheckState(rp.C_CHECK, rp.Qt.Checked)                              # как щелчок владельца
+        self.assertEqual(self.p.model.drafts['поход 2010']['verdict'], N1)
+        it = self.item('Поход 2010')
+        self.assertEqual(it.background(rp.C_NAME).color().name(), rp.SEL_BG)
         self.assertTrue(it.text(rp.C_NAME).startswith('• '))                      # не сохранено
-        self.assertIn('(от режима всего носителя)', it.toolTip(rp.C_NAME))
-        # исключение в подпапке: своя (несохранённая) отметка синим, соседние подпапки - по-прежнему от режима
-        self.p.apply(['Поход 2010\\Монтаж'], rp.SKIP)
-        self.assertEqual(self.to('Поход 2010\\Монтаж'), '• не копировать')
-        it = self.item('Поход 2010\\Монтаж')
-        self.assertEqual(it.foreground(rp.C_NAME).color().name(), rp.BLUE.lower())
-        self.assertTrue(it.font(rp.C_NAME).strikeOut())                          # «не копировать» - зачёркнуто
-        self.assertEqual(it.background(rp.C_NAME).color().name(), rp.SKIP_OWN)
-        self.assertIn('от режима', self.to('Поход 2010\\Фото'))
-        # несколько папок сразу - панелью «Применить к выделенным»
-        self.p.tree.clearSelection()
-        for f in ('Друзья', 'Работа'):
-            self.item(f).setSelected(True)
-        self.assertIn('2', self.p.apply_btn.text())
-        self.p.apply_box.setCurrentIndex(self.p.apply_box.findData(N2))
-        self.p.apply_selected()
-        self.assertEqual({self.p.model.drafts[k]['verdict'] for k in ('друзья', 'работа')}, {N2})
-        self.assertEqual(self.to('Друзья\\Наши'), '• Работа (91) — от «Друзья»')
-        # служебная папка: отметить нельзя, внутри - «уже перенесено», режим туда не наследуется
-        self.assertIn('служебная папка', self.to(MOVED))
-        self.assertFalse(self.p.model.markable(MOVED))
-        self.assertEqual(self.p.model.set_mark([MOVED], N2), 0)
-        self.assertEqual(self.to(MOVED + '\\Старое'), 'уже перенесено')
-        # отменить последнее - пакет из двух папок уходит целиком
+        self.assertTrue(it.font(rp.C_NAME).italic())
+        ch = self.item('Поход 2010\\Фото')
+        self.assertEqual(ch.checkState(rp.C_CHECK), rp.Qt.Checked)
+        self.assertTrue(ch.data(rp.C_CHECK, rp.GRAY_ROLE))                        # серая, неактивная
+        self.assertFalse(ch.flags() & rp.Qt.ItemIsUserCheckable)
+        self.assertEqual(ch.foreground(rp.C_NAME).color().name(), rp.PALE)
+        self.assertEqual(ch.background(rp.C_NAME).color().name(), rp.SEL_BG)     # один зелёный фон
+        self.assertIn('вместе с родительской', ch.toolTip(rp.C_NAME))
+        self.assertEqual(self.p.toggle(['Поход 2010\\Фото'], False), 0)          # серую не снять
+        # снять галочку = снять свою отметку: черновик пуст, папка снова не выбрана
+        self.item('Поход 2010').setCheckState(rp.C_CHECK, rp.Qt.Unchecked)
+        self.assertEqual(self.p.model.drafts, {})
+        self.assertEqual(self.item('Поход 2010\\Фото').checkState(rp.C_CHECK), rp.Qt.Unchecked)
+        # подпапка, отмеченная отдельно, внутри выбранной: снятие её галочки - исключение («не копировать»)
+        self.p.toggle(['Поход 2010\\Монтаж'], True)
+        self.p.toggle(['Поход 2010'], True)
+        self.assertEqual(self.p.model.drafts['поход 2010\\монтаж']['verdict'], N1)   # своя осталась
+        self.p.toggle(['Поход 2010\\Монтаж'], False)
+        self.assertEqual(self.p.model.drafts['поход 2010\\монтаж']['verdict'], rp.SKIP)
+        self.assertEqual(self.item('Поход 2010\\Монтаж').checkState(rp.C_CHECK), rp.Qt.Unchecked)
         self.p.undo()
-        self.assertNotIn('друзья', self.p.model.drafts)
-        self.assertNotIn('работа', self.p.model.drafts)
-        self.assertIn('поход 2010\\монтаж', self.p.model.drafts)
+        self.assertEqual(self.p.model.drafts['поход 2010\\монтаж']['verdict'], N1)
+        self.assertFalse(self.p.model.markable(MOVED))
+        self.assertEqual(self.to(MOVED + '\\Старое'), 'уже перенесено')
         self.assertEqual(self.asked, [])
 
     def test_route_contract_against_reference(self):
@@ -217,28 +218,255 @@ class TreeTest(PageBase):
 
 class ChoiceTest(PageBase):
     def test_opens_with_direction_chosen_in_overview(self):
-        """Этап 5, п. 4: «Перейти к написанию команды…» - в «Куда» и «Всё — в» отмеченное в «Обзоре» направление
-        (несколько - первое по номеру), а не первое в списке; сохранённый режим носителя не меняется."""
+        """Этап 8: диск назначения - первое по номеру направление, отмеченное в «Обзоре»; сохранённая отметка всего
+        носителя не меняется; если она про другое направление - строка под переключателями."""
         import directions_page as dp
         dp.save_choice(['Н2'])
         self.open()
-        self.assertEqual(self.p.apply_box.currentData(), N2)
-        self.assertEqual(self.p.mode_dir.currentData(), N2)
-        self.assertIn('Копирование: Н2 Работа — диск 91', self.p.where.text())
+        self.assertEqual(self.p.dest, 'Н2')
+        self.assertEqual(self.p.dest_box.currentData(), 'Н2')
+        self.assertIn('Работа', self.p.where.text())
+        self.assertIn('Н2 = диск HDD91 по журналу сканирования дисков', self.p.where.text())
         self.assertEqual(self.p.model.drafts, {})                                # ничего не отмечено молча
-        self.p.apply_box.setCurrentIndex(0)                                      # владелец выбрал другое
+        self.p.set_dest('Н1')                                                    # владелец выбрал другое
+        self.assertEqual(self.p.dest, 'Н1')
         dp.save_choice(['Н2', 'Н1'])                                             # снова из «Обзора»: по номеру - Н1
+        self.p.set_dest('Н2')
         self.p.use_choice()
-        self.assertEqual(self.p.apply_box.currentData(), N1)
+        self.assertEqual(self.p.dest, 'Н1')
         self.mark(('', 'Н2'))                                                    # сохранённый режим - «всё в Н2»
         dp.save_choice(['Н1'])
         self.p.load_disk(SRC, keep=False)
         self.assertTrue(wait(lambda: self.p.model is not None and self.p.loading is None))
         self.p.use_choice()
-        self.assertEqual(self.p.apply_box.currentData(), N1)
-        self.assertEqual(self.p.mode_dir.currentData(), N2)                      # сохранённое не перебито
-        self.assertIn('Сохранённый режим этого носителя', self.p.mode_note.text())
+        self.assertEqual(self.p.dest, 'Н1')
+        self.assertTrue(self.p.mode_only.isChecked())                            # корень ≠ Н1 - «Только выбранные»
+        self.assertIn('Весь носитель отмечен «Всё — в Работа (91)»', self.p.mode_note.text())
+        self.assertEqual(self.p.model.drafts, {})
+        self.p.set_dest('Н2')                                                    # для Н2 корень = Н2 - «Все папки»
+        self.assertTrue(self.p.mode_every.isChecked())
+        self.assertFalse(self.p.mode_note.isVisibleTo(self.p))
         self.settle()
+
+
+class LayoutTest(PageBase):
+    """Этап 8: тексты списков «Выберите носитель» и «Диск назначения», заголовок, «Задания на копирование»."""
+
+    def test_texts_of_lists_and_head(self):
+        import types
+        rows = [dict(disk='HDD09', label='SN850X - 2 ТБ - Монтаж - SN850', letter='F:'),
+                dict(disk='HDD45', label='WD20 - 2 ТБ - Бэкап фото и видео', letter='H:'),
+                dict(disk='HDD77', label='WD40 - 4 ТБ - Путешествия', letter='')]
+        self.assertEqual(rp.carrier_text(rows[0]), 'F: Монтаж - SN850 (2 ТБ) — HDD09 (по журналу сканирования дисков)')
+        self.assertEqual(rp.carrier_text(rows[2]), 'Путешествия (4 ТБ) (не подключён) — HDD77 (по журналу '
+                                                   'сканирования дисков)')
+        d1 = sv.directions()['Н1']
+        self.assertEqual(rp.dest_text(d1, rows), 'H: Бэкап фото и видео (2 ТБ) и Путешествия (4 ТБ) (не подключён) — '
+                                                 'Н1 Семейный архив — HDD45 и HDD77 (по журналу сканирования дисков)')
+        self.assertIn(f'<span style="color:{rp.ORANGE}"><b>Н1 Семейный архив</b></span>', rp.dest_html(d1, rows))
+        h = rp.head_html(d1, rows, {'HDD45': ('H:', 421 * 1024 ** 3, 2000 * 1024 ** 3, 4096)})
+        self.assertIn(f'Диск «<span style="color:{rp.ORANGE}">Семейный архив</span>» — H: Бэкап фото и видео (2 ТБ) и '
+                      'Путешествия (4 ТБ) (не подключён)', h)
+        self.assertIn('Н1 = диски HDD45 и HDD77 по журналу сканирования дисков · свободно HDD45 — 421,0 ГБ · два '
+                      'задания', h)
+        d3 = types.SimpleNamespace(num='Н3', name='Фильмы', disks=('HDD55',))
+        h = rp.head_html(d3, [dict(disk='HDD55', label='WD20 - 2 ТБ - My Book', letter='I:')],
+                         {'HDD55': ('I:', 421 * 1024 ** 3, 2000 * 1024 ** 3, 4096)})
+        self.assertIn('— I: My Book (2 ТБ)', h)
+        self.assertIn('Н3 = диск HDD55 по журналу сканирования дисков · свободно 421,0 ГБ', h)
+        self.assertNotIn('задани', h)
+        # в окне: строки списков по той же схеме, подключённые сверху (в тестах дисков нет - все «не подключён»)
+        self.open()
+        texts = [self.p.disk_box.itemText(i) for i in range(self.p.disk_box.count())]
+        self.assertTrue(all(t.endswith('(по журналу сканирования дисков)') for t in texts if t), texts)
+        by = {r['disk']: r for r in self.p.disk_rows}
+        pl = lambda d: rp.place(by[d], d)                                                     # noqa: E731
+        self.assertTrue(pl('HDD60').endswith('(не подключён)'))
+        self.assertIn(f'{pl("HDD60")} — HDD60 (по журналу сканирования дисков)', texts)
+        dest = [self.p.dest_box.itemText(i) for i in range(self.p.dest_box.count())]
+        self.assertEqual(dest, [f'{pl("HDD45")} и {pl("HDD77")} — Н1 Семейный архив — HDD45 и HDD77 '
+                                '(по журналу сканирования дисков)',
+                                f'{pl("HDD91")} — Н2 Работа — HDD91 (по журналу сканирования дисков)'])  # Н3 без диска
+        self.assertIn(rp.ORANGE, self.p.dest_box.current_html())
+        self.assertEqual([w.text() for w in (self.p.mode_only, self.p.mode_every, self.p.mode_except)],
+                         ['Только выбранные папки', 'Все папки', 'Все, кроме выбранных'])
+        self.assertEqual(self.p.copy_cell.title.text(), 'Копировать на диски ' + ' и '.join(
+            rp.short_place(by[d], d) for d in ('HDD45', 'HDD77')))
+        self.assertTrue(self.p.copy_cell.title.text().endswith('(не подключён)'))
+        self.assertEqual(self.p.copy_cell.sub.text(), 'Семейный архив, HDD45 и HDD77')
+        self.assertEqual(self.p.stay_cell.title.text(), 'Остаётся на носителе (не копируется)')
+        self.assertFalse(self.p.stay_cell.acceptDrops())
+        self.assertTrue(self.p.copy_cell.acceptDrops())
+        self.assertIn('Shift/Ctrl — несколько папок сразу', self.p.tree_hint.text())
+        for gone in ('apply_box', 'apply_btn', 'unmark_btn', 'mode_dir'):
+            self.assertFalse(hasattr(self.p, gone), gone)
+        self.assertEqual(self.p.tree.headerItem().text(rp.C_NAME), 'Папка')
+        self.assertNotIn('Куда', [self.p.tree.headerItem().text(i) for i in range(self.p.tree.columnCount())])
+
+
+class ModesTest(PageBase):
+    """Этап 8: три режима ↔ отметки ядра, галочки нескольких выделенных, папки другого направления, бросок в ячейку,
+    числа ячеек = план ядра."""
+
+    def check_consistent(self):
+        """Галочки на экране = маршрут ядра (Model.routes): в «Только»/«Все папки» галочка ⇔ папка идёт в D, в
+        «Все, кроме» ⇔ «не копировать»."""
+        m, mode = self.p.model, self.p.mode()
+        for f, it in self.p.items.items():
+            ck = m.check(f, self.p.dest, mode)
+            if ck is None:
+                continue
+            r = m.route[f]
+            want = r.state == rp.R_SKIP if mode == rp.EXCEPT else m.is_dir(r, self.p.dest)
+            self.assertEqual(it.checkState(rp.C_CHECK) == rp.Qt.Checked, want, f)
+
+    def test_three_modes_map_to_core_marks(self):
+        self.open()
+        m = self.p.model
+        self.assertEqual(self.p.mode(), rp.ONLY)
+        self.p.toggle(['Поход 2010', 'Работа'], True)                           # «Только выбранные»: галочка = Н1
+        self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'поход 2010': N1, 'работа': N1})
+        self.item('Поход 2010\\Фото')
+        self.check_consistent()
+        # «Все папки»: весь носитель - в Н1
+        self.p.mode_every.setChecked(True)
+        self.assertEqual(m.drafts['']['verdict'], N1)
+        self.assertEqual(self.p.mode(), rp.EVERY)
+        self.assertTrue(self.p.mode_hint.text().startswith('•'))
+        self.item('Друзья\\Наши')
+        self.check_consistent()
+        self.assertTrue(self.p.items['Друзья'].data(rp.C_CHECK, rp.GRAY_ROLE))   # всё - от всего носителя, серым
+        # «Все, кроме выбранных»: галочка = «не копировать»
+        self.p.mode_except.setChecked(True)
+        self.assertEqual(self.p.mode(), rp.EXCEPT)
+        self.assertEqual(self.p.items['Друзья'].checkState(rp.C_CHECK), rp.Qt.Unchecked)
+        self.p.items['Друзья'].setCheckState(rp.C_CHECK, rp.Qt.Checked)
+        self.assertEqual(m.drafts['друзья']['verdict'], rp.SKIP)
+        self.assertEqual(self.p.items['Друзья\\Наши'].checkState(rp.C_CHECK), rp.Qt.Checked)     # исключена с родителем
+        self.assertTrue(self.p.items['Друзья\\Наши'].data(rp.C_CHECK, rp.GRAY_ROLE))
+        self.check_consistent()
+        P = self.plan()
+        self.assertEqual(P.part_a[(rz.O_SKIP, None)][0], 2)                     # a.jpg и b.jpg
+        self.assertIn('Отмечено: весь носитель, кроме 1 папки', self.p.copy_cell.body.text())
+        self.p.items['Друзья'].setCheckState(rp.C_CHECK, rp.Qt.Unchecked)       # снять исключение
+        self.assertNotIn('друзья', m.drafts)
+        self.p.toggle(['Друзья'], True)
+        # «Все папки» снимает исключения одним шагом отмены
+        self.p.mode_every.setChecked(True)
+        self.assertNotIn('друзья', m.drafts)
+        self.p.undo()
+        self.assertEqual(m.drafts['друзья']['verdict'], rp.SKIP)
+        # обратно «Только выбранные»: сохранённой отметки носителя нет - «ничего, кроме отмеченных»; свои Н1 остались
+        self.p.mode_only.setChecked(True)
+        self.assertEqual(m.drafts['']['verdict'], rp.SKIP)
+        self.assertEqual(m.drafts['поход 2010']['verdict'], N1)
+        self.assertEqual(self.p.mode(), rp.ONLY)
+        self.check_consistent()
+        P = self.plan()
+        self.assertEqual(P.part_a[(rz.O_NONE, None)][0] if (rz.O_NONE, None) in P.part_a else 0, 0)
+        self.assertEqual(self.asked, [])
+
+    def test_only_returns_to_saved_mode_of_other_direction(self):
+        self.mark(('', 'Н2'))
+        self.open()
+        self.assertEqual(self.p.dest, 'Н2')                                     # «Обзор» пуст - направление носителя
+        self.p.set_dest('Н1')
+        self.assertTrue(self.p.mode_only.isChecked())
+        self.p.mode_except.setChecked(True)                                      # корень - Н1 черновиком
+        self.assertEqual(self.p.model.drafts['']['verdict'], N1)
+        self.p.mode_only.setChecked(True)                                        # вернуть сохранённое «всё в Н2»
+        self.assertNotIn('', self.p.model.drafts)
+        self.assertEqual(self.p.model.route[''].num, 'Н2')
+        self.settle()
+
+    def test_check_applies_to_all_selected(self):
+        self.open()
+        m = self.p.model
+        self.p.tree.clearSelection()
+        for f in ('Друзья', 'Работа', 'Документы'):
+            self.item(f).setSelected(True)
+        self.p.tree.press_sel = self.p.selected_folders()                       # как при нажатии мыши
+        self.p.tree.clearSelection()                                             # Qt сбрасывает выделение до щелчка
+        self.item('Работа').setSelected(True)
+        self.item('Работа').setCheckState(rp.C_CHECK, rp.Qt.Checked)
+        self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'друзья': N1, 'работа': N1, 'документы': N1})
+        self.assertTrue(wait(lambda: len(self.p.selected_folders()) == 3))       # выделение вернулось
+        self.assertEqual(len(m.undo_stack), 1)                                   # один шаг отмены
+        self.p.tree.press_sel = self.p.selected_folders()
+        self.item('Документы').setCheckState(rp.C_CHECK, rp.Qt.Unchecked)
+        self.assertEqual(m.drafts, {})
+        # щелчок по НЕвыделенной папке - только она
+        self.p.tree.press_sel = ['Друзья', 'Работа']
+        self.item('Смешанная').setCheckState(rp.C_CHECK, rp.Qt.Checked)
+        self.assertEqual(list(m.drafts), ['смешанная'])
+        self.settle()
+
+    def test_folder_of_other_direction(self):
+        self.mark(('Работа', 'Н2'), ('Смешанная', 'Н2'))
+        self.open()
+        it = self.item('Работа')
+        self.assertEqual(it.checkState(rp.C_CHECK), rp.Qt.Unchecked)
+        self.assertEqual(it.data(rp.C_NAME, rp.TAG_ROLE), 'Н2')                  # мелкая серая метка
+        self.assertIn('Папка отмечена для «Н2 Работа» (91)', it.toolTip(rp.C_NAME))
+        self.assertIn('перейдёт на этот диск', it.toolTip(rp.C_NAME))
+        it.setCheckState(rp.C_CHECK, rp.Qt.Checked)                              # перенос - без переспроса
+        self.assertEqual(self.p.model.drafts['работа']['verdict'], N1)
+        self.assertIsNone(self.item('Работа').data(rp.C_NAME, rp.TAG_ROLE))
+        self.assertTrue(self.item('Работа').text(rp.C_NAME).startswith('• '))
+        self.assertEqual(self.asked, [])
+        # «Все, кроме выбранных»: галочка = исключение, папку другого направления так не перенести - только бросок
+        self.p.mode_except.setChecked(True)
+        ck = self.p.model.check('Смешанная', 'Н1', rp.EXCEPT)
+        self.assertFalse(ck['checkable'])
+        self.assertEqual(ck['tag'], 'Н2')
+        self.assertIn('перетащите', ck['tip'])
+        self.assertEqual(self.p.toggle(['Смешанная'], True), 0)
+        self.assertEqual(self.p.copy_cell.drop_folders(['Смешанная']), 1)
+        self.assertEqual(self.p.model.route['Смешанная'].num, 'Н1')
+        self.settle()
+
+    def test_drop_into_copy_cell(self):
+        self.open()
+        m = self.p.model
+        md = self.p.tree.mimeData([self.p.items[''], self.item('Поход 2010'), self.item(MOVED)])
+        self.assertEqual(rp.mime_folders(md), ['Поход 2010'])                     # не весь носитель, не служебная
+        self.assertFalse(self.p.items[''].flags() & rp.Qt.ItemIsDragEnabled)
+        self.assertEqual(self.p.copy_cell.drop_folders(['Поход 2010', '', MOVED]), 1)
+        self.assertEqual(m.drafts['поход 2010']['verdict'], N1)
+        self.assertEqual(self.item('Поход 2010').checkState(rp.C_CHECK), rp.Qt.Checked)
+        self.assertEqual(self.p.stay_cell.drop_folders(['Работа']), 0)           # «Остаётся» - только сведения
+        self.assertNotIn('работа', m.drafts)
+        self.assertEqual(self.p.copy_cell.drop_folders(['Поход 2010\\Фото']), 0)  # уже идёт с родителем - ничего
+        self.p.mode_except.setChecked(True)                                      # в «Все, кроме» бросок снимает исключение
+        self.p.toggle(['Друзья'], True)
+        self.assertEqual(m.drafts['друзья']['verdict'], rp.SKIP)
+        self.assertEqual(self.p.copy_cell.drop_folders(['Друзья']), 1)
+        self.assertNotIn('друзья', m.drafts)
+        self.settle()
+
+    def test_cell_numbers_match_plan(self):
+        import directions_page as dp
+        dp.save_choice(['Н1'])
+        self.mark(('', 'не копировать'), ('Поход 2010', 'Н1'), ('Работа', 'Н1'), ('Поход 2010\\Монтаж', 'не копировать'))
+        self.open()
+        self.assertEqual(self.p.mode(), rp.ONLY)
+        P = self.plan()
+        cp, hv = P.part_a[(rz.O_COPY, 'Н1')], P.part_a.get((rz.O_HAVE, 'Н1'), (0, 0))
+        body = self.p.copy_cell.body.text()
+        self.assertIn(f'Отмечено 2 папки · {rp.files_word(cp[0] + hv[0])} · {rp.gb(cp[1] + hv[1])} ГБ', body)
+        self.assertIn(f'Уже есть на обоих дисках: <b>{rp.gb(hv[1])} ГБ', body)
+        by = {r['disk']: r for r in self.p.disk_rows}
+        self.assertIn(f'Копировать на диск {rp.place(by["HDD45"], "HDD45")} (HDD45): ', body)
+        self.assertIn('место не проверено (диск не подключён)', body)
+        self.assertNotIn('на 45', body)                                         # никаких голых «на 45»
+        n, b = rp.stay_numbers(P)
+        stay = self.p.stay_cell.body.text()
+        self.assertIn(f'4 папки · {rp.files_word(n)} · {rp.gb(b)} ГБ', stay)    # Документы, Друзья, Смешанная, Монтаж
+        moved = P.part_a.get((rz.O_MOVED, None), (0, 0))[0]
+        self.assertEqual(cp[0] + hv[0] + n + moved, P.total[0])                  # отмечено + остаётся + перенесено = опись
+        self.assertEqual(self.p.copy_cell.state, 'unknown')
+        self.assertTrue(self.p.tasks_btn.isEnabled())
+        self.assertIs(self.p.tasks_btn, self.p.copy_cell.btn)
 
 
 class HaveNearTest(PageBase):
@@ -262,8 +490,7 @@ class HaveNearTest(PageBase):
 class SummaryTest(PageBase):
     def test_modes_and_summary_equals_inventory(self):
         self.open()
-        self.p.mode_dir.setCurrentIndex(self.p.mode_dir.findData(N1))
-        self.p.mode_all.setChecked(True)
+        self.p.mode_every.setChecked(True)                                     # диск назначения - Н1
         P = self.plan()
         self.assertEqual(P.errors, [])
         self.assertEqual(P.total[0], len(FILES))
@@ -274,8 +501,8 @@ class SummaryTest(PageBase):
         self.assertIn('не подключён — место не проверено', text)
         self.assertIn('сравнение только по имени и размеру', text)              # описание.doc без хеша
         self.assertIn('с несохранёнными', self.p.sum_state.text())
-        # «ничего, кроме отмеченных»: всё - «не копировать», кроме уже перенесённого; писать нечего
-        self.p.mode_none.setChecked(True)
+        # «Только выбранные» = «ничего, кроме отмеченных»: всё - «не копировать», кроме уже перенесённого
+        self.p.mode_only.setChecked(True)
         P = self.plan()
         self.assertEqual(P.part_a[(rz.O_SKIP, None)][0], len(FILES) - 1)
         self.assertEqual(P.part_a[(rz.O_MOVED, None)][0], 1)
@@ -287,7 +514,7 @@ class SummaryTest(PageBase):
 
     def test_stale_answer_is_not_shown(self):
         self.open()
-        self.p.mode_all.setChecked(True)
+        self.p.mode_every.setChecked(True)
         self.p.changed()                                    # правка во время расчёта: ревизия растёт сразу
         self.assertNotEqual(self.p.plan_rev, self.p.rev)
         self.settle()
@@ -300,7 +527,7 @@ class SaveTest(PageBase):
 
     def test_save_marks_batch_and_prune(self):
         self.open()
-        self.p.mode_all.setChecked(True)
+        self.p.mode_except.setChecked(True)
         self.p.apply(['Поход 2010\\Монтаж', 'Друзья'], rp.SKIP)
         self.p.apply(['Работа'], N2)
         self.assertEqual(self.p.save_btn.text(), 'Сохранить отметки (4)')
@@ -372,7 +599,7 @@ class TasksTest(PageBase):
 
     def test_prepare_tasks_after_saving_drafts(self):
         self.open()
-        self.p.mode_all.setChecked(True)
+        self.p.mode_every.setChecked(True)
         self.p.apply(['Работа'], N2)
         self.p.prepare(['Н1', 'Н2'])         # черновик есть - сначала сохранить (предпросмотр), затем задания
         self.assertTrue(wait(lambda: self.made() and not self.p.writing, 60), self.asked)
@@ -380,8 +607,9 @@ class TasksTest(PageBase):
         self.assertTrue(any(f'{SRC} — Работа — Работа' in x for x in self.dialogs), self.dialogs)
         self.assertIn(f'{SRC} — Работа — Работа', self.made())
         self.assertTrue(list(hb.RAZBORY.glob(f'{SRC} *.json')))
-        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания'))
-        self.assertTrue(any(x.startswith('Создано заданий') for x in self.asked), self.asked)
+        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания на копирование'))
+        self.assertTrue(any(x.startswith('Создано заданий') and 'Задания на копирование' in x for x in self.asked),
+                        self.asked)
 
     def test_list_changed_before_create_is_shown_again(self):
         self.mark(('', 'Семейный архив'))
@@ -460,70 +688,6 @@ class ContestedTest(PageBase):
         self.assertTrue(wait(lambda: cp.run is None, 90))
 
 
-class DropCellsTest(PageBase):
-    """Этап 6: перетаскивание в ячейки, цвета и подсказки дерева, содержимое ячеек, «Куда»."""
-
-    def test_drop_marks_and_child_mark_is_stronger(self):
-        self.mark(('Поход 2010\\Монтаж', 'Н2'))
-        self.open()
-        m = self.p.model
-        self.assertEqual(set(self.p.cells), {'Н1', 'Н2', SKIP_KEY, INHERIT_KEY})     # «Обзор» пуст: все с дисками
-        # мышью: данные перетаскивания из дерева - только отмечаемые папки (не весь носитель, не служебная)
-        md = self.p.tree.mimeData([self.p.items[''], self.item('Поход 2010'), self.item(MOVED)])
-        self.assertEqual(rp.mime_folders(md), ['Поход 2010'])
-        self.assertFalse(self.p.items[''].flags() & rp.Qt.ItemIsDragEnabled)
-        # сброс родителя в «Не копировать»: своя отметка подпапки не стирается
-        self.assertEqual(self.p.cells[SKIP_KEY].drop_folders(['Поход 2010']), 1)
-        self.assertEqual(m.drafts['поход 2010']['verdict'], rp.SKIP)
-        self.assertEqual(m.route['Поход 2010\\Монтаж'].num, 'Н2')
-        self.assertEqual(m.route['Поход 2010\\Фото'].state, rp.R_SKIP)
-        # цвета и подсказки: своя - насыщенный цвет направления, от папки - бледный серый и зачёркнуто
-        it = self.item('Поход 2010\\Монтаж')
-        self.assertEqual(it.background(rp.C_NAME).color().name(), rp.dir_colors('Н2')[0])
-        self.assertEqual(it.toolTip(rp.C_NAME), 'Н2 Работа (91) (своя отметка).')
-        it = self.item('Поход 2010\\Фото')
-        self.assertEqual(it.background(rp.C_NAME).color().name(), rp.SKIP_INH)
-        self.assertTrue(it.font(rp.C_NAME).strikeOut())
-        self.assertIn('(от папки «Поход 2010»)', it.toolTip(rp.C_NAME))
-        self.assertIn('НЕ СОХРАНЕНО', it.toolTip(rp.C_NAME))
-        # сброс в ячейку направления и снятие своей отметки ячейкой «Снять свою отметку»
-        self.p.cells['Н1'].drop_folders(['Поход 2010'])
-        self.assertEqual(m.route['Поход 2010\\Фото'].num, 'Н1')
-        self.assertEqual(self.item('Поход 2010\\Фото').background(rp.C_NAME).color().name(), rp.dir_colors('Н1')[1])
-        self.p.cells[INHERIT_KEY].drop_folders(['Поход 2010\\Монтаж'])
-        self.assertEqual(m.drafts['поход 2010\\монтаж']['verdict'], rp.INHERIT)
-        self.assertEqual(m.route['Поход 2010\\Монтаж'].num, 'Н1')
-        # весь носитель и служебная папка не принимаются
-        self.assertEqual(self.p.cells['Н2'].drop_folders(['', MOVED]), 0)
-        self.p.undo()
-        self.assertEqual(m.route['Поход 2010\\Монтаж'].num, 'Н2')
-        self.assertEqual(self.asked, [])
-
-    def test_cells_content_and_where(self):
-        import directions_page as dp
-        dp.save_choice(['Н1'])
-        self.mark(('', 'Н1'), ('Работа', 'Н2'), ('Друзья', 'не копировать'))
-        self.open()
-        self.assertEqual(list(self.p.cells), ['Н1', 'Н2', SKIP_KEY, INHERIT_KEY])  # Н2 - из-за отметок носителя
-        self.assertIn('Копирование: Н1 Семейный архив — диски 45 и 77 (два задания)', self.p.where.text())
-        P = self.plan()
-        c1 = self.p.cells['Н1'].body.text()
-        have = P.part_a[(rz.O_HAVE, 'Н1')]
-        self.assertIn(f'Уже есть на всех дисках направления: <b>{rp.gb(have[1])} ГБ', c1)
-        self.assertIn('<b>на 45</b>', c1)
-        self.assertIn('<b>на 77</b>', c1)
-        self.assertIn('диск не подключён — место не проверено', c1)
-        self.assertEqual(self.p.cells['Н1'].state, 'unknown')
-        self.assertIn('Не отмечено в «Обзоре»', self.p.cells['Н2'].body.text())
-        self.assertIn('Отмечено: <b>', self.p.cells[SKIP_KEY].body.text())
-        self.assertTrue(self.p.cells['Н1'].btn.isEnabled())
-        self.assertTrue(self.p.tasks_btn.isEnabled())
-        dp.save_choice([])
-        self.p.use_choice()
-        self.assertFalse(self.p.tasks_btn.isEnabled())                          # пустой «Обзор» - общая кнопка нет
-        self.assertIn('не отмечено ни одного направления', self.p.where.text())
-
-
 class CapacityTest(PageBase):
     def test_capacity_math(self):
         G = 1024 ** 3
@@ -539,8 +703,8 @@ class CapacityTest(PageBase):
         self.assertEqual(sv.capacity({'HDD45': [1, G]}, {'HDD45': ('F:', 4 * G, 100 * G, 4096)})['HDD45']['state'], 'ok')
 
     def test_short_disk_turns_cell_red_and_blocks_direction(self):
-        """Не помещается на 45 (на 77 место неизвестно) - ячейка Н1 красная, её кнопка неактивна; общая подготовка
-        создаёт задания только Н2, у Н1 - ни на 45, ни на 77."""
+        """Не помещается на 45 (на 77 место неизвестно) - ячейка «Копировать на диски» красная, кнопка неактивна;
+        другой диск назначения (Н2) - задания создаются, у Н1 - ни на 45, ни на 77."""
         import directions_page as dp
         dp.save_choice(['Н1', 'Н2'])
         self.mark(('', 'Н1'), ('Работа', 'Н2'))
@@ -549,18 +713,23 @@ class CapacityTest(PageBase):
                 mock.patch.object(sv, 'toc_check', lambda *a, **k: TOC_OK):
             self.open()
             self.plan()
-            c = self.p.cells['Н1']
+            c = self.p.copy_cell
+            self.assertEqual(self.p.dest, 'Н1')
             self.assertEqual(c.state, 'short')
             self.assertIn('не помещается', c.body.text())
             self.assertFalse(c.btn.isEnabled())
-            self.assertTrue(self.p.cells['Н2'].btn.isEnabled())
-            self.assertIn('Не помещаются (заданий не будет): Н1', self.p.tasks_btn.toolTip())
-            self.p.prepare()
+            self.assertIn('снимите галочки', c.btn.toolTip())
+            self.p.prepare(['Н1', 'Н2'])                                         # Н1 исключается целиком
             self.assertTrue(wait(lambda: not self.p.writing and hb.TASKS.exists() and
                                  any(x.name.startswith(SRC) for x in hb.TASKS.iterdir()), 60), self.asked)
+            self.p.set_dest('Н2')
+            self.assertNotEqual(self.p.copy_cell.state, 'short')
         made = sorted(x.name for x in hb.TASKS.iterdir() if x.name.startswith(SRC))
         self.assertEqual(made, [f'{SRC} — Работа — Работа'])
         self.assertIn('Семейный архив не помещается', self.dialogs[0])
+        self.assertIn('Снимите галочки у части папок', self.dialogs[0])
+        self.assertTrue(any('Задания на копирование' in x for x in self.asked), self.asked)
+        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания на копирование'))
 
 
 class TocTest(PageBase):
@@ -686,18 +855,23 @@ class Review6Test(PageBase):
         self.assertEqual((cap['HDD92']['state'], cap['HDD92']['free']), ('none', None))      # нечего, не подключён
         d = sv.directions()['Н1']
         P = types.SimpleNamespace(part_a={}, disk=SRC)
-        html_, state = rp.dir_cell_html(d, P, cap, True, str)
-        self.assertIn('<b>на 45</b>: копировать', html_)
-        self.assertIn('помещается', html_)
-        self.assertIn('<b>на 77</b>: копировать', html_)
-        self.assertIn('диск не подключён — место не проверено', html_)
+        name = {'HDD45': 'F: Бэкап', 'HDD77': 'Путешествия (не подключён)'}.get
+        html_, state = rp.dest_cell_html(d, P, cap, rp.ONLY, 0, 0, name)
+        self.assertIn('Копировать на диск F: Бэкап (HDD45): <b>1,0 ГБ</b>', html_)
+        self.assertIn('помещается: свободно 500,0 ГБ', html_)
+        self.assertIn('Копировать на диск Путешествия (не подключён) (HDD77): <b>1,0 ГБ</b>', html_)
+        self.assertIn('место не проверено (диск не подключён)', html_)
         self.assertEqual(state, 'unknown')
         cap2 = sv.capacity({}, space, {}, disks=['HDD45', 'HDD77'])
-        html_, state = rp.dir_cell_html(d, P, cap2, True, str)
-        self.assertIn('<b>на 45</b>: копировать нечего · свободно 500,0 ГБ', html_)
-        self.assertIn('<b>на 77</b>: копировать нечего', html_)
+        html_, state = rp.dest_cell_html(d, P, cap2, rp.ONLY, 0, 0, name)
+        self.assertIn('Копировать на диск F: Бэкап (HDD45): копировать нечего', html_)
         self.assertNotIn('место не проверено', html_)
         self.assertEqual(state, 'ok')
+        cap3 = sv.capacity({'HDD45': [3, 600 * G]}, space, {}, disks=['HDD45', 'HDD77'])
+        html_, state = rp.dest_cell_html(d, P, cap3, rp.ONLY, 0, 0, name)
+        self.assertIn('не помещается: нужно', html_)
+        self.assertIn('свободно 500,0 ГБ', html_)
+        self.assertEqual(state, 'short')
         q = sv.capacity({'HDD45': [1, G]}, space, {'HDD45': [1, G, 10]})['HDD45']
         self.assertEqual(q['need'], G + 4096 + G + 10 * 4096)                   # кластер и на файлы очереди
 
@@ -718,7 +892,59 @@ class Review6Test(PageBase):
         self.assertEqual([(p['folder'], p['new']) for p in res['problems']], [('Поход 2010', 1)])
 
 
-SKIP_KEY, INHERIT_KEY = rp.SKIP, rp.INHERIT
+class Review8Test(PageBase):
+    """Проверка кода этапа 8 критиками: «Только выбранные» при носителе в другом направлении, «Все папки» снимает
+    только исключения внутри D, «кроме N папок» - свои исключения, «Ничего не отмечено», длинный текст списка."""
+
+    def test_only_with_carrier_in_other_direction_says_where_rest_goes(self):
+        self.mark(('', 'Н2'))
+        self.open()
+        self.p.set_dest('Н1')
+        self.p.toggle(['Поход 2010'], True)
+        self.p.mode_except.setChecked(True)
+        self.p.mode_only.setChecked(True)                                        # корень - снова сохранённый Н2
+        self.assertEqual(self.p.model.route[''].num, 'Н2')
+        P = self.plan()
+        stay = self.p.stay_cell.body.text()
+        self.assertIn('Остальное идёт в Н2 Работа (весь носитель)', stay)
+        v = [P.part_a.get((o, 'Н2'), (0, 0)) for o in (rz.O_COPY, rz.O_HAVE)]
+        self.assertIn(rp.files_word(v[0][0] + v[1][0]), stay)
+        self.assertIn('папки без галочки идут туда', self.p.mode_note.text())
+        self.p.set_dest('Н2')                                                    # для Н2 это «Все папки» - строки нет
+        self.assertNotIn('Остальное идёт', self.p.stay_cell.body.text())
+
+    def test_every_drops_only_exclusions_inside_dest(self):
+        self.mark(('Друзья', 'Н2'), ('Друзья\\Наши', 'не копировать'), ('Документы', 'не копировать'))
+        self.open()
+        self.assertEqual(self.p.dest, 'Н1')
+        self.p.mode_every.setChecked(True)
+        d = {k: x['verdict'] for k, x in self.p.model.drafts.items()}
+        self.assertEqual(d, {'': N1, 'документы': rp.INHERIT})                  # «Наши» внутри Н2 - не тронута
+        self.assertEqual(self.p.model.route['Друзья\\Наши'].state, rp.R_SKIP)
+        self.settle()
+
+    def test_except_counts_only_own_exclusions(self):
+        self.mark(('Смешанная', 'Н2'))
+        self.open()
+        self.p.mode_except.setChecked(True)
+        self.p.toggle(['Друзья'], True)
+        self.p.toggle(['Друзья\\Наши'], True)                                   # серая - не меняется
+        self.assertEqual(self.p.counts()[1], 1)                                  # Смешанная (Н2) и служебная - не «кроме»
+        self.plan()
+        self.assertIn('Отмечено: весь носитель, кроме 1 папки ·', self.p.copy_cell.body.text())
+
+    def test_nothing_marked_and_long_dest_text(self):
+        self.open()
+        self.plan()
+        self.assertIn('Ничего не отмечено — поставьте галочки у папок', self.p.copy_cell.body.text())
+        self.assertNotIn('Отмечено 0', self.p.copy_cell.body.text())
+        box = self.p.dest_box
+        longest = max(box.html_width(box.itemData(i, rp.Qt.UserRole + 5)) for i in range(box.count()))
+        self.assertGreaterEqual(box.view().minimumWidth(), longest)              # список во всю ширину пункта
+        box.setMinimumWidth(0)
+        box.setFixedWidth(160)                                                   # закрытое поле узкое - «…»
+        box.grab()
+        self.assertEqual(box.toolTip(), box.currentText())
 
 
 if __name__ == '__main__':

@@ -28,6 +28,14 @@ service.add_marks_batch. «Подготовить задания» - расчё�
 носителей); не помещается - ячейка красная, её кнопка «Подготовить задания» неактивна. Перед созданием заданий - быстрая
 сверка оглавления подключённого носителя с описью (service.toc_check); расхождение или носитель не подключён - задания
 не создаются, предлагается «Пересканировать эти папки…».
+
+Этап 8 (16.11.2026, макет владельца, документ - раздел «Этап 8»): вверху - выбранный диск назначения («Диск «Фильмы» —
+I: My Book (WD 2 ТБ)»); «Выберите носитель»; «Диск назначения» (направление с диском, имя оранжевым) и три режима:
+«Только выбранные папки» (корень ≠ D), «Все папки» и «Все, кроме выбранных» (корень = D). Колонка галочек слева -
+вид отметок для D (Model.check): включить - Model.include_pairs, исключить - Model.exclude_pairs; несколько выделенных -
+одним шагом отмены. Папка другого направления - пустая галочка и серая метка «Н2». Справа две ячейки: «Копировать на
+диск …» (единственная цель перетаскивания, бросок = включить в D) и «Остаётся на носителе» (только сведения). Ядро и путь
+записи отметок не менялись.
 """
 import collections
 import html
@@ -35,11 +43,12 @@ import json
 import time
 import traceback
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPalette, QTextDocument
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox, QDialog, QFrame, QGroupBox, QHBoxLayout,
-                               QHeaderView, QLabel, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea,
-                               QSplitter, QTabWidget, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QHeaderView, QLabel, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSplitter,
+                               QStyle, QStyledItemDelegate, QStyleOptionComboBox, QStylePainter, QTabWidget,
+                               QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from hb_core import api as hb
 from hb_core import razbor as rz
@@ -53,8 +62,15 @@ TITLE = 'Архив дисков'
 SEP = '\\'
 ROLE = Qt.UserRole
 FILLED = Qt.UserRole + 1                                  # дети узла созданы (дерево ленивое)
-C_NAME, C_FILES, C_GB, C_PHOTO, C_VIDEO, C_OTHER, C_HAVE = range(7)
-HEAD = ['Папка', 'Файлов', 'ГБ', 'Фото', 'Видео', 'Прочее', 'Уже есть']
+TAG_ROLE = Qt.UserRole + 2                                # «Н2» - папка отмечена для другого направления
+GRAY_ROLE = Qt.UserRole + 3                               # серая (неактивная) галочка
+C_CHECK, C_NAME, C_FILES, C_GB, C_PHOTO, C_VIDEO, C_OTHER, C_HAVE = range(8)
+HEAD = ['', 'Папка', 'Файлов', 'ГБ', 'Фото', 'Видео', 'Прочее', 'Уже есть']
+ONLY, EVERY, EXCEPT = 'only', 'all', 'except'             # режимы для диска назначения
+MODE_TEXT = {ONLY: 'Только выбранные папки', EVERY: 'Все папки', EXCEPT: 'Все, кроме выбранных'}
+SEL_BG, PALE = '#c8e6c9', '#9e9e9e'                        # один зелёный фон для выбранных; бледный текст унаследованных
+HEAD_BG = '#e8f5e9'
+JOURNAL = 'по журналу сканирования дисков'
 GRAY, BLUE, BLUE2, ORANGE, RED, GREEN = '#757575', '#1565c0', '#5c6bc0', '#e65100', '#c62828', '#2e7d32'
 INHERIT, SKIP = hb.MARK_INHERIT, hb.MARK_SKIP
 DEBOUNCE_MS = 600
@@ -98,6 +114,188 @@ def safe(fn, *a):
         return 'refused', str(e)
     except Exception:                                      # noqa: BLE001
         return 'error', traceback.format_exc()
+
+
+def plural(n, one, few, many):
+    n = abs(n or 0)
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def folders_word(n):
+    return f'{num(n)} {plural(n, "папка", "папки", "папок")}'
+
+
+def files_word(n):
+    return f'{num(n)} {plural(n, "файл", "файла", "файлов")}'
+
+
+# ---------- тексты носителей и дисков назначения (этап 8) ----------
+
+def place(row, disk=''):
+    """«F: Монтаж - SN850 (2 ТБ)»; неподключённый - «Монтаж - SN850 (2 ТБ) (не подключён)»; носителя нет в базе - номер."""
+    if not row:
+        return f'{disk} (не подключён)'
+    title = disk_ui.disk_title(row) or row.get('disk', disk)
+    return f'{row["letter"]} {title}' if row.get('letter') else f'{title} (не подключён)'
+
+
+def carrier_text(row):
+    """Строка списка «Выберите носитель»: «F: Монтаж - SN850 (2 ТБ) — HDD09 (по журналу сканирования дисков)»."""
+    r = disk_ui.as_row(row)
+    return f'{place(r)} — {r["disk"]} ({JOURNAL})'
+
+
+def hdds(d):
+    return ' и '.join(d.disks)
+
+
+def dest_places(d, rows):
+    by = {r['disk']: r for r in rows}
+    return ' и '.join(place(by.get(x), x) for x in d.disks)
+
+
+def dest_text(d, rows):
+    """Строка списка «Диск назначения»: «I: My Book (WD 2 ТБ) — Н3 Фильмы — HDD55 (по журналу сканирования дисков)»."""
+    return f'{dest_places(d, rows)} — {d.num} {d.name} — {hdds(d)} ({JOURNAL})'
+
+
+def dest_html(d, rows):
+    """То же с именем направления оранжевым (как отмеченные в «Обзоре»)."""
+    return (f'{esc(dest_places(d, rows))} — <span style="color:{ORANGE}"><b>{esc(d.num)} {esc(d.name)}</b></span> — '
+            f'{esc(hdds(d))} <span style="color:{GRAY}">({JOURNAL})</span>')
+
+
+def head_html(d, rows, space=None):
+    """Крупный заголовок экрана: «Диск «Фильмы» — I: My Book (WD 2 ТБ)» и мелко «Н3 = диск HDD55 по журналу
+    сканирования дисков · свободно 421 ГБ» (у двух дисков - оба, «два задания»)."""
+    if d is None:
+        return (f'<span style="color:{ORANGE}">Диска назначения нет: ни у одного направления не назначен диск.</span> '
+                '<span style="font-size:10pt; font-weight:normal">Назначьте диск в «Обзоре» → «Направления».</span>')
+    space = space or {}
+    word = 'диски' if len(d.disks) > 1 else 'диск'
+    free = []
+    for x in d.disks:
+        if x in space:
+            free.append(f'{x} — {gb(space[x][1])} ГБ' if len(d.disks) > 1 else f'{gb(space[x][1])} ГБ')
+    sub = f'{esc(d.num)} = {word} {esc(hdds(d))} {JOURNAL}'
+    if free:
+        sub += ' · свободно ' + esc(', '.join(free))
+    if len(d.disks) > 1:
+        sub += ' · ' + COUNT_WORDS.get(len(d.disks), f'{len(d.disks)} заданий')
+    return (f'Диск «<span style="color:{ORANGE}">{esc(d.name)}</span>» — {esc(dest_places(d, rows))}<br>'
+            f'<span style="font-size:10pt; font-weight:normal; color:#33691e">{sub}</span>')
+
+
+class HtmlDelegate(QStyledItemDelegate):
+    """Пункт выпадающего списка «Диск назначения» с HTML (имя направления оранжевым)."""
+
+    def paint(self, painter, option, index):
+        html_ = index.data(Qt.UserRole + 5)
+        if not html_:
+            return super().paint(painter, option, index)
+        self.initStyleOption(option, index)
+        option.text = ''
+        st = option.widget.style() if option.widget else None
+        if st:
+            st.drawControl(QStyle.CE_ItemViewItem, option, painter, option.widget)
+        doc = QTextDocument()
+        doc.setDefaultFont(option.font)
+        doc.setHtml(html_)
+        painter.save()
+        painter.translate(option.rect.left() + 4, option.rect.top() + (option.rect.height() - doc.size().height()) / 2)
+        doc.drawContents(painter, QRectF(0, 0, option.rect.width() - 8, option.rect.height()))
+        painter.restore()
+
+    def sizeHint(self, option, index):                       # noqa: N802
+        s = super().sizeHint(option, index)
+        return QSize(s.width(), max(s.height(), 24))
+
+
+class RichCombo(QComboBox):
+    """Выпадающий список, у которого и пункты, и закрытое поле рисуются HTML (Qt.UserRole + 5); текст пункта - простой
+    (для поиска и тестов)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setItemDelegate(HtmlDelegate(self))
+
+    def add(self, text, html_, data):
+        self.addItem(text, data)
+        self.setItemData(self.count() - 1, html_, Qt.UserRole + 5)
+        need = max(self.html_width(self.itemData(i, Qt.UserRole + 5)) for i in range(self.count())) + 40
+        self.view().setMinimumWidth(need)            # выпадающий список - во всю ширину самого длинного пункта
+        self.setMinimumWidth(min(max(need + 30, 560), 1000))   # закрытое поле - по тексту, «…» только если окно узкое
+
+    def html_width(self, html_):
+        doc = QTextDocument()
+        doc.setDefaultFont(self.font())
+        doc.setHtml(html_ or '')
+        return int(doc.idealWidth()) + 8
+
+    def current_html(self):
+        return self.itemData(self.currentIndex(), Qt.UserRole + 5) if self.currentIndex() >= 0 else ''
+
+    def paintEvent(self, e):                                  # noqa: N802
+        html_ = self.current_html()
+        if not html_:
+            return super().paintEvent(e)
+        p = QStylePainter(self)
+        opt = QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        opt.currentText = ''
+        p.drawComplexControl(QStyle.CC_ComboBox, opt)
+        r = self.style().subControlRect(QStyle.CC_ComboBox, opt, QStyle.SC_ComboBoxEditField, self)
+        doc = QTextDocument()
+        doc.setDefaultFont(self.font())
+        doc.setHtml(html_ if self.isEnabled() else f'<span style="color:{GRAY}">{esc(self.currentText())}</span>')
+        if doc.idealWidth() > r.width() - 4:          # не влезает - одной строкой с «…» (весь текст - в подсказке)
+            text = QFontMetrics(self.font()).elidedText(self.currentText(), Qt.ElideRight, r.width() - 6)
+            doc.setHtml(f'<span style="color:{"#000" if self.isEnabled() else GRAY}">{esc(text)}</span>')
+        self.setToolTip(self.currentText())
+        p.save()
+        p.setClipRect(r)
+        p.translate(r.left() + 2, r.top() + (r.height() - doc.size().height()) / 2)
+        doc.drawContents(p, QRectF(0, 0, r.width(), r.height()))
+        p.restore()
+
+
+class TreeDelegate(QStyledItemDelegate):
+    """Колонка галочек: серая (неактивная) галочка - у папок, выбранных вместе с родителем. Колонка имени: мелкая серая
+    метка «Н2» справа от имени - папка отмечена для другого направления."""
+
+    def initStyleOption(self, option, index):                 # noqa: N802
+        super().initStyleOption(option, index)
+        if index.column() == C_CHECK and index.data(GRAY_ROLE):
+            option.state &= ~QStyle.State_Enabled
+            option.palette.setColor(QPalette.Text, QColor(PALE))
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        tag = index.data(TAG_ROLE) if index.column() == C_NAME else None
+        if not tag:
+            return
+        opt = option.__class__(option)
+        self.initStyleOption(opt, index)
+        st = opt.widget.style() if opt.widget else None
+        r = st.subElementRect(QStyle.SE_ItemViewItemText, opt, opt.widget) if st else opt.rect
+        x = r.left() + QFontMetrics(opt.font).horizontalAdvance(opt.text) + 10
+        f = QFont(opt.font)
+        f.setPointSizeF(max(6.0, f.pointSizeF() * 0.8))
+        painter.save()
+        painter.setFont(f)
+        painter.setPen(QColor(GRAY))
+        painter.drawText(x, r.top(), 60, r.height(), Qt.AlignVCenter | Qt.AlignLeft, tag)
+        painter.restore()
+
+    def sizeHint(self, option, index):                       # noqa: N802
+        s = super().sizeHint(option, index)
+        if index.column() == C_NAME and index.data(TAG_ROLE):
+            s.setWidth(s.width() + 40)
+        return s
 
 
 # ---------- модель без Qt: папки, отметки, маршрут, черновик ----------
@@ -208,9 +406,13 @@ class Model:
 
     def set_mark(self, folders, verdict):
         """Черновая отметка папок (физические пути; '' - весь носитель). -> сколько записей черновика изменилось."""
+        return self.set_marks([(f, verdict) for f in folders])
+
+    def set_marks(self, pairs):
+        """Несколько черновых отметок одним шагом «Отменить последнее»: [(физический путь, решение)]."""
         self.push_undo()
         changed = 0
-        for f in folders:
+        for f, verdict in pairs:
             if f and not self.markable(f):
                 continue
             o = self.orig(f)
@@ -253,6 +455,155 @@ class Model:
         if m.kind == R_SKIP:
             return SKIP
         return None
+
+    # --- галочки диска назначения (этап 8): галочка - вид отметок, не отдельное хранилище ---
+    def own_mark(self, f):
+        """Своя действующая (с черновиком) отметка папки; '' - отметка всего носителя. None - своей нет."""
+        return self.full_ms.get(self.orig(f) if f else '')
+
+    @staticmethod
+    def is_dir(r, num):
+        return r is not None and r.state == R_DIR and r.num == num
+
+    def ancestors(self, f):
+        while f:
+            f = hb.parent_of(f)
+            yield f
+
+    def parent_is(self, f, num, pending):
+        """Идёт ли родитель папки f в направление num с учётом ещё не применённых изменений пакета pending
+        {исходный путь (нижний регистр): решение}. Правила - те же, что Model.routes: служебная папка переноса - не
+        направление; самая глубокая своя отметка решает."""
+        for a in self.ancestors(f):
+            if self.is_service(a):
+                return False
+            key = self.orig(a).lower() if a else ''
+            if key in pending:
+                v = pending[key]
+                if v == INHERIT:
+                    continue
+                kind, n = hb.parse_verdict(v, self.dirs)[:2]
+                return kind == R_DIR and n == num
+            if self.full_ms.by_key.get(key) is not None:
+                return self.is_dir(self.route.get(a), num)
+        return False
+
+    def own_after(self, f, pending):
+        """(вид, номер) своей отметки папки с учётом пакета; None - своей нет."""
+        key = self.orig(f).lower()
+        if key in pending:
+            v = pending[key]
+            return None if v == INHERIT else hb.parse_verdict(v, self.dirs)[:2]
+        m = self.full_ms.by_key.get(key)
+        return None if m is None else (m.kind, m.num)
+
+    def include_pairs(self, folders, num, pending=None):
+        """«Сделать D» (галочка в «Только выбранные»/«Все папки», бросок в ячейку, снятие исключения): родитель уже
+        идёт в D - своя отметка снимается; иначе своя отметка = D. Папки по порядку от мелких путей к глубоким, родитель
+        считается с уже сделанными изменениями пакета. -> [(физический путь, решение)]."""
+        d = self.dirs.get(num)
+        if d is None:
+            return []
+        pending = {} if pending is None else pending
+        out = []
+        for f in sorted({f for f in folders if f and self.markable(f)}, key=lambda x: (x.count(SEP), x.lower())):
+            key = self.orig(f).lower()
+            own = self.own_after(f, pending)
+            if self.parent_is(f, num, pending):
+                v = None if own is None or own == (R_DIR, num) else INHERIT
+            else:
+                v = None if own == (R_DIR, num) else d.verdict()
+            if v is not None:
+                pending[key] = v
+                out.append((f, v))
+        return out
+
+    def exclude_pairs(self, folders, num, pending=None):
+        """«Сделать не D» (снять галочку; галочка в «Все, кроме выбранных»): своя отметка D при родителе не в D -
+        снимается («как у родителя»); иначе - «не копировать». Папка и так не идёт в D - ничего."""
+        pending = {} if pending is None else pending
+        out = []
+        for f in sorted({f for f in folders if f and self.markable(f)}, key=lambda x: (x.count(SEP), x.lower())):
+            key = self.orig(f).lower()
+            own = self.own_after(f, pending)
+            par = self.parent_is(f, num, pending)
+            cur = own == (R_DIR, num) if own is not None else par
+            if not cur:
+                continue
+            v = INHERIT if own is not None and not par else SKIP
+            pending[key] = v
+            out.append((f, v))
+        return out
+
+    def check(self, f, num, mode):
+        """Галочка папки для направления num в режиме mode ('only'/'all'/'except'). -> None (весь носитель, служебная
+        папка - галочки нет) или dict(on, gray - унаследовано/менять нельзя, checkable, tag - «Н2» у своей отметки другого
+        направления, tip)."""
+        if not f or not self.markable(f):
+            return None
+        r = self.route[f]
+        own = self.own_mark(f)
+        tag, tip = '', ''
+        if own is not None and own.kind == R_DIR and own.num != num:
+            d = self.dirs.get(own.num)
+            tag = own.num
+            tip = f'Папка отмечена для «{own.num} {d.name if d else ""}» ({hb.disk_nums(d.disks) if d and d.disks else "диск не назначен"}).'
+        elif r.state == R_DIR and r.num != num:
+            d = self.dirs.get(r.num)
+            src = 'всего носителя' if r.mark is not None and r.mark.path == '' else f'папки «{r.mark.path}»' if r.mark else ''
+            tip = f'Идёт в «{r.num} {d.name if d else ""}» (от {src}).'
+        if mode == 'except':
+            on = r.state == R_SKIP
+            own_skip = own is not None and own.kind == R_SKIP
+            gray = on and not own_skip
+            checkable = not gray and (self.is_dir(r, num) or own_skip)
+            if tag or (r.state == R_DIR and r.num != num):
+                tip += (' В режиме «Все, кроме выбранных» галочка значит «исключить»; чтобы копировать эту папку на '
+                        'этот диск, перетащите её в ячейку «Копировать на диск» справа.')
+            elif gray:
+                tip = 'Исключена вместе с родительской папкой.'
+        else:
+            on = self.is_dir(r, num)
+            gray = on and not (own is not None and own.kind == R_DIR and own.num == num)
+            checkable = not gray
+            if tag:
+                tip += ' Поставьте галочку — отметка перейдёт на этот диск назначения.'
+            elif gray:
+                tip = ('Выбрана вместе с родительской папкой.' if r.mark is not None and r.mark.path
+                       else 'Выбрана вместе со всем носителем.')
+        return dict(on=on, gray=gray, checkable=checkable, tag=tag, tip=tip.strip())
+
+    def own_skips(self):
+        """Свои «не копировать» у папок (без всего носителя): [физический путь]."""
+        return [self.aliases[k][0] for k, m in self.full_ms.by_key.items()
+                if k and m.kind == R_SKIP and self.aliases.get(k)]
+
+    def skips_back_to(self, num, pending=None):
+        """Свои «не копировать», снятие которых вернёт папку в направление num (родительская цепочка - в num, с учётом
+        пакета pending, например новой отметки всего носителя). Исключения внутри веток других направлений - нет."""
+        pending = dict(pending or {})
+        out = []
+        for f in sorted(self.own_skips(), key=lambda x: (x.count(SEP), x.lower())):
+            if self.parent_is(f, num, pending):
+                pending[self.orig(f).lower()] = INHERIT
+                out.append(f)
+        return out
+
+    def own_excluded(self, num):
+        """Сколько папок исключил владелец из num: своя «не копировать» при родителе, идущем в num."""
+        return len([f for f in self.own_skips() if self.parent_is(f, num, {})])
+
+    def tops(self, pick):
+        """Сколько «верхних» папок с признаком pick(маршрут): у самой признак есть, у родителя - нет (у верхних папок
+        носителя родитель - весь носитель, его признак не считается). Служебные и уже перенесённые не считаются."""
+        n = 0
+        for f in self.order:
+            if not f or self.is_service(f) or (self.route[f].moved and self.route[f].state != R_DIR):
+                continue
+            p = hb.parent_of(f)
+            if pick(self.route[f]) and (not p or self.is_service(p) or not pick(self.route[p])):
+                n += 1
+        return n
 
     # --- показ ---
     def label(self, r):
@@ -474,6 +825,17 @@ class DragTree(QTreeWidget):
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragOnly)
         self.setDefaultDropAction(Qt.CopyAction)
+        self.press_sel = None                                 # выделение в момент нажатия мыши (до сброса его Qt)
+
+    def mousePressEvent(self, e):                             # noqa: N802
+        """Qt сбрасывает выделение до переключения галочки: запоминаем, что было выделено, - щелчок по галочке одной из
+        выделенных папок ставит/снимает галочки у всех выделенных."""
+        self.press_sel = [it.data(C_NAME, ROLE) for it in self.selectedItems()]
+        super().mousePressEvent(e)
+
+    def take_press_sel(self):
+        sel, self.press_sel = self.press_sel, None
+        return sel
 
     def mimeTypes(self):                                      # noqa: N802
         return [MIME]
@@ -487,15 +849,15 @@ class DragTree(QTreeWidget):
 
 
 class Cell(QFrame):
-    """Ячейка справа: направление (verdict - «направление: Н2 …»), «Не копировать» (SKIP) или «Снять свою отметку»
-    (INHERIT). Сброс папок = черновая отметка через page.drop (тот же путь, что меню и «Применить к выделенным»)."""
+    """Ячейка справа (этап 8): «Копировать на диск …» (drop=True - единственная цель перетаскивания: бросок = включить
+    папки в диск назначения, page.drop) или «Остаётся на носителе» (drop=False - только сведения)."""
 
-    def __init__(self, page, verdict, num=None):
+    def __init__(self, page, drop):
         super().__init__()
-        self.page, self.verdict, self.num = page, verdict, num
-        self.setAcceptDrops(True)
+        self.page, self.drop_ok = page, drop
+        self.setAcceptDrops(drop)
         self.setFrameShape(QFrame.StyledPanel)
-        self.setMinimumHeight(70 if verdict == INHERIT else 150)
+        self.setMinimumHeight(180 if drop else 90)
         lay = QVBoxLayout(self)
         self.title = QLabel('')
         f = QFont()
@@ -504,14 +866,18 @@ class Cell(QFrame):
         self.title.setFont(f)
         self.title.setWordWrap(True)
         lay.addWidget(self.title)
+        self.sub = QLabel('')
+        self.sub.setStyleSheet(f'color:{GRAY}')
+        self.sub.setWordWrap(True)
+        lay.addWidget(self.sub)
         self.body = QLabel('')
         self.body.setWordWrap(True)
         self.body.setTextFormat(Qt.RichText)
         lay.addWidget(self.body, 1)
         self.btn = None
-        if num is not None:
+        if drop:
             self.btn = QPushButton('Подготовить задания…')
-            self.btn.clicked.connect(lambda: page.prepare([num]))
+            self.btn.clicked.connect(lambda: page.prepare())
             lay.addWidget(self.btn, 0, Qt.AlignRight)
         self.state = 'normal'
 
@@ -520,7 +886,7 @@ class Cell(QFrame):
         self.setStyleSheet(f'Cell {{ border: 2px solid {border}; border-radius: 6px; background: {bg}; }}')
 
     def dragEnterEvent(self, e):                              # noqa: N802
-        if e.mimeData().hasFormat(MIME):
+        if self.drop_ok and e.mimeData().hasFormat(MIME):
             e.acceptProposedAction()
         else:
             e.ignore()
@@ -529,7 +895,7 @@ class Cell(QFrame):
         self.dragEnterEvent(e)
 
     def dropEvent(self, e):                                   # noqa: N802
-        folders = mime_folders(e.mimeData())
+        folders = mime_folders(e.mimeData()) if self.drop_ok else []
         if folders:
             e.acceptProposedAction()
             QTimer.singleShot(0, lambda: self.drop_folders(folders))
@@ -538,7 +904,7 @@ class Cell(QFrame):
 
     def drop_folders(self, folders):
         """Обработчик сброса (вызывается и из тестов напрямую)."""
-        return self.page.drop(self.verdict, folders)
+        return self.page.drop(folders) if self.drop_ok else 0
 
 
 class CloseGuard(QObject):
@@ -693,97 +1059,99 @@ class RazborPage(QWidget):
         self.plan_rev = -1                                # его ревизия (равна self.rev - итог актуален)
         self.loading = None                               # носитель, данные которого читаются
         self.want_choice = True                           # поставить в списки направление, отмеченное в «Обзоре»
-        self.cells = {}                                   # номер направления / SKIP / INHERIT -> Cell
-        self.cell_order = []
+        self.dest = None                                  # номер направления - диска назначения
+        self.mode_pref = {}                               # (носитель, направление) -> выбранный владельцем EVERY/EXCEPT
+        self.painting = False                             # окно само ставит галочки - itemChanged не обрабатывать
         lay = QVBoxLayout(self)
-        # «Куда» - крупно, первым (этап 6, п. 1)
+        # 1. выбранный диск назначения - крупно, первым (этап 8)
         self.where = QLabel('')
         self.where.setWordWrap(True)
         self.where.setTextFormat(Qt.RichText)
-        self.where.setStyleSheet('font-size:15pt; font-weight:bold; color:#1b5e20; background:#f1f8e9; '
-                                 'border:1px solid #aed581; padding:8px')
+        self.where.setStyleSheet(f'font-size:15pt; font-weight:bold; color:#1b5e20; background:{HEAD_BG}; '
+                                 'border:1px solid #a5d6a7; border-radius:4px; padding:8px')
         lay.addWidget(self.where)
-        self.choice_line = self.where                     # прежнее имя (этап 5): строка выбора «Обзора»
+        self.choice_line = self.where                     # прежнее имя (этап 5)
+        # 2. «Выберите носитель»
+        top = QHBoxLayout()
+        lab = QLabel('<b>Выберите носитель:</b>')
+        top.addWidget(lab)
+        from commands_page import DiskCombo               # тот же список, что в «Командах»: подключённые сверху
+        self.disk_box = DiskCombo(optional=False, text_fn=carrier_text)
+        self.disk_box.setMinimumWidth(460)
+        self.disk_box.currentIndexChanged.connect(self.disk_changed)
+        top.addWidget(self.disk_box)
+        self.info = QLabel('')
+        self.info.setStyleSheet(f'color:{GRAY}')
+        self.info.setWordWrap(True)
+        top.addWidget(self.info, 1)
+        b = QPushButton('Обновить')
+        b.clicked.connect(self.refresh)
+        top.addWidget(b)
+        lay.addLayout(top)
+        self.banner = QLabel('')
+        self.banner.setWordWrap(True)
+        self.banner.setStyleSheet(f'background:#fff3e0; color:{ORANGE}; padding:6px; border:1px solid #ffcc80')
+        self.banner.hide()
+        lay.addWidget(self.banner)
+        # 3. «Диск назначения» и режим
+        row = QHBoxLayout()
+        row.addWidget(QLabel('<b>Диск назначения:</b>'))
+        self.dest_box = RichCombo()
+        self.dest_box.setMinimumWidth(560)
+        self.dest_box.activated.connect(self.dest_changed)
+        row.addWidget(self.dest_box)
+        row.addStretch()
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addSpacing(20)
+        self.mode_only = QRadioButton(MODE_TEXT[ONLY])
+        self.mode_every = QRadioButton(MODE_TEXT[EVERY])
+        self.mode_except = QRadioButton(MODE_TEXT[EXCEPT])
+        self.mode_only.setToolTip('Копируются только папки с галочкой. Остальное остаётся на носителе (или идёт туда, '
+                                  'куда отмечен весь носитель).')
+        self.mode_every.setToolTip('Весь носитель - на этот диск. Исключения («не копировать») снимаются; папки, '
+                                   'отмеченные для другого диска, остаются за ним (метка «Н2»).')
+        self.mode_except.setToolTip('Весь носитель - на этот диск, кроме папок с галочкой: галочка здесь значит '
+                                    '«не копировать».')
+        self.mode_group = QButtonGroup(self)
+        self.mode_btn = {ONLY: self.mode_only, EVERY: self.mode_every, EXCEPT: self.mode_except}
+        for k, w in self.mode_btn.items():
+            self.mode_group.addButton(w)
+            w.toggled.connect(lambda on, k=k: on and self.mode_changed(k))
+            row.addWidget(w)
+            row.addSpacing(16)
+        self.mode_hint = QLabel('')
+        self.mode_hint.setStyleSheet(f'color:{BLUE}')
+        row.addWidget(self.mode_hint)
+        row.addStretch()
+        lay.addLayout(row)
         self.mode_note = QLabel('')
         self.mode_note.setWordWrap(True)
         self.mode_note.setStyleSheet(f'color:{ORANGE}')
         self.mode_note.hide()
         lay.addWidget(self.mode_note)
-        # «Разбор носителя» - носитель и режим
-        g0 = QGroupBox('Разбор носителя')
-        l0 = QVBoxLayout(g0)
-        top = QHBoxLayout()
-        top.addWidget(QLabel('Носитель:'))
-        from commands_page import DiskCombo               # тот же список, что в «Командах»: подключённые сверху
-        self.disk_box = DiskCombo(optional=False)
-        self.disk_box.setMinimumWidth(380)
-        self.disk_box.currentIndexChanged.connect(self.disk_changed)
-        top.addWidget(self.disk_box)
-        self.info = QLabel('')
-        self.info.setStyleSheet(f'color:{GRAY}')
-        top.addWidget(self.info, 1)
-        b = QPushButton('Обновить')
-        b.clicked.connect(self.refresh)
-        top.addWidget(b)
-        l0.addLayout(top)
-        self.banner = QLabel('')
-        self.banner.setWordWrap(True)
-        self.banner.setStyleSheet(f'background:#fff3e0; color:{ORANGE}; padding:6px; border:1px solid #ffcc80')
-        self.banner.hide()
-        l0.addWidget(self.banner)
-        l1 = QHBoxLayout()
-        l1.addWidget(QLabel('Весь носитель:'))
-        self.mode_all = QRadioButton('Всё — в')
-        self.mode_dir = QComboBox()
-        self.mode_dir.setMinimumWidth(240)
-        self.mode_none = QRadioButton('Ничего, кроме отмеченных папок')
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.addButton(self.mode_all)
-        self.mode_group.addButton(self.mode_none)
-        self.mode_all.toggled.connect(lambda on: on and self.mode_changed())
-        self.mode_none.toggled.connect(lambda on: on and self.mode_changed())
-        self.mode_dir.activated.connect(lambda _i: self.mode_all.isChecked() and self.mode_changed())
-        l1.addWidget(self.mode_all)
-        l1.addWidget(self.mode_dir)
-        l1.addWidget(QLabel(', кроме отмеченных папок'))
-        l1.addSpacing(30)
-        l1.addWidget(self.mode_none)
-        self.mode_hint = QLabel('')
-        self.mode_hint.setStyleSheet(f'color:{GRAY}')
-        l1.addWidget(self.mode_hint, 1)
-        l0.addLayout(l1)
-        lay.addWidget(g0)
-        # дерево слева, ячейки справа
+        # 4. дерево слева, ячейки справа
         split = QSplitter(Qt.Horizontal)
-        g2 = QGroupBox('Папки носителя — перетащите папку мышью в ячейку справа (отметка действует на подпапки, '
-                       'пока у подпапки нет своей)')
+        g2 = QWidget()
         l2 = QVBoxLayout(g2)
-        row = QHBoxLayout()
-        self.sel_label = QLabel('Выделено папок: 0.')
-        row.addWidget(self.sel_label)
-        row.addWidget(QLabel('Куда:'))
-        self.apply_box = QComboBox()
-        self.apply_box.setMinimumWidth(240)
-        row.addWidget(self.apply_box)
-        self.apply_btn = QPushButton('Применить к выделенным')
-        self.apply_btn.clicked.connect(self.apply_selected)
-        row.addWidget(self.apply_btn)
-        self.unmark_btn = QPushButton('Снять отметку')
-        self.unmark_btn.setToolTip('Снять СВОЮ отметку с выделенных папок: они снова будут как родитель.')
-        self.unmark_btn.clicked.connect(lambda: self.apply(self.selected_folders(), INHERIT))
-        row.addWidget(self.unmark_btn)
-        row.addStretch()
-        l2.addLayout(row)
+        l2.setContentsMargins(0, 0, 0, 0)
+        self.tree_hint = QLabel('Поставьте галочки у нужных папок или перетащите папки в ячейку справа. Shift/Ctrl — '
+                                'несколько папок сразу.')
+        l2.addWidget(self.tree_hint)
         self.tree = DragTree(self)
         self.tree.setHeaderLabels(HEAD)
+        self.tree.setTreePosition(C_NAME)                 # галочки - ровной колонкой слева, ветви дерева - у имени
+        self.tree.setItemDelegate(TreeDelegate(self.tree))
         hd = self.tree.header()
         hd.setSectionResizeMode(QHeaderView.Interactive)
         hd.setStretchLastSection(False)
+        self.tree.setColumnWidth(C_CHECK, 30)
         self.tree.setColumnWidth(C_NAME, 380)
         for c in range(C_FILES, C_HAVE + 1):                 # числа - по ширине (строк немного: дерево ленивое)
             hd.setSectionResizeMode(c, QHeaderView.ResizeToContents)
-        tips = {C_NAME: 'Цвет - куда идёт папка: своя отметка - ярко, от родителя - бледно, «не копировать» - серым и '
-                        'зачёркнуто. Наведите мышь на папку - подсказка. Перетащите папку в ячейку справа.',
+        tips = {C_CHECK: 'Галочка - папка выбрана для диска назначения (в режиме «Все, кроме выбранных» - исключена).',
+                C_NAME: 'Зелёный фон - выбранные папки. Наведите мышь на папку - подсказка. Перетащите папку в ячейку '
+                        '«Копировать на диск» справа.',
                 C_PHOTO: 'Число фото в папке с подпапками', C_VIDEO: 'Число видео в папке с подпапками',
                 C_OTHER: 'Документы, прочие файлы и мусор (Thumbs.db и т. п.)',
                 C_HAVE: 'Файлов с хешем, которые уже лежат на ВСЕХ дисках своего направления (по базе): их копировать '
@@ -795,16 +1163,16 @@ class RazborPage(QWidget):
         self.tree.setExpandsOnDoubleClick(True)
         self.tree.setUniformRowHeights(True)
         self.tree.itemExpanded.connect(self.expand)
-        self.tree.itemSelectionChanged.connect(self.selection_changed)
-        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self.menu)
+        self.tree.itemChanged.connect(self.item_changed)
         l2.addWidget(self.tree, 1)
-        hint = QLabel('Перетащите папку (или несколько, выделив их с Shift/Ctrl) в ячейку справа. Отметка подпапки '
-                      'сильнее отметки родителя. Снять отметку - ячейка «Снять свою отметку», кнопка «Снять отметку» '
-                      'или правая кнопка мыши. Несохранённое - курсивом с «•».')
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f'color:{GRAY}')
-        l2.addWidget(hint)
+        legend = QLabel(f'<span style="background:{SEL_BG}">&nbsp;зелёный фон&nbsp;</span> — папка выбрана; '
+                        f'<span style="color:{PALE}">бледный текст и серая галочка</span> — выбрана вместе с '
+                        f'родительской папкой; <span style="color:{GRAY}">Н2</span> — папка отмечена для другого '
+                        f'диска (поставьте галочку — перенесёте сюда); <i style="color:{BLUE}">• курсив</i> — не '
+                        'сохранено.')
+        legend.setWordWrap(True)
+        legend.setStyleSheet('font-size:8pt; color:#616161')
+        l2.addWidget(legend)
         split.addWidget(g2)
         right = QWidget()
         l3 = QVBoxLayout(right)
@@ -817,9 +1185,17 @@ class RazborPage(QWidget):
         scroll.setWidgetResizable(True)
         self.cells_box = QWidget()
         self.cells_lay = QVBoxLayout(self.cells_box)
+        self.copy_cell = Cell(self, True)
+        self.stay_cell = Cell(self, False)
+        self.stay_cell.title.setText('Остаётся на носителе (не копируется)')
+        self.stay_cell.sub.hide()
+        self.stay_cell.paint('#9e9e9e', '#fafafa')
+        self.cells_lay.addWidget(self.copy_cell)
+        self.cells_lay.addWidget(self.stay_cell)
         self.cells_lay.addStretch()
+        self.cells = {'copy': self.copy_cell, 'stay': self.stay_cell}
         scroll.setWidget(self.cells_box)
-        self.tabs.addTab(scroll, 'Куда идут папки')
+        self.tabs.addTab(scroll, 'Копирование')
         self.summary = QTextBrowser()
         self.tabs.addTab(self.summary, 'Подробно (что с каждым файлом)')
         l3.addWidget(self.tabs, 1)
@@ -840,16 +1216,11 @@ class RazborPage(QWidget):
         self.contested_btn.setToolTip('Где лежат файлы без хеша и неподтверждённые копии выделенной папки (или всего '
                                       'носителя); подключённые диски - пересканировать с хешем всех файлов.')
         self.contested_btn.clicked.connect(self.contested)
-        self.tasks_btn = QPushButton('Подготовить задания…')
-        self.tasks_btn.setToolTip('Задания копирования для направлений, отмеченных в «Обзоре» (кроме тех, что не '
-                                  'помещаются) - по СОХРАНЁННЫМ отметкам. Сначала - расчёт, сверка оглавления носителя и '
-                                  'показ; задания создаются после подтверждения.')
-        self.tasks_btn.clicked.connect(lambda: self.prepare())
+        self.tasks_btn = self.copy_cell.btn                # «Подготовить задания» - в ячейке «Копировать на диск»
         for w in (self.save_btn, self.undo_btn, self.discard_btn):
             bar.addWidget(w)
         bar.addStretch()
         bar.addWidget(self.contested_btn)
-        bar.addWidget(self.tasks_btn)
         lay.addLayout(bar)
         self.debounce = QTimer(self)
         self.debounce.setSingleShot(True)
@@ -948,8 +1319,7 @@ class RazborPage(QWidget):
             gen_changed = True
             self.rebuild_tree()
         self.show_disk_info()
-        self.sync_mode()
-        self.fill_choices()
+        self.fill_dest()
         need = self.direction_disks()
         if old_have and old_have[0] is not None and old_have[1] == need:
             self.model.set_have(*old_have)                 # прежние цифры видны, пока считаются новые
@@ -991,7 +1361,7 @@ class RazborPage(QWidget):
         self.tree.clear()
         self.items = {}
         m = self.model
-        root = QTreeWidgetItem([f'{self.disk} (весь носитель)'])
+        root = QTreeWidgetItem()
         root.setData(C_NAME, ROLE, '')
         root.setFlags(root.flags() & ~Qt.ItemIsDragEnabled)       # весь носитель - это режим, не перетаскивается
         self.tree.addTopLevelItem(root)
@@ -1014,7 +1384,7 @@ class RazborPage(QWidget):
         item.takeChildren()
         item.setData(C_NAME, FILLED, True)               # дети созданы
         for f in self.model.children.get(p, ()):
-            ch = QTreeWidgetItem([last(f)])
+            ch = QTreeWidgetItem()
             ch.setData(C_NAME, ROLE, f)
             for c in range(C_FILES, C_HAVE + 1):
                 ch.setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
@@ -1023,7 +1393,9 @@ class RazborPage(QWidget):
             self.items[f] = ch
             self.set_item(ch, f)
             if self.model.children.get(f):
-                ch.addChild(QTreeWidgetItem(['…']))
+                ph = QTreeWidgetItem()
+                ph.setText(C_NAME, '…')
+                ch.addChild(ph)
             item.addChild(ch)
 
     def expand(self, item):
@@ -1034,44 +1406,67 @@ class RazborPage(QWidget):
         m = self.model
         files, size, n, b = m.folders.get(f, (0, 0, (0,) * 5, (0,) * 5))
         lk = m.look(f)
+        ck = m.check(f, self.dest, self.mode()) if self.dest else None
         name = f'{self.disk} (весь носитель)' if not f else last(f)
-        it.setText(C_NAME, ('• ' if lk['dirty'] else '') + name)
-        it.setToolTip(C_NAME, lk['tip'])
-        font = QFont()
-        font.setItalic(bool(lk['dirty']))
-        font.setBold(not f or (lk['own'] and lk['kind'] in ('dir', 'skip')))
-        font.setStrikeOut(lk['kind'] == 'skip')
-        it.setFont(C_NAME, font)
-        bg = QBrush(QColor(lk['bg'])) if lk['bg'] else QBrush()
-        for c in range(C_NAME, C_HAVE + 1):
-            it.setBackground(c, bg)
-        if lk['dirty']:
-            color = BLUE
-        elif lk['kind'] in ('service', 'moved'):
-            color = GRAY
-        elif lk['kind'] == 'skip':
-            color = '#616161'
-        else:
-            color = None
-        it.setForeground(C_NAME, QBrush(QColor(color)) if color else QBrush())
-        it.setText(C_FILES, num(files))
-        it.setText(C_GB, gb(size))
-        it.setText(C_PHOTO, num(n[0]))
-        it.setText(C_VIDEO, num(n[1]))
-        it.setText(C_OTHER, num(n[2] + n[3] + n[4]))
-        it.setToolTip(C_GB, f'фото {gb(b[0])} ГБ, видео {gb(b[1])} ГБ, документы {gb(b[2])} ГБ, прочие {gb(b[3])} ГБ, '
-                            f'мусор {gb(b[4])} ГБ')
-        it.setToolTip(C_OTHER, f'документы {num(n[2])}, прочие {num(n[3])}, мусор {num(n[4])}')
-        if m.have_sub is None:
-            it.setText(C_HAVE, '…')
-            it.setToolTip(C_HAVE, 'Считаю, что уже есть на дисках направлений…')
-        else:
-            v = m.have_sub.get(f)
-            r = m.route.get(f)
-            with_disk = r is not None and r.state == R_DIR and m.dirs.get(r.num) is not None and m.dirs[r.num].disks
-            it.setText(C_HAVE, num(v[0]) if v else ('0' if with_disk else '—'))
-            it.setToolTip(C_HAVE, f'{num(v[0])} файлов, {gb(v[1])} ГБ уже есть на всех дисках своего направления (по '
-                                  'хешу)' if v else 'Ничего из этой папки на дисках направления по хешу не найдено.')
+        self.painting = True
+        try:
+            it.setText(C_NAME, ('• ' if lk['dirty'] else '') + name)
+            tip = lk['tip']
+            if ck and ck['tip']:
+                tip = ck['tip'] + ' ' + tip
+            it.setToolTip(C_NAME, tip)
+            font = QFont()
+            font.setItalic(bool(lk['dirty']))
+            font.setBold(not f or bool(ck and ck['on'] and not ck['gray']))
+            it.setFont(C_NAME, font)
+            flags = it.flags()
+            if ck is None:
+                it.setData(C_CHECK, Qt.CheckStateRole, None)
+                it.setFlags(flags & ~Qt.ItemIsUserCheckable)
+                it.setData(C_CHECK, GRAY_ROLE, False)
+                it.setData(C_NAME, TAG_ROLE, None)
+            else:
+                it.setFlags((flags | Qt.ItemIsUserCheckable) if ck['checkable'] else (flags & ~Qt.ItemIsUserCheckable))
+                it.setCheckState(C_CHECK, Qt.Checked if ck['on'] else Qt.Unchecked)
+                it.setData(C_CHECK, GRAY_ROLE, not ck['checkable'])
+                it.setToolTip(C_CHECK, ck['tip'] or ('Снять галочку' if ck['on'] else 'Поставить галочку'))
+                it.setData(C_NAME, TAG_ROLE, ck['tag'] or None)
+            on = bool(ck and ck['on'])
+            bg = QBrush(QColor(SEL_BG)) if on else QBrush()
+            for c in range(C_CHECK, C_HAVE + 1):
+                it.setBackground(c, bg)
+            if lk['dirty'] in ('own', 'drop'):
+                color = BLUE                              # своя несохранённая отметка
+            elif lk['kind'] in ('service', 'moved'):
+                color = GRAY
+            elif ck and ck['gray']:
+                color = PALE                              # выбрана вместе с родителем - бледно (курсив, если не сохранено)
+            elif lk['dirty']:
+                color = BLUE
+            else:
+                color = None
+            for c in range(C_NAME, C_HAVE + 1):
+                it.setForeground(c, QBrush(QColor(color)) if color and (c == C_NAME or color == PALE) else QBrush())
+            it.setText(C_FILES, num(files))
+            it.setText(C_GB, gb(size))
+            it.setText(C_PHOTO, num(n[0]))
+            it.setText(C_VIDEO, num(n[1]))
+            it.setText(C_OTHER, num(n[2] + n[3] + n[4]))
+            it.setToolTip(C_GB, f'фото {gb(b[0])} ГБ, видео {gb(b[1])} ГБ, документы {gb(b[2])} ГБ, прочие {gb(b[3])} ГБ, '
+                                f'мусор {gb(b[4])} ГБ')
+            it.setToolTip(C_OTHER, f'документы {num(n[2])}, прочие {num(n[3])}, мусор {num(n[4])}')
+            if m.have_sub is None:
+                it.setText(C_HAVE, '…')
+                it.setToolTip(C_HAVE, 'Считаю, что уже есть на дисках направлений…')
+            else:
+                v = m.have_sub.get(f)
+                r = m.route.get(f)
+                with_disk = r is not None and r.state == R_DIR and m.dirs.get(r.num) is not None and m.dirs[r.num].disks
+                it.setText(C_HAVE, num(v[0]) if v else ('0' if with_disk else '—'))
+                it.setToolTip(C_HAVE, f'{num(v[0])} файлов, {gb(v[1])} ГБ уже есть на всех дисках своего направления '
+                                      '(по хешу)' if v else 'Ничего из этой папки на дисках направления по хешу не найдено.')
+        finally:
+            self.painting = False
 
     def update_items(self):
         for f, it in self.items.items():
@@ -1079,257 +1474,295 @@ class RazborPage(QWidget):
                 self.set_item(it, f)
         self.render_cells()
 
-    # ---------- отметки ----------
-    def choices(self):
-        m = self.model
-        res = [(d.label(), d.verdict()) for d in m.dirs.values()] if m else []
-        return res + [('не копировать', SKIP), ('снять свою отметку (как у родителя)', INHERIT)]
-
+    # ---------- диск назначения и режим (этап 8) ----------
     def preferred(self):
         """Направления, отмеченные галочкой в «Обзоре» (directions_page.chosen: есть сейчас и с диском), по номеру."""
         if self.model is None:
             return []
         return sorted(directions_page.chosen(self.model.dirs), key=lambda d: hb.num_key(d.num))
 
+    def dest_dirs(self):
+        """Направления, у которых есть диск, по номеру: только они могут быть диском назначения."""
+        if self.model is None:
+            return []
+        return sorted((d for d in self.model.dirs.values() if d.disks), key=lambda d: hb.num_key(d.num))
+
+    def default_dest(self):
+        """Первое по номеру направление из «Обзора»; иначе направление отметки всего носителя (если у него есть диск);
+        иначе первое с диском."""
+        pref = self.preferred()
+        if pref:
+            return pref[0].num
+        r = self.model.route.get('', rz.NONE_ROUTE)
+        dd = self.dest_dirs()
+        if r.state == R_DIR and any(d.num == r.num for d in dd):
+            return r.num
+        return dd[0].num if dd else None
+
     def use_choice(self):
-        """Переход из «Обзора» («Перейти к написанию команды…»): в списки «Куда» и «Всё — в» - первое по номеру
-        отмеченное направление (сохранённый режим носителя не меняется - это запись владельца)."""
+        """Переход из «Обзора» («Перейти к написанию команды…»): диск назначения - первое по номеру отмеченное
+        направление (отметки носителя не меняются)."""
         self.want_choice = True
         if self.model is not None:
-            self.fill_choices()
+            self.fill_dest()
 
-    def fill_choices(self):
-        pref = self.preferred()
-        force = self.want_choice and bool(pref)
+    def fill_dest(self):
+        """Список «Диск назначения»; выбор сохраняется, если такое направление ещё есть."""
+        dd = self.dest_dirs()
+        nums = [d.num for d in dd]
+        if self.want_choice or self.dest not in nums:
+            self.dest = self.default_dest()
         self.want_choice = False
-        cur = pref[0].verdict() if force else self.apply_box.currentData()
-        self.apply_box.clear()
-        for text, v in self.choices():
-            self.apply_box.addItem(text, v)
-        i = self.apply_box.findData(cur)
-        self.apply_box.setCurrentIndex(max(i, 0))
-        self.mode_dir.blockSignals(True)
-        self.mode_dir.clear()
-        for d in self.model.dirs.values():
-            self.mode_dir.addItem(d.label(), d.verdict())
-        if force:
-            self.mode_dir.setCurrentIndex(max(0, self.mode_dir.findData(pref[0].verdict())))
+        self.dest_box.blockSignals(True)
+        self.dest_box.clear()
+        for d in dd:
+            self.dest_box.add(dest_text(d, self.disk_rows), dest_html(d, self.disk_rows), d.num)
+        if self.dest in nums:
+            self.dest_box.setCurrentIndex(nums.index(self.dest))
+        self.dest_box.blockSignals(False)
         self.sync_mode()
-        self.mode_dir.blockSignals(False)
-        self.show_choice(pref)
+        self.update_items()
 
-    def show_choice(self, pref=None):
-        """Крупное поле «Куда» (этап 6, п. 1) и строка о сохранённом режиме носителя, если он про другое направление."""
-        pref = self.preferred() if pref is None else pref
-        self.where.setText(where_text(pref))
-        r = self.model.route.get('', rz.NONE_ROUTE) if self.model else rz.NONE_ROUTE
-        if (pref and r.mark is not None and r.state == R_DIR and r.num not in {d.num for d in pref}
-                and r.num in self.model.dirs):
-            self.mode_note.setText(f'Сохранённый режим этого носителя — «Всё — в {self.model.dirs[r.num].label()}»; '
-                                   'отметки не изменены.')
-            self.mode_note.show()
-        else:
-            self.mode_note.setText('')
-            self.mode_note.hide()
-        self.render_cells()
+    def dest_changed(self, _i=None):
+        v = self.dest_box.currentData()
+        if v and v != self.dest:
+            self.dest = v
+            self.sync_mode()
+            self.update_items()
+            self.show_head()
 
-    # ---------- ячейки справа (этап 6, п. 3-4) ----------
-    def cell_nums(self):
-        """Направления в ячейках: отмеченные в «Обзоре» (ничего не отмечено - все с дисками) и те, куда уже идут папки
-        этого носителя (чтобы не было «невидимых» заданий), по номеру."""
+    def set_dest(self, num_):
+        """Выбрать диск назначения (для тестов и перехода)."""
+        i = self.dest_box.findData(num_)
+        if i >= 0:
+            self.dest_box.setCurrentIndex(i)
+            self.dest_changed()
+
+    def dest_dir(self):
+        return self.model.dirs.get(self.dest) if self.model is not None and self.dest else None
+
+    def root_is_dest(self):
         m = self.model
-        if m is None:
-            return []
-        pref = [d.num for d in self.preferred()]
-        base = set(pref) if pref else {n for n, d in m.dirs.items() if d.disks}
-        used = {r.num for r in m.route.values() if r.state == R_DIR and r.num in m.dirs}
-        return sorted(base | used, key=hb.num_key)
+        return m is not None and self.dest is not None and m.is_dir(m.route.get('', rz.NONE_ROUTE), self.dest)
 
-    def render_cells(self):
+    def mode(self):
+        """Режим из отметки всего носителя: корень ≠ D - «Только выбранные»; корень = D - выбор владельца в окне
+        («Все папки» / «Все, кроме выбранных»), без выбора: есть свои исключения - «Все, кроме», иначе «Все папки»."""
+        if not self.root_is_dest():
+            return ONLY
+        pref = self.mode_pref.get((self.disk, self.dest))
+        if pref in (EVERY, EXCEPT):
+            return pref
+        return EXCEPT if self.model.own_skips() else EVERY
+
+    def show_head(self):
+        space = self.plan[1] if self.plan else None
+        self.where.setText(head_html(self.dest_dir(), self.disk_rows, space))
+        m = self.model
+        r = m.route.get('', rz.NONE_ROUTE) if m else rz.NONE_ROUTE
+        note = ''
+        if m is not None and self.dest and not self.root_is_dest():
+            if r.state == R_DIR and r.num in m.dirs:
+                note = (f'Весь носитель отмечен «Всё — в {m.dirs[r.num].label()}»: папки без галочки идут туда. '
+                        f'«{MODE_TEXT[EVERY]}» или «{MODE_TEXT[EXCEPT]}» заменят эту отметку.')
+            elif r.mark is None:
+                note = 'Остальные папки носителя не отмечены — они не копируются.'
+        self.mode_note.setText(note)
+        self.mode_note.setVisible(bool(note))
+
+    def sync_mode(self):
+        """Переключатели - по действующей (с черновиком) отметке всего носителя."""
         m = self.model
         if m is None:
             return
-        want = [*self.cell_nums(), SKIP, INHERIT]
-        if want != self.cell_order:
-            for c in self.cells.values():
-                c.setParent(None)
-                c.deleteLater()
-            self.cells = {}
-            for k in want:
-                if k == SKIP:
-                    c = Cell(self, SKIP)
-                elif k == INHERIT:
-                    c = Cell(self, INHERIT)
-                else:
-                    c = Cell(self, m.dirs[k].verdict(), k)
-                self.cells[k] = c
-                self.cells_lay.insertWidget(self.cells_lay.count() - 1, c)
-            self.cell_order = want
-        plan = self.plan[0] if self.plan else None
-        cap = self.plan_cap()
-        pref = {d.num for d in self.preferred()}
-        for k, c in self.cells.items():
-            if k == INHERIT:
-                c.title.setText('Снять свою отметку')
-                c.body.setText(f'<span style="color:{GRAY}">Перетащите сюда папку - её собственная отметка снимется, и '
-                               'папка снова пойдёт туда же, куда её родитель (или режим всего носителя).</span>')
-                c.paint('#9e9e9e', '#fafafa')
-            elif k == SKIP:
-                c.title.setText('Не копировать')
-                c.body.setText(skip_cell_html(plan))
-                c.paint('#757575', SKIP_INH)
-            else:
-                d = m.dirs[k]
-                html_, state = dir_cell_html(d, plan, cap, k in pref, self.disk_name)
-                c.title.setText(f'{d.num} {d.name} — ' + ('диски ' if len(d.disks) > 1 else 'диск ')
-                                + (hb.disk_nums(d.disks) if d.disks else 'не назначен'))
-                c.body.setText(html_)
-                strong, pale, border = dir_colors(k)
-                if state == 'short':
-                    c.paint(RED, SHORT_BG, state)
-                elif state == 'unknown':
-                    c.paint(border, UNKNOWN_BG, state)
-                else:
-                    c.paint(border, pale, state)
-                can = (plan is not None and not plan.errors and state != 'short' and not self.writing and bool(d.disks)
-                       and any(plan.group_state(g) == rz.G_COPY for g, x in plan.groups.items() if x['num'] == k))
-                c.btn.setEnabled(can)
-                c.btn.setText(f'Подготовить задания — {d.name}…')
-                c.btn.setToolTip('Не помещается: уберите часть папок (перетащите их в «Не копировать» или в другую '
-                                 'ячейку).' if state == 'short' else
-                                 'Задания только этого направления, по сохранённым отметкам; перед созданием - сверка '
-                                 'оглавления носителя.')
-        self.update_tasks_btn()
+        mode = self.mode() if self.dest else None
+        for w in self.mode_btn.values():
+            w.blockSignals(True)
+        self.mode_group.setExclusive(False)
+        for k, w in self.mode_btn.items():
+            w.setChecked(k == mode)
+            w.setEnabled(bool(self.dest) and not self.writing)
+        self.mode_group.setExclusive(True)
+        for w in self.mode_btn.values():
+            w.blockSignals(False)
+        self.mode_hint.setText('• не сохранено' if '' in m.drafts else '')
+        self.show_head()
 
+    def mode_changed(self, k):
+        m, d = self.model, self.dest_dir()
+        if m is None or d is None or self.writing:
+            return
+        key = (self.disk, d.num)
+        pairs, msg = [], ''
+        if k == ONLY:
+            self.mode_pref.pop(key, None)
+            if self.root_is_dest():
+                saved = m.saved_ms.by_key.get('')
+                if saved is not None and not m.is_dir(m.route_saved.get(''), d.num):
+                    pairs = [('', saved.verdict)]        # вернуть сохранённую отметку всего носителя
+                else:
+                    pairs = [('', SKIP)]
+        else:
+            self.mode_pref[key] = k
+            if not self.root_is_dest():
+                pairs.append(('', d.verdict()))
+            skips = m.own_skips()
+            if k == EVERY and skips:
+                drop = m.skips_back_to(d.num, dict((m.orig(f).lower(), v) for f, v in pairs))
+                pairs += [(f, INHERIT) for f in drop]
+                if drop:
+                    msg = (f'«{MODE_TEXT[EVERY]}»: сняты исключения у {folders_word(len(drop))} («Отменить последнее» '
+                           'вернёт). Исключения внутри папок других дисков не тронуты.')
+            elif k == EXCEPT and skips and pairs:
+                msg = (f'Исключения ({folders_word(len(skips))}) действуют и для этого диска — у них галочка. Снимите '
+                       'галочку, если папку тоже нужно копировать.')
+        if pairs and m.set_marks(pairs):
+            self.after_marks()
+        else:
+            self.sync_mode()
+            self.update_items()
+        if msg:
+            self.win.statusBar().showMessage(msg, 10000)
+
+    def after_marks(self):
+        self.update_items()
+        self.sync_mode()
+        self.changed()
+
+    # ---------- галочки ----------
+    def item_changed(self, it, col):
+        if self.painting or col != C_CHECK or self.model is None:
+            return
+        f = it.data(C_NAME, ROLE)
+        sel = self.tree.take_press_sel()
+        if sel is None:
+            sel = self.selected_folders()
+        folders = [x for x in sel if x] if f in sel and len(sel) > 1 else [f]
+        on = it.checkState(C_CHECK) == Qt.Checked
+        self.toggle(folders, on)
+        if len(folders) > 1:                              # Qt сбросил выделение при щелчке - вернуть
+            QTimer.singleShot(0, lambda fs=folders: self.reselect(fs))
+
+    def reselect(self, folders):
+        self.tree.blockSignals(True)
+        self.tree.clearSelection()
+        for x in folders:
+            if x in self.items:
+                self.items[x].setSelected(True)
+        self.tree.blockSignals(False)
+
+    def toggle(self, folders, on):
+        """Галочка поставлена (on) или снята у папок: в «Только выбранные»/«Все папки» - включить в D / исключить;
+        в «Все, кроме выбранных» - наоборот (галочка = исключение). -> число изменённых записей черновика."""
+        m = self.model
+        if m is None or self.writing or not self.dest:
+            return 0
+        ok = [f for f in folders if f and m.markable(f) and (m.check(f, self.dest, self.mode()) or {}).get('checkable')]
+        include = on != (self.mode() == EXCEPT)
+        pairs = m.include_pairs(ok, self.dest) if include else m.exclude_pairs(ok, self.dest)
+        n = m.set_marks(pairs) if pairs else 0
+        self.after_marks() if n else self.update_items()
+        if n:
+            self.win.statusBar().showMessage(f'Папок: {len(ok)} — ' + ('галочка поставлена' if on else 'галочка снята') +
+                                             '. Не сохранено — кнопка «Сохранить отметки».', 8000)
+        return n
+
+    # ---------- ячейки справа (этап 8) ----------
     def plan_cap(self):
         if not self.plan:
             return {}
         P, space, queued = self.plan[0], self.plan[1], self.plan[2]
         return sv.capacity(P.part_b, space, queued, disks=[x for d in P.dirs.values() for x in d.disks])
 
-    def update_tasks_btn(self):
-        """Общая кнопка: только направления из «Обзора», которые помещаются (критики: общая подготовка не берёт
-        направления, попавшие в ячейки только из-за прежних отметок)."""
-        pref = [d.num for d in self.preferred()]
-        P = self.plan[0] if self.plan else None
-        busy = self.writing or self.model is None
-        if not pref:
-            self.tasks_btn.setEnabled(False)
-            self.tasks_btn.setToolTip('В «Обзоре» не отмечено ни одного направления: отметьте их там или нажмите '
-                                      'кнопку в нужной ячейке справа.')
-            return
-        short = set(sv.short_directions(self.model.dirs, self.plan_cap())) if P else set()
-        ok = [n for n in pref if n not in short]
-        self.tasks_btn.setEnabled(bool(ok) and not busy and not (P is not None and P.errors))
-        self.tasks_btn.setToolTip(('Задания для: ' + ', '.join(ok) if ok else 'Ни одно отмеченное направление не '
-                                   'помещается.') + (f'. Не помещаются (заданий не будет): {", ".join(sorted(short & set(pref)))}'
-                                                     if short & set(pref) else '') + '. Сначала - расчёт, сверка '
-                                  'оглавления носителя и показ; задания создаются после подтверждения.')
+    def counts(self):
+        """Числа папок для ячеек: (выбрано для D, исключено владельцем - свои «не копировать» внутри D, остаётся)."""
+        m, n = self.model, self.dest
+        sel = m.tops(lambda r: m.is_dir(r, n))
+        exc = m.own_excluded(n)
+        stay = m.tops(lambda r: r.state != R_DIR)
+        return sel, exc, stay
 
-    def drop(self, verdict, folders):
-        """Папки сброшены в ячейку: черновая отметка тем же путём, что меню (set_mark). Отметки подпапок не трогаются.
-        -> число изменённых записей черновика."""
+    def render_cells(self):
         m = self.model
-        if m is None or self.writing:
+        if m is None:
+            return
+        d = self.dest_dir()
+        plan = self.plan[0] if self.plan else None
+        cap = self.plan_cap()
+        c = self.copy_cell
+        sel, exc, stay = self.counts() if d else (0, 0, m.tops(lambda r: r.state != R_DIR))
+        if d is None:
+            c.title.setText('Копировать на диск')
+            c.sub.setText('')
+            c.body.setText(f'<span style="color:{ORANGE}">Диска назначения нет: назначьте диск направлению в «Обзоре».'
+                           '</span>')
+            c.paint('#9e9e9e', '#fafafa')
+            state = 'none'
+        else:
+            word = 'диски' if len(d.disks) > 1 else 'диск'
+            by = {r['disk']: r for r in self.disk_rows}
+            c.title.setText(f'Копировать на {word} ' + ' и '.join(short_place(by.get(x), x) for x in d.disks))
+            c.sub.setText(f'{d.name}, {hdds(d)}')
+            html_, state = dest_cell_html(d, plan, cap, self.mode(), sel, exc, lambda x: place(by.get(x), x))
+            c.body.setText(html_)
+            if state == 'short':
+                c.paint(RED, SHORT_BG, state)
+            elif state == 'unknown':
+                c.paint('#43a047', UNKNOWN_BG, state)
+            else:
+                c.paint('#43a047', HEAD_BG, state)
+        r0 = m.route.get('', rz.NONE_ROUTE)
+        rest = None
+        if d is not None and r0.state == R_DIR and r0.num != d.num and r0.num in m.dirs:
+            rest = m.dirs[r0.num]
+        self.stay_cell.body.setText(stay_cell_html(plan, stay, rest))
+        can = (d is not None and plan is not None and not plan.errors and state != 'short' and not self.writing
+               and any(plan.group_state(g) == rz.G_COPY for g, x in plan.groups.items() if x['num'] == d.num))
+        c.btn.setEnabled(can)
+        c.btn.setText('Подготовить задания…')
+        if d is None:
+            tip = ''
+        elif state == 'short':
+            tip = 'Не помещается: снимите галочки у части папок.'
+        elif not can and plan is not None:
+            tip = 'Копировать нечего: поставьте галочки у папок (задания строятся по сохранённым отметкам).'
+        else:
+            tip = (f'Задания на копирование для «{d.num} {d.name}» по сохранённым отметкам; перед созданием - сверка '
+                   'оглавления носителя и показ.')
+        c.btn.setToolTip(tip)
+
+    def drop(self, folders):
+        """Папки сброшены в ячейку «Копировать на диск»: включить их в диск назначения (как галочка в «Только
+        выбранные»; в «Все, кроме выбранных» - снять исключение). -> число изменённых записей черновика."""
+        m = self.model
+        if m is None or self.writing or not self.dest:
             return 0
         ok = [f for f in folders if f and m.markable(f)]
         if not ok:
             self.win.statusBar().showMessage('Эти папки отметить нельзя (весь носитель - это режим вверху; служебные '
                                              'папки переноса не отмечаются).', 6000)
             return 0
-        n = m.set_mark(ok, verdict)
+        pairs = m.include_pairs(ok, self.dest)
+        n = m.set_marks(pairs) if pairs else 0
         if n:
-            self.update_items()
-            self.sync_mode()
-            self.changed()
-            what = ('сняты свои отметки' if verdict == INHERIT else 'не копировать' if verdict == SKIP else
-                    hb.parse_verdict(verdict, m.dirs)[1] or verdict)
-            self.win.statusBar().showMessage(f'Папок: {len(ok)} → {what}. Не сохранено - кнопка «Сохранить отметки».', 8000)
+            self.after_marks()
+            self.win.statusBar().showMessage(f'Папок: {len(ok)} → на диск {hdds(self.dest_dir())}. Не сохранено - '
+                                             'кнопка «Сохранить отметки».', 8000)
         return n
-
-    def sync_mode(self):
-        """Радиокнопки по действующей (с черновиком) отметке всего носителя."""
-        m = self.model
-        if m is None:
-            return
-        r = m.route.get('', rz.NONE_ROUTE)
-        for b in (self.mode_all, self.mode_none):
-            b.blockSignals(True)
-        self.mode_group.setExclusive(False)
-        self.mode_all.setChecked(r.mark is not None and r.state == R_DIR)
-        self.mode_none.setChecked(r.mark is not None and r.state == R_SKIP)
-        self.mode_group.setExclusive(True)
-        for b in (self.mode_all, self.mode_none):
-            b.blockSignals(False)
-        if r.state == R_DIR and r.num in m.dirs:
-            self.mode_dir.blockSignals(True)
-            self.mode_dir.setCurrentIndex(max(0, self.mode_dir.findData(m.dirs[r.num].verdict())))
-            self.mode_dir.blockSignals(False)
-        elif self.mode_dir.currentIndex() < 0 and self.mode_dir.count():
-            self.mode_dir.setCurrentIndex(0)
-        if r.mark is None:
-            self.mode_hint.setText('Сначала выберите режим: без него файлы «не отмечены».')
-            self.mode_hint.setStyleSheet(f'color:{ORANGE}')
-        else:
-            d = m.drafts.get('')
-            self.mode_hint.setText('• не сохранено' if d else '')
-            self.mode_hint.setStyleSheet(f'color:{BLUE}')
-        self.show_choice()
-
-    def mode_changed(self):
-        if self.model is None:
-            return
-        if self.mode_all.isChecked():
-            v = self.mode_dir.currentData()
-            if v:
-                self.apply([''], v)
-        elif self.mode_none.isChecked():
-            self.apply([''], SKIP)
 
     def selected_folders(self):
         return [it.data(C_NAME, ROLE) for it in self.tree.selectedItems() if it.data(C_NAME, ROLE)]
 
-    def selection_changed(self):
-        fs = self.selected_folders()
-        ok = [f for f in fs if self.model and self.model.markable(f)]
-        self.sel_label.setText(f'Выделено папок: {len(fs)}.' + (f' (служебных, их не отметить: {len(fs) - len(ok)})'
-                                                                 if len(ok) != len(fs) else ''))
-        self.apply_btn.setText(f'Применить к выделенным ({len(ok)})' if len(ok) != 1 else 'Применить к выделенной')
-        self.apply_btn.setEnabled(bool(ok) and not self.writing)
-        self.unmark_btn.setEnabled(bool(ok) and not self.writing)
-
-    def apply_selected(self):
-        self.apply(self.selected_folders(), self.apply_box.currentData())
-
-    def menu(self, pos):
-        if self.model is None:
-            return
-        fs = [f for f in self.selected_folders() if self.model.markable(f)]
-        if not fs:
-            return
-        menu = QMenu(self)
-        head = menu.addAction(f'Куда для {len(fs)} выделенных папок:' if len(fs) > 1 else f'Куда для «{last(fs[0])}»:')
-        head.setEnabled(False)
-        acts = {}
-        for text, v in self.choices():
-            acts[menu.addAction('   ' + text)] = v
-        act = menu.exec(self.tree.viewport().mapToGlobal(pos))
-        if act in acts:
-            self.apply(fs, acts[act])
-
     def apply(self, folders, verdict):
+        """Черновая отметка папок напрямую (весь носитель - ''; для тестов и служебных переходов)."""
         if self.model is None or verdict is None or self.writing:
             return
         if self.model.set_mark(folders, verdict):
-            self.update_items()
-            self.sync_mode()
-            self.changed()
+            self.after_marks()
 
     def undo(self):
         if self.model and self.model.undo():
-            self.update_items()
-            self.sync_mode()
-            self.changed()
+            self.after_marks()
 
     def discard(self):
         if not self.model or not self.model.drafts:
@@ -1338,9 +1771,7 @@ class RazborPage(QWidget):
                                 '«Отменить последнее» вернёт их обратно.') != QMessageBox.Yes:
             return
         self.model.discard()
-        self.update_items()
-        self.sync_mode()
-        self.changed()
+        self.after_marks()
 
     def changed(self, debounce=True):
         """Любая правка входов итога: ревизия растёт сразу, итог помечается устаревшим и считается заново."""
@@ -1364,7 +1795,6 @@ class RazborPage(QWidget):
         self.undo_btn.setEnabled(bool(self.model and self.model.undo_stack) and not busy)
         self.discard_btn.setEnabled(bool(n) and not busy)
         self.contested_btn.setEnabled(not busy)
-        self.selection_changed()
         if self.model is not None:
             self.render_cells()
         else:
@@ -1395,6 +1825,7 @@ class RazborPage(QWidget):
                 self.plan, self.plan_rev = val, snap[1]
                 self.render_summary(*val)
                 self.render_cells()
+                self.show_head()
                 self.sum_state.setText(f'<span style="color:{GRAY}">Посчитано в {val[3]}, с несохранёнными отметками.'
                                        '</span>')
                 self.sum_state.setToolTip('Итог учитывает и несохранённые отметки; задания строятся только из сохранённых.')
@@ -1488,9 +1919,11 @@ class RazborPage(QWidget):
     def set_writing(self, on):
         self.writing = on
         self.tree.setEnabled(not on)
-        for w in (self.mode_all, self.mode_none, self.mode_dir, self.disk_box, self.apply_box):
+        for w in (self.disk_box, self.dest_box):
             w.setEnabled(not on)
         self.update_buttons()
+        if self.model is not None:
+            self.sync_mode()
 
     def save(self, then=None):
         """Предпросмотр (service.marks_preview) -> окно «было → станет» -> «Записать» -> add_marks_batch одним пакетом.
@@ -1537,9 +1970,7 @@ class RazborPage(QWidget):
                 return
             if tkind == 'ok':
                 self.model.reload(tree)
-                self.update_items()
-                self.sync_mode()
-                self.fill_choices()
+                self.fill_dest()
             left = {k for k in sent if k in self.model.drafts}
             done = len(sent) - len(left)
             if kind == 'ok':
@@ -1559,17 +1990,16 @@ class RazborPage(QWidget):
 
     # ---------- задания ----------
     def prepare(self, nums=None):
-        """«Подготовить задания»: nums - направления (кнопка ячейки - одно; общая кнопка - None = отмеченные в «Обзоре»).
+        """«Подготовить задания»: nums - направления (None - диск назначения; кнопка ячейки «Копировать на диск»).
         Сохранённые отметки -> пробный расчёт, место по каждому диску, сверка оглавления носителя (в фоне, по порядку)
         -> окно -> «Создать» -> снова пробный расчёт и место -> создание."""
         m = self.model
         if m is None or self.writing:
             return
         if nums is None:
-            nums = [d.num for d in self.preferred()]
+            nums = [self.dest] if self.dest else []
             if not nums:
-                QMessageBox.information(self, TITLE, 'В «Обзоре» не отмечено ни одного направления. Отметьте их там или '
-                                        'нажмите кнопку «Подготовить задания» в нужной ячейке справа.')
+                QMessageBox.information(self, TITLE, 'Диска назначения нет: назначьте диск направлению в «Обзоре».')
                 return
         nums = list(nums)
         if m.drafts:
@@ -1605,7 +2035,7 @@ class RazborPage(QWidget):
         if dlg.exec() != QDialog.Accepted or not new or blocked:
             return
         if QMessageBox.question(self, TITLE, f'Создать заданий: {len(new)} в «Запускаемые скрипты»?\n\nНичего не '
-                                'копируется и не запускается: запускаете задания вы - в разделе «Задания».') != QMessageBox.Yes:
+                                'копируется и не запускается: запускаете задания вы - в разделе «Задания на копирование».') != QMessageBox.Yes:
             return
         self.set_writing(True)
         self.win.bg.run(safe, tasks_create, disk, nums, spec_keys(val['specs']),
@@ -1642,9 +2072,9 @@ class RazborPage(QWidget):
                                                    if len(specs) != len(made) else '') + '.')
         if diff:
             msg += '\n\nВНИМАНИЕ: созданный список отличается от подтверждённого (данные изменились в последний момент). ' \
-                   'Проверьте задания в «Заданиях» перед запуском.'
-        if QMessageBox.question(self, TITLE, msg + '\n\nПерейти в «Задания»?') == QMessageBox.Yes:
-            self.win.open_page('Задания')
+                   'Проверьте их в «Заданиях на копирование» перед запуском.'
+        if QMessageBox.question(self, TITLE, msg + '\n\nПерейти в «Задания на копирование»?') == QMessageBox.Yes:
+            self.win.open_page(disk_ui.TASKS_PAGE)
 
     # ---------- спорные файлы ----------
     def contested(self):
@@ -1763,8 +2193,7 @@ def tasks_html(val, disk_name, note=''):
         bad = '; '.join(f'на {rz.disk_word(x)}: нужно {gb(cap[x]["need"] + cap[x]["reserve"])} ГБ с запасом, свободно '
                         f'{gb(cap[x]["free"])} ГБ' for x in d.disks if cap.get(x, {}).get('state') == 'short')
         h.append(f'<p style="color:{RED}"><b>{esc(d.num)} {esc(d.name)} не помещается</b> ({esc(bad)}) — заданий для '
-                 'него не будет (ни на один его диск). Уберите часть папок: перетащите их в «Не копировать» или в '
-                 'другую ячейку.</p>')
+                 'него не будет (ни на один его диск). Снимите галочки у части папок.</p>')
     if specs:
         h.append('<table cellpadding="3" cellspacing="0" border="1" style="border-collapse:collapse" width="100%">'
                  '<tr><th align="left">Задание</th><th>Файлов</th><th>ГБ</th><th align="left">На диски</th></tr>')
@@ -1805,72 +2234,75 @@ def tasks_html(val, disk_name, note=''):
     blocked = toc is not None and (not toc['connected'] or toc['problems'])
     if new and not blocked:
         h.append(f'<p style="color:gray">Будет создано заданий: {len(new)} в «Запускаемые скрипты». Ничего не копируется '
-                 'и не запускается; запуск - в разделе «Задания».</p>')
+                 'и не запускается; запуск - в разделе «Задания на копирование».</p>')
     elif specs and not new:
         h.append('<p>Все задания уже подготовлены раньше - новых нет.</p>')
     return ''.join(h), new
 
 
-# ---------- «Куда» и ячейки (этап 6) ----------
+# ---------- ячейки «Копировать на диск» и «Остаётся на носителе» (этап 8) ----------
 
-def where_text(pref):
-    """Крупное поле «Куда»: направления, отмеченные в «Обзоре», по номерам."""
-    if not pref:
-        return (f'<span style="color:{ORANGE}">Куда: в «Обзоре» не отмечено ни одного направления.</span> '
-                '<span style="font-size:10pt; font-weight:normal">Справа - все направления с дисками: перетащите папки '
-                'в нужную ячейку или отметьте направления в «Обзоре».</span>')
-    lines = []
-    for d in pref:
-        if len(d.disks) > 1:
-            lines.append(f'Копирование: {esc(d.num)} {esc(d.name)} — диски {esc(hb.disk_nums(d.disks))} '
-                         f'({COUNT_WORDS.get(len(d.disks), f"{len(d.disks)} заданий")})')
-        else:
-            lines.append(f'Копирование: {esc(d.num)} {esc(d.name)} — диск {esc(hb.disk_nums(d.disks))}')
-    return '<br>'.join(lines)
+def short_place(row, disk):
+    """«I: My Book» для заголовка ячейки: буква и метка тома без марки; неподключённый - «My Book (не подключён)»."""
+    if not row:
+        return f'{disk} (не подключён)'
+    title = disk_ui.disk_title(row) or disk
+    title = title.rsplit(' (', 1)[0] if title.endswith(')') else title
+    return f'{row["letter"]} {title}' if row.get('letter') else f'{title} (не подключён)'
 
 
-def dir_cell_html(d, P, cap, chosen, disk_name):
-    """Текст ячейки направления и её состояние ('short' - не помещается хотя бы на одном диске; 'unknown' - какой-то
-    диск не подключён; 'ok'). «Уже есть» - на ВСЕХ дисках направления, % от подходящих по типу (копировать + уже есть);
-    копировать - по каждому диску отдельно (только то, чего на нём нет)."""
+def disk_line(x, c, P, place_fn):
+    """«Копировать на диск H: Бэкап… (HDD45): 12,3 ГБ — помещается: свободно …» по service.capacity."""
+    head = f'Копировать на диск {esc(place_fn(x))} ({esc(x)})'
+    if c['state'] == 'none' and P is not None and x == P.disk:
+        return f'{head}: это сам носитель'
+    if c['state'] == 'none':
+        return f'{head}: копировать нечего'
+    amount = f'<b>{gb(c["bytes"])} ГБ</b> <span style="color:{GRAY}">({files_word(c["files"])})</span>'
+    if c['state'] == 'short':
+        where = (f'<b style="color:{RED}">не помещается: нужно {gb(c["need"] + c["reserve"])} ГБ (с запасом '
+                 f'{gb(c["reserve"])} ГБ), свободно {gb(c["free"])} ГБ</b>')
+    elif c['state'] == 'unknown':
+        where = f'<span style="color:{ORANGE}">место не проверено (диск не подключён)</span>'
+    else:
+        where = f'<span style="color:{GREEN}">помещается: свободно {gb(c["free"])} ГБ</span>'
+    q = (f'<br><span style="color:{GRAY}">&nbsp;&nbsp;в очереди на этот диск ещё {num(c["queued"][0])} незапущенных '
+         f'заданий других носителей, {gb(c["queued"][1])} ГБ (учтено)</span>' if c['queued'][0] else '')
+    return f'{head}: {amount} — {where}{q}'
+
+
+def dest_cell_html(d, P, cap, mode, sel, exc, place_fn):
+    """Ячейка «Копировать на диск …»: «Отмечено N папок · M файлов · X ГБ» (N - верхние выбранные папки; файлы и ГБ -
+    «копировать» + «уже есть» направления из плана ядра, то есть с наследованием, режимом и «что копировать»), «Уже есть
+    на диске», строка места по каждому диску. -> (html, состояние 'short' / 'unknown' / 'ok')."""
     if P is None:
         return f'<span style="color:{GRAY}">Считаю…</span>', 'normal'
-    v = {o: P.part_a.get((o, d.num), (0, 0)) for o in (rz.O_COPY, rz.O_HAVE, rz.O_TYPE, rz.O_NODISK)}
-    marked = [sum(x[0] for x in v.values()), sum(x[1] for x in v.values())]
-    h = []
-    if not chosen:
-        h.append(f'<span style="color:{ORANGE}">Не отмечено в «Обзоре»: сюда уже идут папки этого носителя; общая '
-                 'кнопка его не готовит - только кнопка этой ячейки.</span><br>')
-    if not marked[0]:
-        h.append(f'<span style="color:{GRAY}">Сюда пока ничего не отмечено - перетащите папки.</span>')
+    cp = P.part_a.get((rz.O_COPY, d.num), (0, 0))
+    hv = P.part_a.get((rz.O_HAVE, d.num), (0, 0))
+    tp = P.part_a.get((rz.O_TYPE, d.num), (0, 0))
+    files, size = cp[0] + hv[0], cp[1] + hv[1]
+    if mode == EVERY:
+        what = 'Отмечено: весь носитель'
+    elif mode == EXCEPT:
+        what = 'Отмечено: весь носитель' + (f', кроме {num(exc)} {plural(exc, "папки", "папок", "папок")}' if exc else '')
     else:
-        elig = v[rz.O_COPY][1] + v[rz.O_HAVE][1]
-        pct = f' — {round(100 * v[rz.O_HAVE][1] / elig)} %' if elig else ''
-        h.append(f'<span style="font-size:12pt">Отмечено: <b>{gb(marked[1])} ГБ</b></span> '
-                 f'<span style="color:{GRAY}">({num(marked[0])} файлов)</span><br>')
-        h.append(f'Уже есть на всех дисках направления: <b>{gb(v[rz.O_HAVE][1])} ГБ{pct}</b> '
-                 f'<span style="color:{GRAY}; font-size:8pt">{num(v[rz.O_HAVE][0])} файлов</span><br>')
-        if v[rz.O_TYPE][0]:
-            h.append(f'<span style="color:{GRAY}">Не подходит по типу (останется на месте): {gb(v[rz.O_TYPE][1])} ГБ'
-                     '</span><br>')
+        what = f'Отмечено {folders_word(sel)}'
+    if mode == ONLY and not sel and not files:
+        h = [f'<span style="font-size:12pt"><b>Ничего не отмечено — поставьте галочки у папок</b></span><br>'
+             f'<span style="color:{GRAY}">или перетащите папки сюда.</span>']
+    else:
+        h = [f'<span style="font-size:12pt"><b>{what} · {files_word(files)} · {gb(size)} ГБ</b></span>']
+    if size:
+        where = 'на диске' if len(d.disks) < 2 else 'на обоих дисках' if len(d.disks) == 2 else 'на всех дисках'
+        h.append(f'<br>Уже есть {where}: <b>{gb(hv[1])} ГБ ({round(100 * hv[1] / size)} %)</b> '
+                 f'<span style="color:{GRAY}; font-size:8pt">{files_word(hv[0])}</span>')
+    if tp[0]:
+        h.append(f'<br><span style="color:{GRAY}">Не подходит по «что копировать» (останется на носителе): '
+                 f'{gb(tp[1])} ГБ, {files_word(tp[0])}</span>')
     state = 'ok'
-    if not d.disks:
-        h.append(f'<span style="color:{ORANGE}">Диск не назначен — заданий не будет (назначьте диск в «Обзоре» → '
-                 '«Направления»).</span>')
-        return ''.join(h), 'ok'
     for x in d.disks:
         c = cap.get(x) or dict(state='none', files=0, bytes=0, free=None, queued=[0, 0, 0])
-        if c['state'] == 'none' and x == P.disk:
-            line = 'это сам носитель'
-        elif c['state'] == 'none':
-            line = 'копировать нечего'
-        else:
-            line = f'копировать <b>{gb(c["bytes"])} ГБ</b> <span style="color:{GRAY}">({num(c["files"])} файлов)</span>'
-        place = place_html(c)
-        q = (f'<br><span style="color:{GRAY}">в очереди на {esc(rz.disk_word(x))} ещё {num(c["queued"][0])} незапущенных '
-             f'заданий других носителей, {gb(c["queued"][1])} ГБ, {num(c["queued"][2])} файлов (учтено)</span>'
-             if c['queued'][0] else '')
-        h.append(f'<br><b>на {esc(rz.disk_word(x))}</b>: {line}' + (f' · {place}' if place else '') + q)
+        h.append('<br>' + disk_line(x, c, P, place_fn))
         if c['state'] == 'short':
             state = 'short'
         elif c['state'] == 'unknown' and state != 'short':
@@ -1878,16 +2310,32 @@ def dir_cell_html(d, P, cap, chosen, disk_name):
     return ''.join(h), state
 
 
-def skip_cell_html(P):
+STAY_NONE = (rz.O_SKIP, rz.O_UNSET, rz.O_NONE, rz.O_JUNK)     # не копируется никуда (общие категории плана)
+STAY_DIR = (rz.O_TYPE, rz.O_NODISK)                            # ... и по направлениям: не по типу, диск не назначен
+
+
+def stay_numbers(P):
+    """Сколько остаётся на носителе (не копируется никуда) по плану ядра: (файлов, байт). Уже перенесённое и идущее в
+    другие направления (копировать / уже есть) сюда не входит; каждый файл в плане ровно в одной категории."""
+    n = b = 0
+    for (o, _num), v in P.part_a.items():
+        if o in STAY_NONE or o in STAY_DIR:
+            n += v[0]
+            b += v[1]
+    return n, b
+
+
+def stay_cell_html(P, folders, rest=None):
+    """rest - направление всего носителя, если оно не диск назначения: папки без галочки идут туда, это пишется явно."""
     if P is None:
         return f'<span style="color:{GRAY}">Считаю…</span>'
-    s = P.part_a.get((rz.O_SKIP, None), (0, 0))
-    n = P.part_a.get((rz.O_NONE, None), (0, 0))
-    h = [f'<span style="font-size:12pt">Отмечено: <b>{gb(s[1])} ГБ</b></span> '
-         f'<span style="color:{GRAY}">({num(s[0])} файлов)</span>']
-    if n[0]:
-        h.append(f'<br><span style="color:{ORANGE}">Не отмечено (режим всего носителя не выбран): {gb(n[1])} ГБ '
-                 f'({num(n[0])} файлов)</span>')
-    h.append(f'<br><span style="color:{GRAY}">Перетащите сюда папку - она не будет копироваться (подпапки со своей '
-             'отметкой - по своей отметке).</span>')
+    n, b = stay_numbers(P)
+    h = []
+    if rest is not None:
+        v = [P.part_a.get((o, rest.num), (0, 0)) for o in (rz.O_COPY, rz.O_HAVE)]
+        h.append(f'<span style="color:{ORANGE}"><b>Остальное идёт в {esc(rest.num)} {esc(rest.name)} (весь носитель)'
+                 f'</b>: {files_word(v[0][0] + v[1][0])}, {gb(v[0][1] + v[1][1])} ГБ — это не «остаётся».</span><br>')
+    h.append(f'<span style="font-size:12pt"><b>{folders_word(folders)} · {files_word(n)} · {gb(b)} ГБ</b></span>')
+    h.append(f'<br><span style="color:{GRAY}">Папки без галочки, исключённые, неотмеченные; файлы, которые не подходят '
+             'по «что копировать», и мусор. Только сведения — сюда ничего не перетаскивается.</span>')
     return ''.join(h)

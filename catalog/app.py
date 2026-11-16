@@ -117,7 +117,9 @@ def cell(text, right=False, color=None):
 
 DISK_HEAD = ['Диск', 'Подключён', 'Свободно', 'Общий объём\nфайлов, ГБ', 'Проверено по хешу\nпри сканировании',
              'Скопировано программой,\nхеш сверен', 'Скопировано, сверен\nтолько размер',
-             'Со слов «Я сделал\nв Проводнике»', 'Изменились\nпосле проверки']
+             'Со слов «Я сделал\nв Проводнике»', 'Хеш устарел\n(файл изменён)', 'Хеш не\nсчитался']
+# столбец 9 - записи без хеша (степень N): обычно файлы не фото и не видео; ссылка «Пересканировать» - в «Диски и папки»
+C_NOHASH = 9
 # столбцы 4..8 - степени подтверждения S, C, Z, U, X (буквы владельцу не показываются); Z, U, X - не копия
 DISK_TIPS = {
     3: 'Сколько места занимают все файлы этого диска по базе (последняя опись и записи копирования).',
@@ -125,13 +127,15 @@ DISK_TIPS = {
     5: 'Файлов, скопированных программой (шаблоном копирования) со сверкой хеша прочитанного — копия подтверждена.',
     6: 'Файлов, у которых при копировании сверен только размер (или «уже есть») — копия НЕ подтверждена.',
     7: 'Файлов, записанных со слов владельца на странице «Я сделал в Проводнике» — копия НЕ подтверждена.',
-    8: 'Файлов, которые изменились после подсчёта хеша — копия НЕ подтверждена.'}
+    8: 'После подсчёта хеша у файла поменялись размер или дата. Пересканируйте папку, чтобы пересчитать хеш.',
+    9: 'Файлов, у которых хеш не считался (обычно это файлы не фото и не видео). Чтобы посчитать хеш — пересканируйте '
+       'папки (раздел «Диски и папки» → пересканирование).'}
 RESCAN_TODO = 'Что делать: пересканировать папку — подключите диск, «Диски и папки» → «Пересканировать папку…».'
 WEAK_TODO = {
     6: 'Что делать: пересчитать хеши спорных файлов — подключите диск, «Диски и папки» → «Пересканировать папку…» '
        'с галочкой «Перечитать всё».',
     7: RESCAN_TODO,
-    8: RESCAN_TODO}
+    8: 'Как: подключите диск, «Диски и папки» → «Пересканировать папку…».'}
 RED = '#c62828'
 MAX_DISK_ROWS = 8
 UNIQUE_NOTE = 'Файлы лежат в исключённых папках — не потерять при ручном переносе.'
@@ -178,7 +182,7 @@ def unique_li(u):
 
 
 def attention_html(groups):
-    """«Требует внимания»: группы с заголовками; ссылки - tasks: (экран «Задания»), list:<диск> (файл списка)."""
+    """«Требует внимания»: группы с заголовками; ссылки - tasks: (экран «Задания на копирование»), list:<диск>."""
     import html as h
     if not groups:
         return '<p style="color:#2e7d32">Ничего не требует внимания.</p>'
@@ -195,7 +199,7 @@ def attention_html(groups):
                 out.append(f'<li>{h.escape(str(x))}</li>')
         out.append('</ul>')
         if g['key'] == 'tasks':
-            out.append('<p style="margin-top:0"><a href="tasks:">Открыть Задания</a></p>')
+            out.append('<p style="margin-top:0"><a href="tasks:">Открыть Задания на копирование</a></p>')
     return ''.join(out)
 
 
@@ -284,7 +288,8 @@ class OverviewPage(QWidget):
             ev = m['ev']
             free = f'{gb_ru(m["free_gib"])} ГБ' if 'free_gib' in m else '—'
             vals = [d, m['letter'] or 'нет', free, gb_ru(m['gib'])] + \
-                [f'{ev.get(k, 0):,}'.replace(',', ' ') for k in sv.EV_COLS]
+                [f'{ev.get(k, 0):,}'.replace(',', ' ') for k in sv.EV_COLS + (hb.EV_NONE,)]
+            self.dt.removeCellWidget(i, C_NOHASH)
             for j, v in enumerate(vals):
                 it = cell(v, right=j >= 2)
                 if j == 0:
@@ -293,7 +298,7 @@ class OverviewPage(QWidget):
                     it.setFont(f)
                     if not m.get('in_base'):
                         it.setToolTip(f'{d}: в базе нет описи этого диска — числа нулевые.')
-                if j >= 6 and ev.get(sv.EV_COLS[j - 4], 0):
+                if 6 <= j < C_NOHASH and ev.get(sv.EV_COLS[j - 4], 0):
                     it.setForeground(QColor(RED))
                     f = it.font()
                     f.setBold(True)
@@ -302,6 +307,15 @@ class OverviewPage(QWidget):
                 elif j >= 3:
                     it.setToolTip(DISK_TIPS[j])
                 self.dt.setItem(i, j, it)
+            if ev.get(hb.EV_NONE, 0):                     # «Пересканировать» - раздел «Диски и папки» на этом диске
+                lab = QLabel(f'{vals[C_NOHASH]} · <a href="rescan:{d}">Пересканировать</a>')
+                lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                lab.setToolTip(DISK_TIPS[C_NOHASH])
+                lab.linkActivated.connect(self.link_text)
+                self.dt.item(i, C_NOHASH).setData(Qt.UserRole, vals[C_NOHASH])
+                self.dt.item(i, C_NOHASH).setText(vals[C_NOHASH] + ' · Пересканировать')   # ширина столбца;
+                self.dt.item(i, C_NOHASH).setForeground(QColor(0, 0, 0, 0))   # сам текст рисует надпись со ссылкой
+                self.dt.setCellWidget(i, C_NOHASH, lab)
         self.dt.resizeRowsToContents()
         # высота - не больше MAX_DISK_ROWS строк, дальше прокрутка внутри таблицы («Требует внимания» не вытесняется)
         h = self.dt.horizontalHeader().height() + sum(self.dt.rowHeight(i) for i in range(min(len(disks), MAX_DISK_ROWS))) + 6
@@ -311,10 +325,15 @@ class OverviewPage(QWidget):
         u = next((x for g in self.groups if g['key'] == 'unique' for x in g['items'] if x.get('disk') == disk), None)
         return (u or {}).get('list')
 
+    def link_text(self, s):
+        if s.startswith('rescan:'):
+            self.win.open_page('Диски и папки')
+            self.win.page('Диски и папки').show_disk(s[7:])
+
     def link(self, url):
         s = url.toString()
         if s.startswith('tasks:'):
-            self.win.open_page('Задания')
+            self.win.open_page(disk_ui.TASKS_PAGE)
         elif s.startswith('list:'):
             path = self.list_path(s[5:])
             if path and os.path.exists(path):
@@ -332,7 +351,7 @@ class TasksPage(QWidget):
         super().__init__()
         self.win, self.rows = win, []
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel('<b>Задания</b> - папки в «Запускаемые скрипты». Копирование и перемещение идут в '
+        lay.addWidget(QLabel('<b>Задания на копирование</b> - папки в «Запускаемые скрипты». Копирование и перемещение идут в '
                              'своём окне: там спросят «да», остановка - клавиша Q.'))
         self.t = table(self.HEAD)
         lay.addWidget(self.t)
@@ -474,6 +493,18 @@ class DisksPage(QWidget):
         split.setSizes([260, 520])
         lay.addWidget(split)
 
+    def show_disk(self, disk):
+        """Перейти к носителю (ссылка «Пересканировать» из «Обзора»): выбрать его строку и показать папки."""
+        self.want = disk
+        disks = [r['disk'] for r in self.rows]
+        if disk in disks:
+            self.want = None
+            self.found = False
+            self.t.setCurrentCell(disks.index(disk), 0)
+            if self.disk != disk:
+                self.pick()
+            self.info.setText('Выберите папки (можно несколько, с Ctrl) и нажмите «Пересканировать папку…».')
+
     def refresh(self):
         """При каждом показе раздела и по «Обновить»: носители и какие из них подключены сейчас."""
         self.win.bg.run(sv.disks, ok=self.render)
@@ -504,7 +535,9 @@ class DisksPage(QWidget):
                 self.t.setItem(i, j, it)
         self.t.blockSignals(False)
         disks = [r['disk'] for r in rows]
-        if self.disk in disks:                   # тот же носитель: дерево папок не перестраивать
+        if getattr(self, 'want', None) in disks:          # переход из «Обзора» по ссылке «Пересканировать»
+            self.show_disk(self.want)
+        elif self.disk in disks:                   # тот же носитель: дерево папок не перестраивать
             self.t.blockSignals(True)
             self.t.setCurrentCell(disks.index(self.disk), 0)
             self.t.blockSignals(False)
@@ -619,6 +652,37 @@ class DisksPage(QWidget):
 
 # ---------- главное окно ----------
 
+def count_ru(n):
+    """11 300 000 -> «11,3 млн», 45 600 -> «45,6 тыс.», 950 -> «950»."""
+    n = n or 0
+    if n >= 1_000_000:
+        return f'{n / 1_000_000:.1f}'.replace('.', ',') + ' млн'
+    if n >= 10_000:
+        return f'{n / 1000:.1f}'.replace('.', ',') + ' тыс.'
+    return f'{n:,}'.replace(',', ' ')
+
+
+def footer_text(info):
+    """(built «15.11.2026 22:52», носителей, файлов) -> «База собрана 15.11 22:52: носителей 57, файлов 11,3 млн»."""
+    if not info:
+        return 'База ещё не собрана'
+    built, n, files = info
+    return f'База собрана {built_short(built)}: носителей {n}, файлов {count_ru(files)}'
+
+
+def built_short(built):
+    """meta.built («15.11.2026 22:52» - так пишет сборка; на всякий случай и ISO «2026-11-15 22:52:10») -> «15.11 22:52»."""
+    import re
+    b = (built or '').strip()
+    m = re.match(r'(\d{1,2})\.(\d{1,2})\.\d{4}\D+(\d{1,2}):(\d{2})', b)
+    if m:
+        return f'{int(m[1]):02}.{int(m[2]):02} {int(m[3]):02}:{m[4]}'
+    m = re.match(r'\d{4}-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})', b)
+    if m:
+        return f'{m[2]}.{m[1]} {m[3]}:{m[4]}'
+    return b or '—'
+
+
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -628,11 +692,11 @@ class Window(QMainWindow):
         self.updating, self.sig = False, None
         self.pages = [('Обзор', OverviewPage(self)),
                       ('Разбор носителя', __import__('razbor_page').RazborPage(self)),
-                      ('Задания', __import__('tasks_page').TasksPage(self)), ('Диски и папки', DisksPage(self)),
+                      (disk_ui.TASKS_PAGE, __import__('tasks_page').TasksPage(self)), ('Диски и папки', DisksPage(self)),
                       ('Я сделал в Проводнике', explorer_page.ExplorerPage(self)),
                       ('Команды', commands_page.CommandsPage(self))]
         self.nav = QListWidget()
-        self.nav.setFixedWidth(170)
+        self.nav.setFixedWidth(200)                  # «Задания на копирование» - целиком
         f = QFont()
         f.setPointSize(11)
         self.nav.setFont(f)
@@ -649,6 +713,9 @@ class Window(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.check_sources)
         self.timer.start(10000)
+        self.footer = QLabel('')                      # подвал: «База собрана 15.11 22:52: носителей 57, файлов 11,3 млн»
+        self.statusBar().addPermanentWidget(self.footer)
+        self.show_footer()                            # готовая база - сразу, не дожидаясь проверки новых модулей
         self.nav.setCurrentRow(0)
         self.apply_new()
 
@@ -684,6 +751,13 @@ class Window(QMainWindow):
         short = text.strip().splitlines()[-1] if text.strip() else 'ошибка'
         QMessageBox.warning(self, TITLE, f'Не получилось: {short}\n\nПодробно - в «_БАЗА\\ответы\\окно - ошибки.log».')
 
+    def show_footer(self):
+        try:
+            info = sv.base_info()
+        except Exception:                                     # noqa: BLE001 - подвал не должен ронять окно
+            info = None
+        self.footer.setText(footer_text(info))
+
     def check_sources(self):
         if self.updating:
             return
@@ -707,8 +781,12 @@ class Window(QMainWindow):
         def done(res):
             self.updating = False
             gen = sv.generation()
-            msg = {'update': 'Применены новые модули. ', 'rebuild': 'База собрана заново. '}.get(res, '')
-            self.statusBar().showMessage(f'{msg}База собрана {gen}.')
+            msg = {'update': 'Применены новые модули.', 'rebuild': 'База собрана заново.'}.get(res, '')
+            self.show_footer()
+            if msg:
+                self.statusBar().showMessage(msg, 15000)
+            else:
+                self.statusBar().clearMessage()
             if gen:
                 self.stack.currentWidget().refresh()
             if then:

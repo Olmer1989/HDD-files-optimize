@@ -320,6 +320,19 @@ def generation():
         c.close()
 
 
+def base_info():
+    """Подвал окна: когда собрана база, сколько в ней носителей и файлов. -> (built, носителей, файлов) или None."""
+    if not hb.DB.exists():
+        return None
+    c = ro()
+    try:
+        r = c.execute("select value from meta where key='built'").fetchone()
+        n, files = c.execute('select count(*), coalesce(sum(total), 0) from disks').fetchone()
+        return (r[0] if r else ''), n, files
+    finally:
+        c.close()
+
+
 def volumes():
     """Подключённые сейчас тома: серийный номер -> буква. Сетевые диски пропускаются, диски не читаются."""
     import ctypes
@@ -444,7 +457,7 @@ def attention(ov, tasks):
     groups = []
     bad = [dict(task=t['task'], state=t['state'], done=t['done'], total=t['total'], errors=t['errors'])
            for t in tasks if t['state'] in TASK_ATTENTION or (t['errors'] and t['state'] != 'не запускалось')]
-    for key, title, items in (('tasks', 'Задания с ошибками или прерванные', bad),
+    for key, title, items in (('tasks', 'Задания на копирование с ошибками или прерванные', bad),
                               ('logs', 'Журналы, которые программа не смогла прочитать', list(ov.get('skipped') or [])),
                               ('unique', 'Файлы, которых больше нигде нет', list(ov.get('unique') or [])),
                               ('warn', 'Прочие предупреждения базы', list(ov.get('warn') or []))):

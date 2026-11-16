@@ -503,9 +503,14 @@ class OverviewTest(DirBase):
         self.assertEqual(heads, ['Диск', 'Подключён', 'Свободно', 'Общий объём файлов, ГБ',
                                  'Проверено по хешу при сканировании', 'Скопировано программой, хеш сверен',
                                  'Скопировано, сверен только размер', 'Со слов «Я сделал в Проводнике»',
-                                 'Изменились после проверки'])
+                                 'Хеш устарел (файл изменён)', 'Хеш не считался'])
         self.assertFalse(any(f'({x})' in ' '.join(heads) for x in 'SCZUX'))          # букв в заголовках нет
-        self.assertEqual(rows[0][4:], ['1', '0', '0', '1', '0'])
+        self.assertEqual(rows[0][4:], ['1', '0', '0', '1', '0', '0'])
+        self.assertEqual(page.dt.horizontalHeaderItem(8).toolTip(), 'После подсчёта хеша у файла поменялись размер или '
+                         'дата. Пересканируйте папку, чтобы пересчитать хеш.')
+        self.assertIn('Чтобы посчитать хеш — пересканируйте папки (раздел «Диски и папки» → пересканирование)',
+                      page.dt.horizontalHeaderItem(app.C_NOHASH).toolTip())
+        self.assertIsNone(page.dt.cellWidget(0, app.C_NOHASH))                      # 0 - без ссылки
         u = page.dt.item(0, 7)
         self.assertEqual(u.foreground().color().name(), app.RED)
         self.assertIn('пересканировать папку', u.toolTip())
@@ -561,7 +566,8 @@ class OverviewTest(DirBase):
         self.assertEqual([x['key'] for x in g], ['tasks', 'logs', 'warn'])           # пустая группа не показана
         self.assertEqual([t['task'] for t in g[0]['items']], ['Т1', 'Т2', 'Т6'])
         html = app.attention_html(g)
-        self.assertIn('Задания с ошибками или прерванные', html)
+        self.assertIn('Задания на копирование с ошибками или прерванные', html)
+        self.assertIn('Открыть Задания на копирование', html)
         self.assertIn('«Т1» — готово с ошибками: сделано 5 из 5, ошибок 2', html)
         self.assertIn('«Т6» — состояние неизвестно', html)
         self.assertIn('href="tasks:"', html)
@@ -602,7 +608,35 @@ class OverviewTest(DirBase):
         finally:
             os.startfile = real
         self.assertEqual(opened, [u['HDD91']['list']])
-        self.assertEqual(self.win.opened, ['Задания'])
+        self.assertEqual(self.win.opened, ['Задания на копирование'])
+
+    def test_nohash_column_and_rescan_link(self):
+        """Третий круг: столбец «Хеш не считался» (степень N) со ссылкой «Пересканировать» - раздел «Диски и папки»
+        на этом диске; «Изменились после проверки» теперь «Хеш устарел (файл изменён)»."""
+        import sqlite3
+        with sqlite3.connect(hb.DB) as c:
+            c.execute("update files set ev='N' where disk='HDD91'")
+            c.execute("update files set ev='X' where disk='HDD45' and path='X\\2.jpg'")
+        hb.close_last()
+        shown = []
+
+        class Disks:
+            def show_disk(self, d):
+                shown.append(d)
+        self.win.page = lambda name: Disks()
+        page = self.page()
+        rows = self.table(page)
+        i91 = [r[0] for r in rows].index('HDD91')
+        lab = page.dt.cellWidget(i91, app.C_NOHASH)
+        self.assertIn('Пересканировать', lab.text())
+        self.assertIn('Чтобы посчитать хеш', lab.toolTip())
+        self.assertTrue(rows[i91][app.C_NOHASH].startswith('1'))
+        x = page.dt.item(0, 8)                                                       # HDD45: X - красным
+        self.assertEqual(x.foreground().color().name(), app.RED)
+        self.assertIn('поменялись размер или дата', x.toolTip())
+        lab.linkActivated.emit('rescan:HDD91')
+        self.assertEqual(self.win.opened[-1], 'Диски и папки')
+        self.assertEqual(shown, ['HDD91'])
 
 if __name__ == '__main__':
     unittest.main()

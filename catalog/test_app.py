@@ -59,9 +59,14 @@ class WindowTest(Base):
         self.assertTrue(wait(lambda: ov.ov is not None and 'Считаю' not in ov.text.toPlainText()))
         self.assertNotIn('База собрана', ov.text.toPlainText())                # второй круг: она - в подвале окна
         self.assertNotIn('Задание 1', ov.text.toPlainText())                   # «Ждут запуска» убрано из «Обзора»
-        self.w.open_page('Задания')
-        tasks = self.w.page('Задания')
+        names = [self.w.nav.item(i).text() for i in range(self.w.nav.count())]
+        self.assertIn('Задания на копирование', names)                          # третий круг «Обзора»
+        self.assertNotIn('Задания', names)
+        self.w.open_page('Задания на копирование')
+        tasks = self.w.page('Задания на копирование')
         self.assertTrue(wait(lambda: tasks.t.rowCount() == 1))
+        self.assertTrue(self.w.footer.text().startswith('База собрана '), self.w.footer.text())   # подвал окна
+        self.assertIn(': носителей 4, файлов ', self.w.footer.text())
         self.assertEqual(tasks.t.item(0, 2).text(), 'не запускалось')
         self.w.open_page('Диски и папки')
         dp = self.w.page('Диски и папки')
@@ -101,6 +106,24 @@ class WindowTest(Base):
                 c.close()
         self.assertTrue(wait(applied))
         self.assertIn('Применены новые модули', self.w.statusBar().currentMessage())
+
+    def test_footer_text(self):
+        self.assertEqual(app.footer_text(('15.11.2026 22:52', 57, 11_300_000)),
+                         'База собрана 15.11 22:52: носителей 57, файлов 11,3 млн')
+        self.assertEqual(app.footer_text(('15.11.2026 22:52', 3, 45_600)), 'База собрана 15.11 22:52: носителей 3, файлов 45,6 тыс.')
+        self.assertEqual(app.footer_text(('15.11.2026 22:52', 1, 950)), 'База собрана 15.11 22:52: носителей 1, файлов 950')
+        self.assertEqual(app.footer_text(None), 'База ещё не собрана')
+        info = app.sv.base_info()
+        self.assertEqual(self.w.footer.text(), app.footer_text(info))
+        self.assertEqual(app.built_short('2026-11-15 22:52:10'), '15.11 22:52')        # ISO - на всякий случай
+        self.assertEqual(app.built_short('5.1.2026 9:05'), '05.01 09:05')
+        w2 = app.Window()                                                         # подвал - сразу при запуске
+        try:
+            self.assertEqual(w2.footer.text(), app.footer_text(info))
+        finally:
+            w2.timer.stop()
+            self.assertTrue(wait(lambda: not w2.updating))
+            w2.close()
 
 
 HIDDEN = {'recovery-plan', 'recovery-staging', 'family-plan', 'family-check', 'mvlist', 'manual', 'fix-manual',
@@ -265,8 +288,9 @@ class CommandsTest(WindowTest):
         self.run_cmd('mklist create', write=True)
         self.assertTrue((hb.TASKS / 'Новое задание').is_dir(), '\n'.join(self.cp.lines))
         self.assertIn('Создано задание', self.asked[-1])
-        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания'))
-        tasks = self.w.page('Задания')
+        self.assertIn('Задания на копирование', self.asked[-1])
+        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания на копирование'))
+        tasks = self.w.page('Задания на копирование')
         self.assertTrue(wait(lambda: any(r['task'] == 'Новое задание' for r in tasks.rows)))
 
 
