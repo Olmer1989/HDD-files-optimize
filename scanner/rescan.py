@@ -180,9 +180,9 @@ def normalize_folders(root, folders):
         raise ValueError('Не заданы папки')
     res = []
     for raw in folders:
-        rel = (raw or '').strip().strip('\\')
+        rel = (raw or '').strip('\\')            # 1.6.1: пробелы по краям - часть имени папки, не обрезаются
         p = PureWindowsPath(rel)
-        if not rel or '/' in rel or ':' in rel or p.drive or p.root or any(x in ('.', '..') for x in p.parts):
+        if not rel.strip() or '/' in rel or ':' in rel or p.drive or p.root or any(x in ('.', '..') for x in p.parts):
             raise ValueError(f'Недопустимая папка «{raw}»: нужен путь от корня диска без буквы, например «Фото\\2014»')
         current, names = Path(root), []
         for part in p.parts:

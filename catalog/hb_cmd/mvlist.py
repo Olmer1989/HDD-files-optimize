@@ -54,7 +54,7 @@ def task_info(task, serials, jobs):
     for f in vols:
         n = f[0].strip()
         names[n] = serials.get(f[1].strip().upper()) or (n if n in jobs else None)
-    sub = vols[0][2].strip().strip(SEP) if len(vols[0]) >= 3 else ''
+    sub = vols[0][2].strip(SEP) if len(vols[0]) >= 3 else ''   # пробелы - часть имени (этап 16)
     rows = []
     if (task / 'список.tsv').exists():
         for f in read_tsv(task / 'список.tsv'):
@@ -346,9 +346,9 @@ def recheck(c, jobs, task):
     ok = {(r[0], r[3]) for r in res['lines']}
     bad = []
     for f in rows:
-        if (f[0], f[3].strip()) in ok:
+        if (f[0], f[3]) in ok:
             continue
-        if c.execute('select 1 from files where disk=? and path=?', (disk, f[3].strip() + SEP + f[0])).fetchone():
+        if c.execute('select 1 from files where disk=? and path=?', (disk, f[3] + SEP + f[0])).fetchone():
             continue                                        # уже перенесён прежним запуском
         bad.append(f[0])
     if bad:
@@ -690,8 +690,9 @@ def plan_v3(c, jobs, src, only=None):
 
 def dest_path(row):
     """Строка перемещение.tsv -> путь после переноса (7-я колонка «снять» - второй проход, этап 13)."""
-    path, folder = row[0], str(row[3]).strip()
-    strip = str(row[6]).strip() if len(row) >= 7 else ''
+    # имена папок - как записаны: пробелы не обрезаются (этап 16), только «\» и перевод строки последнего поля
+    path, folder = row[0], str(row[3]).strip(SEP + '\r\n')
+    strip = str(row[6]).strip(SEP + '\r\n') if len(row) >= 7 else ''
     if strip and path.startswith(strip + SEP):
         return folder + SEP + path[len(strip) + 1:]
     return folder + SEP + path

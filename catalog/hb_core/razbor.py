@@ -223,6 +223,7 @@ class Plan:
         self.deps = collections.defaultdict(list)                    # (группа, диск) -> (путь, sha, путь представителя)
         self.total = [0, 0]
         self.info = {}
+        self.items = []                                              # collect: пофайловый список (окно, этап 16)
 
     def group(self, g, route):
         if g not in self.groups:
@@ -246,10 +247,17 @@ class Plan:
         return G_TYPE
 
 
-def planner(c, disk, dirs, marks, detail=False):
+def planner(c, disk, dirs, marks, detail=False, collect=None):
     """Расчёт разбора носителя disk по направлениям dirs и отметкам marks (MarkSet, может включать черновик).
-    detail=True - ещё и строки заданий поштучно (подготовка заданий) и тёзки без хеша на дисках направлений."""
+    detail=True - ещё и строки заданий поштучно (подготовка заданий) и тёзки без хеша на дисках направлений.
+    collect=(номер направления, {исходы}) - окно «Список файлов» (этап 16): каждый файл с таким исходом этого
+    направления - в P.items поштучно, тем же расчётом (функция outcome), что и суммы части А: файлы с хешем и «особые» -
+    в account(), остаток папок без хеша - отдельным проходом только по нужным папкам (сверка числа с суммами папок).
+    Элемент: [путь, размер, sha, тип, исход, недостающие диски, {диск: (вид, подробность)}]; вид для «копировать» по
+    каждому недостающему диску: 'rep' (пишется), 'dup' (то же содержимое пишется из другого пути), 'nohash' (без хеша,
+    пишется), 'blocked' (не пишется: причина)."""
     P = Plan(disk, dirs, marks)
+    want = None if collect is None else (collect[0], frozenset(collect[1]))
     roots = moved_roots(c, disk)
     cols = 'folder, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(N_TYPES))
     own = {}
@@ -481,6 +489,10 @@ def planner(c, disk, dirs, marks, detail=False):
         o, num, miss = outcome(r, k, mask, dok)
         P.part_a[(o, num)][0] += 1
         P.part_a[(o, num)][1] += size
+        item = None
+        if want is not None and num == want[0] and o in want[1]:
+            item = [path, size, sha, k, o, tuple(miss), {}]
+            P.items.append(item)
         if r.state != R_DIR or r.mark is None:
             return
         g = P.group(_group(r, folder if not r.moved else original_of(folder, roots)[0], roots), r)
@@ -500,6 +512,9 @@ def planner(c, disk, dirs, marks, detail=False):
             if d == disk:
                 continue
             why = block_reason(path, d, sha)
+            if item is not None:
+                item[6][d] = (('blocked', why, g['key'] if sha else None) if why else
+                              (('hash', g['key']) if sha else ('nohash', '')))
             if sha:
                 if why:
                     blocked_sha[(g['key'], d, sha)].append((path, why, size))
@@ -587,6 +602,9 @@ def planner(c, disk, dirs, marks, detail=False):
                 g['per_disk'][d][0] += n; g['per_disk'][d][1] += b
                 P.unhashed_copy[d][0] += n; P.unhashed_copy[d][1] += b
 
+    if want is not None:
+        _collect_rest(c, P, disk, want, folders, dn, route, docs_ok, outcome, src_bit, special, blocked_pref, ftype)
+
     # представители одинакового содержимого внутри задания; заблокированные - только если исполнимого экземпляра нет
     for (gk, d), by_sha in reps.items():
         g = P.groups[gk]
@@ -605,6 +623,16 @@ def planner(c, disk, dirs, marks, detail=False):
         for path, why, size in sorted(lst):
             P.blocked.append((path, d, why, size))
             P.groups[gk]['blocked'] += 1
+
+    if want is not None:                                         # «копировать»: пишется ли этот экземпляр
+        for it in P.items:
+            for d, st in list(it[6].items()):
+                if st[0] == 'hash':
+                    rep = reps.get((st[1], d), {}).get(it[2])
+                    it[6][d] = ('rep', '') if rep and rep[0] == it[0] else ('dup', rep[0] if rep else '')
+                elif st[0] == 'blocked':
+                    rep = reps.get((st[2], d), {}).get(it[2]) if len(st) > 2 and st[2] is not None else None
+                    it[6][d] = ('blocked', st[1], rep[0] if rep else '')   # rep - то же содержимое пишется из другого пути
 
     # ---------- detail: файлы без хеша поштучно (строки заданий) и тёзки ----------
     if detail and need_files:
@@ -678,6 +706,54 @@ def planner(c, disk, dirs, marks, detail=False):
                   issues=c.execute('select count(*) from issues where disk=?', (disk,)).fetchone()[0],
                   is_target=[n for n, d in dirs.items() if disk in d.disks])
     return P
+
+
+def _collect_rest(c, P, disk, want, folders, dn, route, docs_ok, outcome, src_bit, special, blocked_pref, ftype):
+    """collect (этап 16): файлы без хеша, которые planner считает суммами папок, - поштучно, только в папках, где по
+    суммам есть нужный исход; тот же outcome. Число собранных = сумме по папкам, иначе - ошибка итога."""
+    def wanted(f, k):
+        o, num, _m = outcome(route[f], k, src_bit, docs_ok[f])
+        return num == want[0] and o in want[1]
+    need = {f for f in folders if any(dn[f][k] and wanted(f, k) for k in range(N_TYPES))}
+    if not need:
+        return
+    expected = sum(dn[f][k] for f in need for k in range(N_TYPES) if dn[f][k] and wanted(f, k))
+    tops = set()
+    for f in sorted(need, key=lambda x: (x.count(SEP), x)):
+        if '' in tops:
+            break
+        p, inside = f, False
+        while p:
+            if p in tops:
+                inside = True
+                break
+            p = parent_of(p)
+        if not inside:
+            tops.add(f)
+    seen = 0
+    for t in tops:
+        cond, args = inside_cond('path', t)
+        for path, size, nm in c.execute(f'select path, size, name_lc from files where disk=? and {cond} and sha is null',
+                                        [disk] + args):
+            f = parent_of(path)
+            if f not in need or path in special:
+                continue
+            size = size or 0
+            k = ftype(path, nm, size)
+            o, num, miss = outcome(route[f], k, src_bit, docs_ok[f])
+            if num != want[0] or o not in want[1]:
+                continue
+            seen += 1
+            st = {}
+            for d in miss:
+                if d == disk:
+                    continue
+                fl = f.lower()
+                st[d] = (('blocked', B_CONFLICT, '') if any(fl == x or fl.startswith(x + SEP) for x in blocked_pref.get(d, ()))
+                         else ('nohash', ''))
+            P.items.append([path, size, None, k, o, tuple(miss), st])
+    if seen != expected:
+        P.errors.append(f'список файлов: без хеша прочитано {seen}, по суммам папок {expected}')
 
 
 def _twins(c, disk, folders, children, copied):
@@ -889,21 +965,33 @@ def group_states(P):
 
 # ---------- «Пересчитать хеши спорных файлов» (после ответа «НЕТ»/«НЕДОСТАТОЧНО» в candel) ----------
 
-def contested(c, disk, folder, main=MAIN):
-    """Папки, где пересканирование с хешем всех файлов может снять сомнение: на проверяемом носителе - файлы без хеша
-    (кроме пустых; корень - тоже папка ''); на дисках-копиях (45, 77) - тёзки без хеша (имя и размер) файлов
-    проверяемой папки и неподтверждённые записи Z/U/X с ожидаемым хешем. Ничего не сканирует.
-    -> {диск: [(папка, файлов)]}; вложенные папки, чей предок уже в списке, свёрнуты в предка."""
+WHY_NOHASH = 'без хеша на этом носителе'
+EV_WORD = {'Z': 'сверен только размер', 'U': 'со слов владельца', 'X': 'файл изменился после подсчёта хеша'}
+
+
+def contested_rows(c, disk, folder, main=MAIN):
+    """Спорные файлы поштучно (этап 16; правила - как у contested, contested - их свёртка по папкам): на проверяемом
+    носителе - файлы без хеша (кроме пустых); на дисках-копиях (45, 77) - тёзки без хеша (то же имя и размер) файлов
+    проверяемой папки и записи с ожидаемым хешем (Z/U/X) из хешей папки. Файл (диск, путь) - один раз, причины через
+    «; ». Ничего не сканирует и не пишет. -> [(диск, путь, размер, дата, ev, причина)]."""
     folder = (folder or '').strip(SEP)
     cond, args = prefix_cond('path', folder)
-    res = collections.defaultdict(collections.Counter)
+    rows = {}
+
+    def add(d, p, s, mt, ev, why):
+        cur = rows.get((d, p))
+        if cur is None:
+            rows[(d, p)] = [s, mt, ev, [why]]
+        elif why not in cur[3]:
+            cur[3].append(why)
     keys, shas = set(), set()
-    for p, s, nm, sha in c.execute(f'select path, size, name_lc, sha from files where disk=? and {cond}', [disk] + args):
+    for p, s, nm, sha, mt, ev in c.execute(f'select path, size, name_lc, sha, mtime, ev from files where disk=? and {cond}',
+                                           [disk] + args):
         if sha:
             shas.add(sha)
             keys.add((nm, s))
         elif s:
-            res[disk][parent_of(p)] += 1
+            add(disk, p, s, mt, ev, WHY_NOHASH)
             keys.add((nm, s))
     if keys:
         _keys(c, 'ct_k', ('name_lc', 'size'), keys)
@@ -912,17 +1000,31 @@ def contested(c, disk, folder, main=MAIN):
             if d == disk:
                 ec, eargs = prefix_cond('g.path', folder)
                 excl = f' and not ({ec})'
-            q = f"""select g.path from ct_k k cross join files g indexed by files_name
+            q = f"""select g.path, g.size, g.mtime, g.ev from ct_k k cross join files g indexed by files_name
                     on g.name_lc=k.name_lc and g.size=k.size and g.disk=? where g.sha is null and g.size>0{excl}"""
-            for (p,) in c.execute(q, [d] + eargs):
-                res[d][parent_of(p)] += 1
+            for p, s, mt, ev in c.execute(q, [d] + eargs):
+                add(d, p, s, mt, ev, f'тёзка без хеша: то же имя и размер, что у файла {disk}')
     if shas:
         c.execute('create temp table if not exists ct_s(sha text primary key)')
         c.execute('delete from ct_s')
         c.executemany('insert or ignore into ct_s values (?)', ((x,) for x in shas))
         for d in main:
-            for (p,) in c.execute('select g.path from ct_s s cross join files g on g.sha_exp=s.sha and g.disk=?', (d,)):
-                res[d][parent_of(p)] += 1
+            # индекс files_exp - явно: без него (дата и степень не в индексе) SQLite выбирал проход по всему диску
+            for p, s, mt, ev in c.execute('select g.path, g.size, g.mtime, g.ev from ct_s s cross join files g '
+                                          'indexed by files_exp on g.sha_exp=s.sha and g.disk=? '
+                                          "where g.sha_exp is not null and coalesce(g.ev, '') not in ('S', 'C')",
+                                          (d,)):          # подтверждённая запись спорной не бывает (раздел 4)
+                add(d, p, s, mt, ev, f'копия не проверена ({EV_WORD.get(ev, ev or "?")})')
+    return [(d, p, v[0], v[1], v[2], '; '.join(v[3])) for (d, p), v in rows.items()]
+
+
+def contested(c, disk, folder, main=MAIN):
+    """Папки, где пересканирование с хешем всех файлов может снять сомнение - свёртка contested_rows по папкам (этап
+    16: файл, попавший по двум причинам, считается один раз). Ничего не сканирует.
+    -> {диск: [(папка, файлов)]}; вложенные папки, чей предок уже в списке, свёрнуты в предка."""
+    res = collections.defaultdict(collections.Counter)
+    for d, p, _s, _mt, _ev, _why in contested_rows(c, disk, folder, main):
+        res[d][parent_of(p)] += 1
     out = {}
     for d, cnt in res.items():
         tops = []

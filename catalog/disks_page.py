@@ -34,7 +34,7 @@ SCAN_RU = {'complete': 'полное', 'complete_with_inventory_errors': 'пол
 # состав папки: фото, видео, тексты, прочие, мусор (таблица folders, b0..b4)
 TYPE_NAMES = ('фото', 'видео', 'тексты', 'прочие', 'мусор')
 TYPE_COLORS = ('#42a5f5', '#ab47bc', '#66bb6a', '#ffa726', '#bdbdbd')
-T_CHECK, T_NAME, T_FILES, T_GB, T_TYPE0, T_DEC = 0, 1, 2, 3, 4, 9
+T_CHECK, T_NAME, T_FILES, T_GB, T_NOHASH, T_TYPE0, T_DEC = 0, 1, 2, 3, 4, 5, 10   # «Без хеша» - этап 16
 DISK_ROLE = Qt.UserRole + 1          # у строки дерева - её носитель (найденные папки - с разных дисков)
 TYPES_ROLE = Qt.UserRole + 2         # ГБ по типам - полоска состава под именем
 MARK_ROLE = Qt.UserRole + 3          # решение владельца - плашка
@@ -46,12 +46,44 @@ WHY_TEXT = ('Здесь видно, что лежит на каждом носи
 
 
 def scan_text(r):
-    """«08.11.2026 · полное · частичных: 2» (сканирование носителя)."""
+    """«08.11.2026 · полное · после полной описи 1 раз пересканированы выбранные папки (2 папки)» (этап 16: вместо
+    «частичных: 2» - что это значит; число - сколько раз пересканировали, а не сколько папок)."""
     st = (r.get('status') or '').strip()
     bits = [r.get('scanned') or 'дата неизвестна', SCAN_RU.get(st, disk_ui.status_text(st))]
     if r.get('partial'):
-        bits.append(f'частичных: {r["partial"]}')
+        bits.append(sv.rescans_text(r['partial'], r.get('partial_folders') or 0))
     return ' · '.join(b for b in bits if b and b != '—')
+
+
+def nohash_html(res):
+    """Строка над деревом (этап 16): «Хеш есть у всех фото и видео» (или красная тревога) · «Без хеша: N файлов
+    (документы, архивы, другие — их тип при сканировании не выбирался)» · ссылка «Показать»."""
+    nh = res.get('nohash') or {}
+    total, media, zux = nh.get('total', 0), nh.get('media', 0), nh.get('zux', 0)
+    head = res.get('hash') or ''
+    if not head:
+        return ''
+    color = '#c62828' if res.get('alarm') else '#2e7d32'
+    h = f'<span style="color:{color}"><b>{html_esc(head)}</b></span>'
+    other = total - media
+    if other:
+        h += (f' · Без хеша: <b>{n_ru(other)}</b> {files_word(other)} (документы, архивы, другие — их тип при '
+              'сканировании не выбирался)')
+    if zux:
+        h += f'; из них непроверенных копий (Z/U/X): {n_ru(zux)}'
+    if total:
+        h += ' · <a href="nohash:" style="color:#1565c0">Показать</a>'
+    return h
+
+
+def files_word(n):
+    n10, n100 = (n or 0) % 10, (n or 0) % 100
+    return 'файл' if n10 == 1 and n100 != 11 else 'файла' if n10 in (2, 3, 4) and n100 not in (12, 13, 14) else 'файлов'
+
+
+def html_esc(x):
+    import html
+    return html.escape(str(x))
 
 
 def disk_cell(r):
@@ -128,12 +160,14 @@ class DisksPage(QWidget):
     """«Диски и папки» (16.11.2026, «всё оставляем, но красиво»): поиск, носители, папки выбранного носителя с составом,
     решением владельца и панелью действий. Действия берут носитель из самой строки (найденные папки - с разных дисков)."""
     HEAD = ['Диск', 'Подключён', 'Свободно', 'Файлов', 'ГБ', 'Сканирование']
-    TREE = ['', 'Папка', 'Файлов', 'ГБ', 'фото', 'видео', 'тексты', 'прочие', 'мусор', 'Решение владельца']
+    TREE = ['', 'Папка', 'Файлов', 'ГБ', 'Без хеша', 'фото', 'видео', 'тексты', 'прочие', 'мусор', 'Решение владельца']
 
     def __init__(self, win):
         super().__init__()
         self.win, self.rows, self.disk, self.found = win, [], None, False   # found - показаны найденные папки
         self.want = None
+        self.nohash = {}                # этап 16: носитель -> nohash_info (столбец «Без хеша»), до новой сборки базы
+        self.nohash_busy = set()
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
         title = QLabel('Диски и папки')
@@ -184,9 +218,16 @@ class DisksPage(QWidget):
         self.tree_sum.setStyleSheet('color:#555')
         head.addWidget(self.tree_sum)
         ll.addLayout(head)
+        self.hash_lab = QLabel('')                      # этап 16: «Хеш есть у всех фото и видео · Без хеша: N … · Показать»
+        self.hash_lab.setTextFormat(Qt.RichText)
+        self.hash_lab.setWordWrap(True)
+        self.hash_lab.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.hash_lab.linkActivated.connect(lambda _h: self.show_nohash(self.disk, ''))
+        ll.addWidget(self.hash_lab)
         legend = QLabel('Полоска под именем — состав папки: ' + ' '.join(
             f'<span style="background:{c}">&nbsp;&nbsp;&nbsp;</span>&nbsp;{n}&nbsp;&nbsp;' for n, c in
-            zip(TYPE_NAMES, TYPE_COLORS)) + ' · столбцы типов — в ГБ; «↑» у решения — от родительской папки.')
+            zip(TYPE_NAMES, TYPE_COLORS)) + ' · столбцы типов — в ГБ; «Без хеша» — файлов без SHA-256 (щелчок по '
+            'числу — их список); «↑» у решения — от родительской папки.')
         legend.setStyleSheet('font-size:8pt; color:#616161')
         legend.setWordWrap(True)
         ll.addWidget(legend)
@@ -205,6 +246,9 @@ class DisksPage(QWidget):
         self.tree.itemExpanded.connect(self.expand)
         self.tree.itemSelectionChanged.connect(self.selected)
         self.tree.itemChanged.connect(self.item_changed)
+        self.tree.itemClicked.connect(self.item_clicked)
+        self.tree.headerItem().setToolTip(T_NOHASH, 'Файлов без хеша (SHA-256) в папке вместе с подпапками (размер больше '
+                                                    'нуля). Щелчок по числу - их список.')
         ll.addWidget(self.tree, 1)
         # панель действий - карточкой
         act = QFrame()
@@ -264,7 +308,15 @@ class DisksPage(QWidget):
             self.info.setText('Отметьте галочками папки и нажмите «Пересканировать выбранные…».')
 
     def refresh(self):
-        """При каждом показе раздела и по «Обновить»: носители и какие из них подключены сейчас."""
+        """При каждом показе раздела и по «Обновить»: носители и какие из них подключены сейчас. Новая сборка базы -
+        числа «Без хеша» считаются заново."""
+        gen = None
+        try:
+            gen = sv.generation()
+        except Exception:                                 # noqa: BLE001 - базы ещё нет
+            pass
+        if gen != getattr(self, 'nohash_gen', None):
+            self.nohash, self.nohash_gen = {}, gen
         self.win.bg.run(sv.disks, ok=self.render)
 
     def render(self, rows):
@@ -322,12 +374,14 @@ class DisksPage(QWidget):
             self.disk = r['disk']
             self.tree.clear()
             self.info.setText('')
+            self.hash_lab.setText('Без хеша: считаю…')
             self.tree_title.setText(f'Папки диска {disk_cell(r)}')
             self.tree_sum.setText(f'{n_ru(r["files"])} файлов · {gb_ru(r["gib"])} ГБ')
             root = QTreeWidgetItem()
             root.setText(T_NAME, f'{self.disk} (весь диск)')
             root.setData(T_NAME, Qt.UserRole, '')
             root.setData(T_NAME, DISK_ROLE, self.disk)
+            self.nohash_cell(root)
             self.tree.addTopLevelItem(root)
             self.load(root)
             root.setExpanded(True)
@@ -336,11 +390,66 @@ class DisksPage(QWidget):
             self.update_actions()
 
     def show_hash_info(self, disk, res):
+        if res.get('nohash') is not None:
+            self.nohash[disk] = res['nohash']
+            self.fill_nohash(disk)
         if disk != self.disk or self.found:
             return
         r = self.row_of(disk)
         self.tree_sum.setText(f'{n_ru(r.get("files"))} файлов · {gb_ru(r.get("gib") or 0)} ГБ · {res["text"]}')
         self.tree_sum.setToolTip(res.get('tip', ''))
+        self.hash_lab.setText(nohash_html(res))
+
+    # --- «Без хеша» (этап 16) ---
+    def need_nohash(self, disk):
+        """Число «без хеша» по папкам носителя - один проход в фоне на носитель (нужно для найденных папок)."""
+        if disk in self.nohash or disk in self.nohash_busy:
+            return
+        self.nohash_busy.add(disk)
+
+        def got(res):
+            self.nohash_busy.discard(disk)
+            self.nohash[disk] = res
+            self.fill_nohash(disk)
+        self.win.bg.run(sv.nohash_info, disk, ok=got, quiet=True)
+
+    def nohash_cell(self, it):
+        disk, path = it.data(T_NAME, DISK_ROLE), it.data(T_NAME, Qt.UserRole) or ''
+        info = self.nohash.get(disk)
+        if info is None:
+            it.setText(T_NOHASH, '…')
+            return
+        n = info['folders'].get(path, 0)
+        it.setData(T_NOHASH, Qt.UserRole, n)
+        it.setTextAlignment(T_NOHASH, Qt.AlignRight | Qt.AlignVCenter)
+        if n:
+            it.setText(T_NOHASH, n_ru(n))
+            it.setForeground(T_NOHASH, QColor('#1565c0'))
+            f = QFont(self.tree.font())
+            f.setUnderline(True)
+            it.setFont(T_NOHASH, f)
+            it.setToolTip(T_NOHASH, f'{n_ru(n)} файлов без хеша - щелчок: их список')
+        else:
+            it.setText(T_NOHASH, '—')                     # ноль - серый прочерк, не ссылка
+            it.setForeground(T_NOHASH, QColor('#bdbdbd'))
+
+    def fill_nohash(self, disk):
+        self.tree.blockSignals(True)
+        for it in self.all_items():
+            if it.data(T_NAME, DISK_ROLE) == disk:
+                self.nohash_cell(it)
+        self.tree.blockSignals(False)
+
+    def item_clicked(self, it, col):
+        if col == T_NOHASH and it.data(T_NOHASH, Qt.UserRole):
+            self.show_nohash(it.data(T_NAME, DISK_ROLE), it.data(T_NAME, Qt.UserRole) or '')
+
+    def show_nohash(self, disk, path):
+        """Окно «Список файлов» - файлы без хеша папки (весь носитель - '')."""
+        if not disk:
+            return None
+        import filelist_window
+        return filelist_window.open_list(self.win, kind='nohash', disk=disk, folder=path)
 
     def load(self, item):
         disk, path = item.data(T_NAME, DISK_ROLE), item.data(T_NAME, Qt.UserRole)
@@ -379,6 +488,7 @@ class DisksPage(QWidget):
                     ch.setForeground(T_TYPE0 + k, QColor('#bdbdbd'))
         for k in range(T_FILES, T_DEC):
             ch.setTextAlignment(k, Qt.AlignRight | Qt.AlignVCenter)
+        self.nohash_cell(ch)
         if mark and mark.get('text'):
             ch.setData(T_DEC, MARK_ROLE, mark)
             ch.setToolTip(T_DEC, mark['text'] + ('' if mark.get('own') else f' (от «{mark.get("src")}»)')
@@ -560,6 +670,9 @@ class DisksPage(QWidget):
                                       r.get('types'), r.get('mark'))         # состав и решение - как в дереве
                 self.tree.addTopLevelItem(it)
             self.tree.blockSignals(False)
+            self.hash_lab.setText('')
+            for d in {r['disk'] for r in rows}:
+                self.need_nohash(d)
             self.info.setText(f'Найдено папок: {len(rows)} (вложенные совпадения не показаны). Отметьте нужные '
                               'галочками — действия ниже работают и для найденных папок.')
             self.update_actions()

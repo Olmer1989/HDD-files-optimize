@@ -13,7 +13,7 @@ import build_pilot as bp
 from hb_core import paths
 from hb_core.paths import journal_paths
 from hb_core.consts import DECISION_HEAD, EXCLUSION_HEAD, MANUAL_HEAD, PARTIAL_DIR, SEP
-from hb_core.util import complete_lines, sha1, stat_sig, tsv_rows
+from hb_core.util import complete_lines, row_fields, sha1, stat_sig, tsv_rows
 
 
 # ---------- сборка ----------
@@ -56,8 +56,8 @@ def read_exclusions():
     """Папки, которые база не учитывает: диск -> [папка]. Строка заголовка необязательна."""
     res = collections.defaultdict(list)
     for f in read_table(paths.EXCLUSIONS):
-        f = [x.strip() for x in f] + ['', '']
-        if not f[0] or f[0].lower() == 'диск' or not f[1].strip(SEP):
+        f = row_fields(f, paths=(1,), pad=2)             # путь - как в таблице (этап 16)
+        if not f[0] or f[0].lower() == 'диск' or not f[1].strip(SEP).strip():
             continue
         res[f[0]].append(f[1].strip(SEP))
     return res
@@ -112,7 +112,7 @@ def manual_time(date):
 
 def manual_rows():
     """Строки таблицы ручных операций: (номер строки в файле, поля)."""
-    return [(line_no, [x.strip() for x in f] + [''] * 7) for line_no, f in enumerate(read_table(paths.MANUAL)[1:], 2)]
+    return [(line_no, row_fields(f, paths=(3, 5), pad=7)) for line_no, f in enumerate(read_table(paths.MANUAL)[1:], 2)]
 
 
 def event_stream():
@@ -152,8 +152,8 @@ def discover(jobs):
         mods[f'ручная операция: строка {n:05d}'] = dict(kind='ручная операция', time=manual_time(f[0]), size=0, mtime_ns=0,
                                                        checksum=sha1('\t'.join(f).strip().encode()), data=(n, f))
     for n, f in enumerate(read_table(paths.EXCLUSIONS), 1):
-        f = [x.strip() for x in f] + ['', '']
-        if f[0] and f[0].lower() != 'диск' and f[1].strip(SEP):
+        f = row_fields(f, paths=(1,), pad=2)             # путь - как в таблице (этап 16)
+        if f[0] and f[0].lower() != 'диск' and f[1].strip(SEP).strip():
             mods[f'исключение: строка {n:05d}'] = dict(kind='исключение', time=0, size=0, mtime_ns=0,
                                                        checksum=sha1('\t'.join(f).strip().encode()), data=(f[0], f[1].strip(SEP)))
     return mods

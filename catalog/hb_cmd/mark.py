@@ -24,7 +24,7 @@ def cmd_mark(a):
     if a.from_file:
         for f in read_tsv(a.from_file):
             if len(f) >= 2 and f[0].strip().lower() not in ('путь', 'папка'):
-                rows.append((f[0].strip(), f[1].strip()))
+                rows.append((f[0], f[1].strip()))        # путь - как в файле (этап 16)
     if not rows:
         out('Нечего отмечать: укажите --folder и --where, --disk-wide или --from-file.')
         raise SystemExit(1)

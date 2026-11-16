@@ -176,11 +176,12 @@ class Template24(unittest.TestCase):
 
     def test_version_line_and_no_pause_guard(self):
         lines = TEMPLATE.read_text(encoding='utf-8-sig').splitlines()
-        self.assertIn('версия 2.5', lines[0])
-        self.assertEqual(sv.copy_template_version(TEMPLATE.parent), (2, 5))
-        self.assertTrue(sv.copy_template_version(TEMPLATE.parent) >= (2, 4))     # очередь: 2.5 - как 2.4
-        old = TEMPLATE.parent / 'Копировать - версия 2.4.ps1.txt'
-        self.assertIn('версия 2.4', old.read_text(encoding='utf-8-sig').splitlines()[0])
+        self.assertIn('версия 2.6', lines[0])
+        self.assertEqual(sv.copy_template_version(TEMPLATE.parent), (2, 6))
+        self.assertTrue(sv.copy_template_version(TEMPLATE.parent) >= (2, 4))     # очередь: 2.6 - как 2.4
+        for v in ('2.4', '2.5'):
+            old = TEMPLATE.parent / f'Копировать - версия {v}.ps1.txt'
+            self.assertIn(f'версия {v}', old.read_text(encoding='utf-8-sig').splitlines()[0])
         for i, x in enumerate(lines):
             if 'Read-Host' in x:                       # каждая пауза и вопрос - под одним флагом «без пауз»
                 self.assertTrue(any('if (-not $NoPause)' in y for y in lines[max(0, i - 2):i + 1]), f'строка {i + 1}: {x}')
@@ -436,6 +437,78 @@ class Template25(unittest.TestCase):
         p, rows, out = self.run_ps(timeout=900)
         self.assertEqual(p.returncode, 0, out)
         self.assertEqual((rows[0][2], rows[0][4]), ('уже есть, SHA-256 совпал', h.upper()))
+
+
+@unittest.skipUnless(sys.platform == 'win32' and TEMPLATE.exists(), 'нужны Windows и шаблон копирования')
+class Template26(unittest.TestCase):
+    """Версия 2.6 (этап 16, решение владельца): место нужно только под файлы, которых на месте назначения ещё нет;
+    папка цели из тома.tsv не обрезается по пробелам. -TestFreeBytes - свободное место для теста. Только временные
+    папки, Windows PowerShell 5.1."""
+    tearDown, write_task, run_ps, fingerprint = (Template24.tearDown, Template24.write_task, Template24.run_ps,
+                                                 Template24.fingerprint)
+    TOMA = 'HDD90\tAAAA0090\nHDD45\tAAAA0045\n'
+    GB = 1024 ** 3
+
+    def setUp(self):
+        TemplateReview.setUp(self)
+        self.roots = f'HDD90={self.src};HDD45={self.dst}'
+
+    def put(self, rel, content, root=None):
+        f = (root or self.dst / DEST / 'HDD90') / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(content)
+        return f
+
+    def lines(self):
+        old, new = b'O' * 3000, b'N' * 2000
+        (self.src / 'A' / 'old.jpg').write_bytes(old)
+        (self.src / 'A' / 'new.jpg').write_bytes(new)
+        return old, new, [f'HDD45\tA\\old.jpg\t3000\tтест\t{sha(old)}', f'HDD45\tA\\new.jpg\t2000\tтест\t{sha(new)}']
+
+    def test_space_counts_only_files_not_yet_on_target(self):
+        old, new, lines = self.lines()
+        f = self.put('A\\old.jpg', old)                                          # уже лежит, тот же размер
+        before = f.stat().st_mtime_ns
+        self.write_task(self.TOMA, lines)
+        p, rows, out = self.run_ps('-TestFreeBytes', str(self.GB + 2500))       # хватает на новый, не на оба (5000)
+        self.assertEqual(p.returncode, 0, out)
+        self.assertIn('уже лежат на цели с тем же размером: 1', out)
+        self.assertEqual(sorted(r[2] for r in rows), ['скопирован, размер и SHA-256 совпали', 'уже есть, SHA-256 совпал'])
+        self.assertEqual(f.stat().st_mtime_ns, before)                           # лежавший файл не тронут
+        (self.dst / DEST / 'HDD90' / 'A' / 'new.jpg').unlink()
+        p, rows, out = self.run_ps('-TestFreeBytes', str(self.GB + 1500))       # на новый (2000) не хватает
+        self.assertEqual(p.returncode, 5, out)
+        self.assertIn('не хватает места', out)
+        self.assertEqual(rows, [])                                               # ничего не начато
+
+    def test_other_size_on_target_is_conflict_and_needs_no_space(self):
+        old, new, lines = self.lines()
+        f = self.put('A\\old.jpg', b'x' * 10)                                    # другой размер - КОНФЛИКТ
+        self.write_task(self.TOMA, lines)
+        p, rows, out = self.run_ps('-TestFreeBytes', str(self.GB + 2500))
+        self.assertEqual(p.returncode, 1, out)                                   # не всё: конфликт
+        self.assertIn('лежат на цели с другим размером: 1', out)
+        got = {r[6].rsplit('\\', 1)[-1]: r[2] for r in rows}
+        self.assertTrue(got['old.jpg'].startswith('КОНФЛИКТ: в цели другой размер'), got)
+        self.assertEqual(f.read_bytes(), b'x' * 10)                              # не перезаписан
+        self.assertTrue(got['new.jpg'].startswith('скопирован'))
+
+    def test_no_target_folder_counts_all_and_case_of_names(self):
+        old, new, lines = self.lines()
+        self.write_task(self.TOMA, lines)
+        p, rows, out = self.run_ps('-TestFreeBytes', str(self.GB + 4000))       # ничего не лежит - нужно 5000
+        self.assertEqual(p.returncode, 5, out)
+        self.put('a\\OLD.JPG', old)                                              # регистр имени - тот же файл (Windows)
+        p, rows, out = self.run_ps('-TestFreeBytes', str(self.GB + 2500))
+        self.assertEqual(p.returncode, 0, out)
+
+    def test_target_folder_with_spaces_is_kept(self):
+        old, new, lines = self.lines()
+        self.write_task('HDD90\tAAAA0090\nHDD45\tAAAA0045\t Моя папка\n', lines[1:])
+        p, rows, out = self.run_ps()
+        self.assertEqual(p.returncode, 0, out)
+        self.assertEqual((self.dst / ' Моя папка' / 'HDD90' / 'A' / 'new.jpg').read_bytes(), new)
+        self.assertFalse((self.dst / 'Моя папка').exists())
 
 
 if __name__ == '__main__':

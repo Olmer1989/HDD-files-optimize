@@ -333,6 +333,10 @@ class CommandsTest(WindowTest):
         self.assertTrue(self.cp.btn_write.isEnabled())
         put(f, path='B ')                                                   # правка формы гасит «Записать»
         self.assertFalse(self.cp.btn_write.isEnabled())
+        self.run_cmd('decide')                       # этап 16: пробел - часть имени, папки «B » в базе нет - отказ
+        self.assertIn('код выхода 1', self.cp.state.text())
+        self.assertFalse(self.cp.btn_write.isEnabled())
+        put(f, path='B')
         self.run_cmd('decide')
         text = self.run_cmd('decide --yes', write=True)
         self.assertIn('Записано', text)

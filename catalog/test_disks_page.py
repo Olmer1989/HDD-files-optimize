@@ -32,6 +32,12 @@ def row(disk, letter='', status='complete', label='', partial=0):
 ROWS = [row('Flash01'), row('Flash02', 'G:'), row('HDD09', 'F:', label='WDS200T1X0E - 2 ТБ - Работа - SN850', partial=2),
         row('HDD01', status='running'), row('HDD18', 'K:', status='complete_with_inventory_errors'), row('HDD100')]
 MARK_DIR = dict(kind='dir', text='Н2 Работа', own=True, src='')
+NOHASH = dict(total=3, media=1, by_type=[1, 0, 1, 0, 1], zux=0, folders={'': 3, 'Фото': 2, 'Прочее': 1})
+
+
+def hash_info(d):
+    return dict(text='опись от 01.01.2026', tip='', hash='⚠ Без хеша 1 фото и видео — копию нельзя проверить',
+                alarm=True, nohash=NOHASH)
 MARK_SKIP = dict(kind='skip', text='не копировать', own=False, src='весь носитель')
 
 
@@ -106,8 +112,8 @@ class DiskUiTest(unittest.TestCase):
 class DisksPageTest(unittest.TestCase):
     def setUp(self):
         self.p = mock.patch.multiple(app.sv, disks=lambda: [dict(r) for r in ROWS], folder_children=children,
-                                     hash_dates=lambda d, p: dict(text='', hint=''),
-                                     disk_hash_info=lambda d: dict(text='хеш у всех файлов · опись от 01.01.2026', tip=''),
+                                     hash_dates=lambda d, p: dict(text='', hint=''), generation=lambda: 'g1',
+                                     disk_hash_info=hash_info, nohash_info=lambda d: NOHASH,
                                      find_folders=lambda words: [dict(disk='HDD09', path='Работа\\Сафари', files=4, gib=0.4,
                                                                       types=[0.3, 0.1, 0, 0, 0], mark=MARK_DIR),
                                                                  dict(disk='HDD01', path='Сафари', files=2, gib=0.1)])
@@ -139,7 +145,7 @@ class DisksPageTest(unittest.TestCase):
 
     def test_scan_column(self):
         st = dict(zip([r['disk'] for r in self.page.rows], self.col(5)))
-        self.assertEqual(st['HDD09'], '01.01.2026 · полное · частичных: 2')
+        self.assertEqual(st['HDD09'], '01.01.2026 · полное · после полной описи 2 раза пересканированы выбранные папки')
         self.assertEqual(st['HDD18'], '01.01.2026 · полное, есть нечитаемые места')
         self.assertEqual(st['HDD01'], '01.01.2026 · не закончено')
         self.assertIn('running', self.page.t.item(3, 5).toolTip())
@@ -151,11 +157,15 @@ class DisksPageTest(unittest.TestCase):
         self.assertEqual(root.text(app.T_NAME), 'HDD09 (весь диск)')
         self.assertEqual([root.child(i).text(app.T_NAME) for i in range(root.childCount())], ['Фото', 'Прочее', 'Пусто'])
         self.assertEqual(self.page.tree_title.text(), 'Папки диска F: — Работа - SN850 — HDD09')
-        self.assertIn('10 файлов · 1,0 ГБ · хеш у всех файлов · опись от 01.01.2026', self.page.tree_sum.text())
+        self.assertIn('10 файлов · 1,0 ГБ · опись от 01.01.2026', self.page.tree_sum.text())
+        h = self.page.hash_lab.text()                                               # этап 16: вместо «хеш у 73 %»
+        self.assertIn('⚠ Без хеша 1 фото и видео', h)
+        self.assertIn('Без хеша: <b>2</b> файла (документы, архивы, другие — их тип при сканировании не выбирался)', h)
+        self.assertIn('Показать</a>', h)
 
     def test_tree_columns_bar_and_decision(self):
         heads = [self.page.tree.headerItem().text(j) for j in range(self.page.tree.columnCount())]
-        self.assertEqual(heads, ['', 'Папка', 'Файлов', 'ГБ', 'фото', 'видео', 'тексты', 'прочие', 'мусор',
+        self.assertEqual(heads, ['', 'Папка', 'Файлов', 'ГБ', 'Без хеша', 'фото', 'видео', 'тексты', 'прочие', 'мусор',
                                  'Решение владельца'])
         foto, other, empty = (self.root().child(i) for i in range(3))
         self.assertEqual(foto.text(app.T_GB), '0,5')
@@ -253,6 +263,23 @@ class DisksPageTest(unittest.TestCase):
         self.page.refresh()
         self.assertEqual(self.page.disk, 'HDD100')
         self.assertEqual(self.page.rows[self.page.t.currentRow()]['disk'], 'HDD100')
+
+    def test_nohash_column_and_click(self):
+        """Этап 16: столбец «Без хеша» (поддерево, один проход на носитель), ноль - серый прочерк, щелчок по числу -
+        окно «Список файлов» этой папки; ссылка «Показать» - весь носитель."""
+        foto, other, empty = (self.root().child(i) for i in range(3))
+        self.assertEqual(self.root().text(app.T_NOHASH), '3')
+        self.assertEqual((foto.text(app.T_NOHASH), other.text(app.T_NOHASH), empty.text(app.T_NOHASH)), ('2', '1', '—'))
+        self.assertEqual(empty.foreground(app.T_NOHASH).color().name(), '#bdbdbd')
+        opened = []
+        import filelist_window
+        with mock.patch.object(filelist_window, 'open_list', lambda win, **kw: opened.append(kw)):
+            self.page.item_clicked(foto, app.T_NOHASH)
+            self.page.item_clicked(empty, app.T_NOHASH)                                # ноль - не ссылка
+            self.page.item_clicked(foto, app.T_GB)                                     # другой столбец - ничего
+            self.page.hash_lab.linkActivated.emit('nohash:')
+        self.assertEqual(opened, [dict(kind='nohash', disk='HDD09', folder='Фото'),
+                                  dict(kind='nohash', disk='HDD09', folder='')])
 
     def test_nothing_connected(self):
         with mock.patch.object(app.sv, 'disks', lambda: [row('HDD01'), row('Flash01')]):

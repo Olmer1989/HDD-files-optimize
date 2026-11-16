@@ -684,7 +684,7 @@ class FixDialog(QDialog):
 
     def fields(self):
         return [self.date.date().toString('dd.MM.yyyy'), self.act.currentText(), self.d1.currentData() or '',
-                self.p1.text().strip(), self.d2.currentData() or '', self.p2.text().strip(), self.note.text().strip()]
+                self.p1.text(), self.d2.currentData() or '', self.p2.text(), self.note.text().strip()]   # пути - без обрезки (этап 16)
 
     def changed(self, *_):
         on = self.act.currentText() != 'удалено'
@@ -701,7 +701,7 @@ class FixDialog(QDialog):
             self.result_fields = ed.fix_check(self.fields(), self.disks)
             if not self.reason.text().strip():
                 raise sv.Refused('Напишите, почему исправляете.')
-            if [x.strip() for x in self.result_fields] == [x.strip() for x in self.row['fields']]:
+            if sv.hb.row_fields(self.result_fields, (3, 5)) == sv.hb.row_fields(self.row["fields"], (3, 5)):
                 raise sv.Refused('Вы ничего не изменили.')
         except sv.Refused as e:
             self.msg.setText(str(e))

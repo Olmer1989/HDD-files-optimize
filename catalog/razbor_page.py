@@ -3,7 +3,7 @@
 Документ - «Проверка Архитектуры сортировки файлов\\Логика_v3_разбор_носителя.md» (разделы 1.2-1.6, 2.2, «Этап 2: экран»).
 Владелец выбирает носитель и режим («всё - в направление, кроме отмеченных» или «ничего, кроме отмеченных»), ставит
 папкам «Куда» (направление, «не копировать», «как у родителя») и сразу видит итог: что будет с каждым файлом (сумма =
-опись) и сколько писать на каждый диск. «Сохранить отметки» - предпросмотр, затем запись одним пакетом через
+опись) и сколько писать на каждый диск. Отметки сохраняются сразу (этап 16; прежде - «Сохранить отметки») через
 service.add_marks_batch. «Подготовить задания» - расчёт, показ, создание через service.razbor_tasks, переход в «Задания».
 
 Как устроено:
@@ -48,6 +48,16 @@ I: My Book (WD 2 ТБ)»); «Выберите носитель»; «Диск н�
 экране раздельно: заголовок «Диск: Семейный архив — две копии» и строка на каждый диск, короткий пункт «Диска
 назначения», в ячейке - блок с рамкой на каждый диск (Cell.set_blocks, disk_block_html: часть Б ядра для этого диска и
 «уже есть» на нём - Model.have_on_disk). Ядро, отметки и задания не менялись.
+
+Этап 16 (16.11.2026, замечания владельца после проверки на настоящих данных, раздел «Этап 16»): кнопок «Сохранить
+отметки» и «Отменить все несохранённые» нет - черновик пишется сразу (autosave: тот же service.add_marks_batch, без окна
+предпросмотра; пакет в пути - Model.inflight, правки во время записи - следующим пакетом; отказ - сообщение, черновик
+пакета забывается); «Отменить последнее» - шаг отмены хранит прежние свои отметки папок и возвращает их новой правкой
+(тоже сохраняется). Зелёная плашка - «Диск назначения: H: Бэкап фото и видео — HDD45, 16 ТБ · свободно …» (head_html);
+строки «Диск назначения» нет (диск - из «Обзора», шаг 1; список скрыт). В ячейке - «Показать список» у «копировать»,
+«уже есть», «не подходит по типу» (окно filelist_window). Внизу - «Пересчитать хеши спорных файлов (N)» (N в фоне,
+0 - неактивна), «Показать список», «Файлы только на этом носителе…» и строка «что такое спорные».
+Пути папок нигде не обрезаются по пробелам (« Перемещение перед Индонезией - временное»).
 """
 import collections
 import html
@@ -89,6 +99,11 @@ GRAY, BLUE, BLUE2, ORANGE, RED, GREEN = '#757575', '#1565c0', '#5c6bc0', '#e6510
 INHERIT, SKIP = hb.MARK_INHERIT, hb.MARK_SKIP
 DEBOUNCE_MS = 600
 UNDO_MAX = 50
+AUTOSAVE_MS = 0                                           # этап 16: отметка пишется сразу (правки одного щелчка - пакетом)
+CONTESTED_MS = 700                                        # число спорных - после того, как выделение устоялось
+CONTESTED_NOTE = ('Спорные — файлы, чью копию нельзя проверить по SHA-256: без хеша на этом носителе, тёзки без хеша '
+                  '(то же имя и размер) и непроверенные копии на 45 и 77. Пересчёт хешей снимает сомнение.')
+LINK = 'color:#1565c0'
 MIME = 'application/x-arhiv-diskov-folders'               # перетаскивание папок из дерева в ячейки
 # Цвет направления - по номеру (Н1 синий, Н2 зелёный, Н3 фиолетовый, …): (своя отметка, унаследованная, рамка ячейки)
 PALETTE = [('#90caf9', '#e3f2fd', '#1e88e5'), ('#a5d6a7', '#e8f5e9', '#43a047'), ('#ce93d8', '#f3e5f5', '#8e24aa'),
@@ -227,54 +242,58 @@ def free_of(x, rows, space=None):
     return r['free_gib'] * hb.GIB if r and 'free_gib' in r else None
 
 
-def head_html(d, rows, space=None):
-    """Заголовок экрана (макет владельца): «Диск: I: My Book» (+ оранжевая плашка «не подключён») и второй строкой
-    «Н3 Фильмы (оранжевым) · HDD55 по журналу сканирования дисков · свободно 421 ГБ» (у двух дисков - оба,
-    «два задания»). Модель и объём не показываются."""
+def total_of(x, rows, space=None):
+    """Объём тома диска назначения, байт: по расчёту места (space: буква, свободно, объём, кластер) или по service.disks
+    (total_bytes подключённого). Не подключён - None."""
+    if space and x in space and len(space[x]) > 2:
+        return space[x][2]
+    r = next((r for r in rows if r['disk'] == x), None)
+    return r.get('total_bytes') if r else None
+
+
+def tb_text(b):
+    """Объём диска «как на наклейке» - десятичные ТБ: 16 000 900 165 632 байт -> «16 ТБ», 2 ТБ -> «2 ТБ», 500 ГБ."""
+    if not b:
+        return ''
+    if b >= 1e12:
+        v = b / 1e12
+        return f'{v:.0f} ТБ' if v >= 9.95 or abs(v - round(v)) < 0.05 else f'{v:.1f} ТБ'.replace('.', ',')
+    return f'{b / 1e9:.0f} ГБ'
+
+
+def disk_head(x, rows, space=None):
+    """«H: Бэкап фото и видео — HDD45, 16 ТБ · свободно 3 210,5 ГБ» (+ плашка «не подключён»)."""
+    r = next((r for r in rows if r['disk'] == x), None) or {'disk': x, 'label': '', 'letter': ''}
+    name = disk_ui.disk_place(r) or x
+    line = esc(name) + (f' — {esc(x)}' if name != x else '')
+    size = tb_text(total_of(x, rows, space))
+    if size:
+        line += f', {esc(size)}'
+    b = free_of(x, rows, space)
+    if b is not None:
+        line += f' <span style="color:#33691e">· свободно {gb(b)} ГБ</span>'
+    if not r.get('letter'):
+        line += ' ' + OFF_PILL
+    return line
+
+
+def head_html(d, rows, space=None, others=()):
+    """Зелёная плашка (этап 16, решение владельца): «Диск назначения: H: Бэкап фото и видео — HDD45, 16 ТБ · свободно
+    …» - название диска (метка тома), номер, объём, свободно - вместо имени направления (оно - в ячейке справа).
+    Направление на нескольких дисках - строка на каждый диск. others - другие направления, отмеченные в «Обзоре»."""
     if d is None:
         return (f'<span style="color:{ORANGE}">Диска назначения нет: ни у одного направления не назначен диск.</span> '
                 '<span style="font-size:10pt; font-weight:normal">Назначьте диск в «Обзоре» → «Направления».</span>')
-    by = {r['disk']: r for r in rows}
     if len(d.disks) > 1:
-        # этап 12 (вариант А владельца): диски не сливаются в одну строку - заголовок «Диск: Семейный архив — две
-        # копии», под ним направление и по строке на каждый диск
-        lines = []
-        for x in d.disks:
-            r = by.get(x) or {'disk': x, 'label': '', 'letter': ''}
-            line = f'{esc(disk_ui.disk_place(r))} — {esc(x)}'
-            b = free_of(x, rows, space)
-            if b is not None:
-                line += f' <span style="color:#33691e">· свободно {gb(b)} ГБ</span>'
-            if not r.get('letter'):
-                line += ' ' + OFF_PILL.replace('11pt', '9pt')
-            lines.append(line)
-        sub = (f'<span style="color:{ORANGE}"><b>{esc(d.num)} {esc(d.name)}</b></span> · '
-               f'{COUNT_WORDS.get(len(d.disks), f"{len(d.disks)} заданий")} — по одному на каждый диск '
-               f'<span style="color:{GRAY}">(номера HDD {JOURNAL})</span>')
-        return (f'Диск: {esc(d.name)} — {copies_word(len(d.disks))}<br>'
-                f'<span style="font-size:10pt; font-weight:normal; color:#33691e">{sub}</span><br>'
-                '<span style="font-size:11pt; font-weight:normal; color:#1b5e20">' + '<br>'.join(lines) + '</span>')
-    parts = []
-    for x in d.disks:
-        r = by.get(x) or {'disk': x, 'label': '', 'letter': ''}
-        name = disk_ui.disk_name(r) or x
-        parts.append(esc(f'{r["letter"]} {name}' if r.get('letter') else name))
-    pill = '' if all((by.get(x) or {}).get('letter') for x in d.disks) else ' ' + OFF_PILL
-    word = 'Диски' if len(d.disks) > 1 else 'Диск'
-    free = []
-    for x in d.disks:
-        b = free_of(x, rows, space)
-        if b is not None:
-            free.append(f'{x} — {gb(b)} ГБ' if len(d.disks) > 1 else f'{gb(b)} ГБ')
-    # 16.11.2026 (замечание 3 владельца): имя направления - в строке заголовка через тире, оранжевым:
-    # «Диск: I: My Book — Н3 Фильмы»; вторая строка - номер HDD по журналу и свободное место
-    sub = f'{esc(hdds(d))} {JOURNAL}'
-    if free:
-        sub += ' · свободно ' + esc(', '.join(free))
-    if len(d.disks) > 1:
-        sub += ' · ' + COUNT_WORDS.get(len(d.disks), f'{len(d.disks)} заданий')
-    return (f'{word}: ' + ' и '.join(parts) + f' — <span style="color:{ORANGE}">{esc(d.num)} {esc(d.name)}</span>{pill}<br>'
-            f'<span style="font-size:10pt; font-weight:normal; color:#33691e">{sub}</span>')
+        h = (f'Диск назначения — {copies_word(len(d.disks))}:<br>'
+             '<span style="font-size:12pt">' + '<br>'.join(disk_head(x, rows, space) for x in d.disks) + '</span>')
+    else:
+        h = 'Диск назначения: ' + disk_head(d.disks[0], rows, space)
+    if others:
+        h += ('<br><span style="font-size:9pt; font-weight:normal; color:#37474f">В «Обзоре» отмечено ещё: '
+              + esc(', '.join(f'{o.num} {o.name}' for o in others)) +
+              ' — здесь используется первое по номеру; сменить диск — в «Обзоре», шаг 1.</span>')
+    return h
 
 
 MODE_NOTE = {ONLY: 'Копируются только папки с галочкой — остальные остаются на носителе.',
@@ -327,7 +346,7 @@ def legend_html(mode):
         first = f'<span style="background:{SEL_BG}">&nbsp;зелёный фон&nbsp;</span> — папка выбрана; '
     return (first + f'<span style="color:{PALE}">бледный текст и серая галочка</span> — вместе с родительской папкой; '
             f'<span style="color:{GRAY}">Н2</span> — папка отмечена для другого диска; '
-            f'<i style="color:{BLUE}">• курсив</i> — не сохранено.'
+            f'<i style="color:{BLUE}">• курсив</i> — сохраняется (отметки сохраняются сразу).'
             + (' Галочка у строки носителя — выбрать все папки.' if mode == ONLY else ''))
 
 
@@ -452,7 +471,8 @@ class Model:
     def __init__(self, tree, drafts=None):
         self.disk = tree['disk']
         self.drafts = {}                 # исходный путь (нижний регистр) -> dict(path, phys, verdict, base)
-        self.undo_stack = []
+        self.undo_stack = []             # этап 16: шаг отмены - [(физический путь, прежняя своя отметка)]
+        self.inflight = {}               # этап 16: пакет, который сейчас пишется (ключ -> отметка) - «уже сохранён»
         self.have = self.have_disks = None
         self.load(tree)
         if drafts:
@@ -509,13 +529,35 @@ class Model:
 
     # --- отметки ---
     def saved_key(self, key):
+        """Сохранённая отметка пути (вид, номер); пакет, который сейчас пишется (автосохранение, этап 16), считается уже
+        сохранённым: правка во время записи сравнивается с ним, а не со старым состоянием таблицы."""
+        if key in self.inflight:
+            v = self.inflight[key]
+            return None if v == INHERIT else hb.parse_verdict(v, self.dirs)[:2]
         m = self.saved_ms.by_key.get(key)
         return None if m is None else (m.kind, m.num)
 
     def equal_saved(self, key, verdict):
         if verdict == INHERIT:
-            return self.saved_ms.by_key.get(key) is None
+            return self.saved_key(key) is None
         return self.saved_key(key) == hb.parse_verdict(verdict, self.dirs)[:2]
+
+    def own_verdict(self, key):
+        """Своя действующая отметка пути текстом для записи (черновик, иначе сохранённая); нет своей - «как у
+        родителя». Старая строка («раздел: …», «не нужно») - равнозначной отметкой v3."""
+        d = self.drafts.get(key)
+        if d is not None:
+            return d['verdict']
+        if key in self.inflight:
+            return self.inflight[key]
+        m = self.saved_ms.by_key.get(key)
+        if m is None:
+            return INHERIT
+        if m.kind == R_DIR and m.num in self.dirs:
+            return self.dirs[m.num].verdict()
+        if m.kind == R_SKIP:
+            return SKIP
+        return m.verdict
 
     def draft_rows(self):
         return [(d['path'], d['verdict']) for d in self.drafts.values()]
@@ -536,48 +578,49 @@ class Model:
         self.have_disk_cache = {}
         self.have_sub = self.have_counts()
 
-    def push_undo(self):
-        self.undo_stack.append({k: dict(v) for k, v in self.drafts.items()})
-        del self.undo_stack[:-UNDO_MAX]
-
     def set_mark(self, folders, verdict):
         """Черновая отметка папок (физические пути; '' - весь носитель). -> сколько записей черновика изменилось."""
         return self.set_marks([(f, verdict) for f in folders])
 
-    def set_marks(self, pairs):
-        """Несколько черновых отметок одним шагом «Отменить последнее»: [(физический путь, решение)]."""
-        self.push_undo()
-        changed = 0
+    def set_marks(self, pairs, record=True):
+        """Несколько отметок одним шагом «Отменить последнее»: [(физический путь, решение)]. Черновик живёт до
+        автосохранения (этап 16). Шаг отмены - прежние свои отметки изменённых папок (record=False - это сама отмена)."""
+        changed, step = 0, []
         for f, verdict in pairs:
             if f and not self.markable(f):
                 continue
             o = self.orig(f)
             key = o.lower()
             cur = self.drafts.get(key)
+            prev = self.own_verdict(key)
             if self.equal_saved(key, verdict):
                 if cur is not None:
                     del self.drafts[key]
                     changed += 1
+                    step.append((f, prev))
                 continue
             if cur is None or cur['verdict'] != verdict:
                 self.drafts[key] = dict(path=o, phys=f, verdict=verdict,
                                         base=cur['base'] if cur else self.saved_key(key))
                 changed += 1
-        if not changed:
-            self.undo_stack.pop()
+                step.append((f, prev))
+        if step and record:
+            self.undo_stack.append(step)
+            del self.undo_stack[:-UNDO_MAX]
         self.recalc()
         return changed
 
     def undo(self):
+        """«Отменить последнее»: вернуть прежние свои отметки шага - это новая правка, она тоже сохраняется сразу
+        (таблица только дописывается; «как у родителя» снимает свою отметку, строки не прибавляет, если её нет)."""
         if not self.undo_stack:
             return False
-        self.drafts = self.undo_stack.pop()
-        self.recalc()
+        self.set_marks(self.undo_stack.pop(), record=False)
         return True
 
     def discard(self):
+        """Забыть черновик (запись не удалась): на экране - сохранённые отметки."""
         if self.drafts:
-            self.push_undo()
             self.drafts = {}
             self.recalc()
 
@@ -806,11 +849,11 @@ class Model:
             if d is not None and d['verdict'] == INHERIT:
                 dirty = 'drop'
                 text = '• снять свою отметку → ' + text
-                tips.append('Своя отметка будет снята при сохранении; папка получит отметку родителя.')
+                tips.append('Своя отметка снимается (сохраняется…); папка получит отметку родителя.')
             elif d is not None:
                 dirty = 'own'
                 text = '• ' + text
-                tips.append('Своя отметка — НЕ сохранена (кнопка «Сохранить отметки»).')
+                tips.append('Своя отметка — сохраняется…')
             elif (r.state, r.num, r.moved) != (rs.state, rs.num, rs.moved):
                 dirty = 'inherited'
                 text = '• ' + text
@@ -1079,6 +1122,8 @@ class Cell(QFrame):
         self.body = QLabel('')
         self.body.setWordWrap(True)
         self.body.setTextFormat(Qt.RichText)
+        self.body.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.body.linkActivated.connect(page.show_list)          # «Показать список» (этап 16)
         lay.addWidget(self.body)
         # направление на нескольких дисках: по блоку с рамкой на каждый диск («Копия 1 — H: …», этап 12)
         self.blocks_box = QWidget()
@@ -1115,6 +1160,8 @@ class Cell(QFrame):
                 lab = QLabel('')
                 lab.setTextFormat(Qt.RichText)
                 lab.setWordWrap(True)
+                lab.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+                lab.linkActivated.connect(self.page.show_list)
                 fl.addWidget(lab)
                 self.blocks_lay.addWidget(fr)
                 self.blocks.append([x, fr, lab, None])
@@ -1156,7 +1203,8 @@ class Cell(QFrame):
 
 
 class CloseGuard(QObject):
-    """Фильтр событий ГЛАВНОГО окна: закрытие при несохранённых отметках - только с согласия; во время записи - нельзя."""
+    """Фильтр событий ГЛАВНОГО окна: перед закрытием несохранённые отметки записываются (этап 16); не записались -
+    закрытие только с согласия; во время создания заданий - нельзя."""
 
     def __init__(self, page):
         super().__init__(page)
@@ -1167,13 +1215,10 @@ class CloseGuard(QObject):
             return False
         p = self.page
         if p.writing:
-            QMessageBox.information(p.win, TITLE, 'Идёт запись отметок или создание заданий («Разбор носителя»). '
-                                    'Дождитесь окончания.')
+            QMessageBox.information(p.win, TITLE, 'Идёт создание заданий («Разбор носителя»). Дождитесь окончания.')
             ev.ignore()
             return True
-        n = len(p.model.drafts) if p.model else 0
-        if n and QMessageBox.question(p.win, TITLE, f'На странице «Разбор носителя» есть несохранённые отметки ({n}).\n\n'
-                                      'Закрыть окно без сохранения? Они пропадут.') != QMessageBox.Yes:
+        if not p.flush_now('Закрыть окно без сохранения? Они пропадут.'):   # этап 16: отметки дописываются сразу
             ev.ignore()
             return True
         return False
@@ -1350,16 +1395,15 @@ class RazborPage(QWidget):
         self.info.setWordWrap(True)
         form.addWidget(self.info, 1, 1)
         form.setRowMinimumHeight(1, 22)
+        # этап 16 (решение владельца): строки «Диск назначения» под плашкой нет - диск выбирается в «Обзоре», шаг 1.
+        # Список остаётся невидимым (set_dest - переходы и тесты), сведения о диске - в зелёной плашке вверху.
         self.dest_box = RichCombo()
         self.dest_box.activated.connect(self.dest_changed)
-        form.addWidget(caption('Диск назначения'), 2, 0)
-        form.addWidget(self.dest_box, 2, 1)
+        self.dest_box.setParent(self)
+        self.dest_box.hide()
         self.dest_info = QLabel('')
-        self.dest_info.setTextFormat(Qt.RichText)
-        self.dest_info.setWordWrap(True)
-        self.dest_info.setStyleSheet(f'color:{GRAY}')
-        form.addWidget(self.dest_info, 3, 1)
-        form.setRowMinimumHeight(3, 22)
+        self.dest_info.setParent(self)
+        self.dest_info.hide()
         # «Что копировать с носителя»: три отдельные кнопки с промежутками (вариант 1), на ширину поля
         modes = QWidget()
         ml = QHBoxLayout(modes)
@@ -1483,22 +1527,44 @@ class RazborPage(QWidget):
         self.blink.setInterval(500)
         self.blink.timeout.connect(self.blink_busy)
         bar.addWidget(self.busy_lab)
-        self.save_btn = QPushButton('Сохранить отметки')
-        self.save_btn.clicked.connect(lambda: self.save())
+        # этап 16: «Сохранить отметки» и «Отменить все несохранённые» убраны - отметки сохраняются сразу
         self.undo_btn = QPushButton('Отменить последнее')
+        self.undo_btn.setToolTip('Вернуть отметки, какими они были до последнего действия (это тоже сохраняется сразу).')
         self.undo_btn.clicked.connect(self.undo)
-        self.discard_btn = QPushButton('Отменить все несохранённые')
-        self.discard_btn.clicked.connect(self.discard)
         self.contested_btn = QPushButton('Пересчитать хеши спорных файлов…')
         self.contested_btn.setToolTip('Где лежат файлы без хеша и неподтверждённые копии выделенной папки (или всего '
                                       'носителя); подключённые диски - пересканировать с хешем всех файлов.')
         self.contested_btn.clicked.connect(self.contested)
+        self.contested_list_btn = QPushButton('Показать список')
+        self.contested_list_btn.setToolTip('Спорные файлы поштучно: папка, имя, тип, размер, дата, на каком диске и '
+                                           'почему спорный.')
+        self.contested_list_btn.clicked.connect(lambda: self.show_list('contested'))
+        self.unique_btn = QPushButton('Файлы только на этом носителе…')
+        self.unique_btn.setToolTip('Файлы выделенной папки (или всего носителя), подтверждённая копия которых по SHA-256 '
+                                   'есть только здесь.')
+        self.unique_btn.clicked.connect(lambda: self.show_list('unique'))
         self.tasks_btn = self.copy_cell.btn                # «Подготовить задания» - в ячейке «Копировать на диск»
-        for w in (self.save_btn, self.undo_btn, self.discard_btn):
-            bar.addWidget(w)
+        bar.addWidget(self.undo_btn)
         bar.addStretch()
-        bar.addWidget(self.contested_btn)
+        for w in (self.unique_btn, self.contested_btn, self.contested_list_btn):
+            bar.addWidget(w)
+        self.contested_note = QLabel(CONTESTED_NOTE)
+        self.contested_note.setWordWrap(True)
+        self.contested_note.setAlignment(Qt.AlignRight)
+        self.contested_note.setStyleSheet(f'font-size:8pt; color:{GRAY}')
+        lay.addWidget(self.contested_note)
         lay.addLayout(bar)
+        self.saving = False                               # идёт автосохранение отметок (этап 16)
+        self.save_then = []                               # что сделать после записи (подготовка заданий)
+        self.save_timer = QTimer(self)
+        self.save_timer.setSingleShot(True)
+        self.save_timer.timeout.connect(self.autosave)
+        self.root_before = {}                             # (носитель, D) -> отметка всего носителя до «Все папки»
+        self.cont_req = 0                                 # запрос числа спорных (ответ для старого выбора - не нужен)
+        self.cont_timer = QTimer(self)
+        self.cont_timer.setSingleShot(True)
+        self.cont_timer.timeout.connect(self.run_contested_count)
+        self.tree.itemSelectionChanged.connect(lambda: self.cont_timer.start(CONTESTED_MS))
         self.debounce = QTimer(self)
         self.debounce.setSingleShot(True)
         self.debounce.timeout.connect(self.run_summary)
@@ -1535,16 +1601,15 @@ class RazborPage(QWidget):
                 self.sum_state.setText('Выберите носитель в списке вверху.')
             return
         m = self.model
-        if m is not None and self.loading is None and not self.writing and (gen != m.built or sig != m.sig):
+        if (m is not None and self.loading is None and not self.writing and not self.saving
+                and (gen != m.built or sig != m.sig)):          # во время автосохранения - перечитает он сам
             self.load_disk(self.disk, keep=True)
 
     def disk_changed(self, _i=None):
         new = self.disk_box.value()
         if not new or new == self.disk:
             return
-        n = len(self.model.drafts) if self.model else 0
-        if n and QMessageBox.question(self, TITLE, f'У носителя {self.disk} есть несохранённые отметки ({n}).\n\n'
-                                      f'Перейти к {new} без сохранения? Они пропадут.') != QMessageBox.Yes:
+        if not self.flush_now(f'Перейти к {new} без сохранения? Они пропадут.'):
             self.disk_box.blockSignals(True)
             self.disk_box.setCurrentText(self.disk)
             self.disk_box.blockSignals(False)
@@ -1603,6 +1668,8 @@ class RazborPage(QWidget):
             self.update_items()
         if gen_changed or not old_have or old_have[1] != need:
             self.run_have()
+        if gen_changed:
+            self.cont_timer.start(0)
         self.changed(debounce=False)
 
     def direction_disks(self):
@@ -1848,7 +1915,8 @@ class RazborPage(QWidget):
     def show_head(self):
         space = self.plan[1] if self.plan else None
         d = self.dest_dir()
-        self.where.setText(head_html(d, self.disk_rows, space))
+        others = [x for x in self.preferred() if d is None or x.num != d.num]
+        self.where.setText(head_html(d, self.disk_rows, space, others))
         self.dest_info.setText(dest_info_html(d, self.disk_rows, space))
         m = self.model
         r = m.route.get('', rz.NONE_ROUTE) if m else rz.NONE_ROUTE
@@ -1879,7 +1947,7 @@ class RazborPage(QWidget):
             w.setEnabled(bool(self.dest) and not self.writing)
         for w in self.mode_btn.values():
             w.blockSignals(False)
-        self.mode_hint.setText('• не сохранено' if '' in m.drafts else '')
+        self.mode_hint.setText('• сохраняется…' if '' in m.drafts else '')
         self.tree_legend.setText(legend_html(mode))
         self.show_head()
 
@@ -1891,15 +1959,19 @@ class RazborPage(QWidget):
         pairs, msg = [], ''
         if k == ONLY:
             self.mode_pref.pop(key, None)
+            before = self.root_before.pop(key, None)      # этап 16: отметка носителя до «Все папки» (уже сохранена)
             if self.root_is_dest():
                 saved = m.saved_ms.by_key.get('')
-                if saved is not None and not m.is_dir(m.route_saved.get(''), d.num):
+                if before not in (None, INHERIT) and hb.parse_verdict(before, m.dirs)[:2] != (R_DIR, d.num):
+                    pairs = [('', before)]
+                elif saved is not None and not m.is_dir(m.route_saved.get(''), d.num):
                     pairs = [('', saved.verdict)]        # вернуть сохранённую отметку всего носителя
                 else:
                     pairs = [('', SKIP)]
         else:
             self.mode_pref[key] = k
             if not self.root_is_dest():
+                self.root_before[key] = m.own_verdict('')
                 pairs.append(('', d.verdict()))
             skips = m.own_skips()
             if k == EVERY and skips:
@@ -1980,7 +2052,7 @@ class RazborPage(QWidget):
         self.after_marks() if n else self.update_items()
         if n:
             self.win.statusBar().showMessage(('Выбраны все' if on else 'Сняты все') + f' папки верхнего уровня ({len(tops)}). '
-                                             'Не сохранено - кнопка «Сохранить отметки».', 8000)
+                                             'Сохраняется сразу.', 8000)
         return n
 
     def reselect(self, folders):
@@ -2004,7 +2076,7 @@ class RazborPage(QWidget):
         self.after_marks() if n else self.update_items()
         if n:
             self.win.statusBar().showMessage(f'Папок: {len(ok)} — ' + ('галочка поставлена' if on else 'галочка снята') +
-                                             '. Не сохранено — кнопка «Сохранить отметки».', 8000)
+                                             '. Сохраняется сразу.', 8000)
         return n
 
     # ---------- ячейки справа (этап 8) ----------
@@ -2098,8 +2170,8 @@ class RazborPage(QWidget):
         n = m.set_marks(pairs) if pairs else 0
         if n:
             self.after_marks()
-            self.win.statusBar().showMessage(f'Папок: {len(ok)} → на диск {hdds(self.dest_dir())}. Не сохранено - '
-                                             'кнопка «Сохранить отметки».', 8000)
+            self.win.statusBar().showMessage(f'Папок: {len(ok)} → на диск {hdds(self.dest_dir())}. Сохраняется сразу.',
+                                             8000)
         return n
 
     def selected_folders(self):
@@ -2113,20 +2185,14 @@ class RazborPage(QWidget):
             self.after_marks()
 
     def undo(self):
-        if self.model and self.model.undo():
+        """«Отменить последнее»: прежние отметки последнего шага - новой правкой (сохраняется сразу, этап 16)."""
+        if self.model and not self.writing and self.model.undo():
             self.after_marks()
 
-    def discard(self):
-        if not self.model or not self.model.drafts:
-            return
-        if QMessageBox.question(self, TITLE, f'Отменить все несохранённые отметки ({len(self.model.drafts)})?\n\n'
-                                '«Отменить последнее» вернёт их обратно.') != QMessageBox.Yes:
-            return
-        self.model.discard()
-        self.after_marks()
-
     def changed(self, debounce=True):
-        """Любая правка входов итога: ревизия растёт сразу, итог помечается устаревшим и считается заново."""
+        """Любая правка входов итога: ревизия растёт сразу, итог помечается устаревшим и считается заново; черновик
+        отметок записывается сразу (этап 16)."""
+        self.schedule_save()
         self.rev += 1
         self.show_busy(True)
         self.update_buttons()
@@ -2155,13 +2221,12 @@ class RazborPage(QWidget):
         self.busy_lab.setStyleSheet(BUSY_CSS[1 if self.blink_on else 0])
 
     def update_buttons(self):
-        n = len(self.model.drafts) if self.model else 0
         busy = self.writing or self.model is None
-        self.save_btn.setText(f'Сохранить отметки ({n})' if n else 'Сохранить отметки')
-        self.save_btn.setEnabled(bool(n) and not busy)
         self.undo_btn.setEnabled(bool(self.model and self.model.undo_stack) and not busy)
-        self.discard_btn.setEnabled(bool(n) and not busy)
-        self.contested_btn.setEnabled(not busy)
+        self.unique_btn.setEnabled(not busy)
+        n = getattr(self, 'cont_n', None)
+        self.contested_btn.setEnabled(not busy and bool(n))
+        self.contested_list_btn.setEnabled(not busy and bool(n))
         if self.model is not None:
             self.render_cells()
         else:
@@ -2193,9 +2258,8 @@ class RazborPage(QWidget):
                 self.render_summary(*val)
                 self.render_cells()
                 self.show_head()
-                self.sum_state.setText(f'<span style="color:{GRAY}">Посчитано в {val[3]}, с несохранёнными отметками.'
-                                       '</span>')
-                self.sum_state.setToolTip('Итог учитывает и несохранённые отметки; задания строятся только из сохранённых.')
+                self.sum_state.setText(f'<span style="color:{GRAY}">Посчитано в {val[3]}.</span>')
+                self.sum_state.setToolTip('Отметки сохраняются сразу; задания строятся из сохранённых.')
                 self.show_busy(False)
             else:
                 self.show_busy(False)
@@ -2288,74 +2352,98 @@ class RazborPage(QWidget):
     def set_writing(self, on):
         self.writing = on
         self.tree.setEnabled(not on)
-        for w in (self.disk_box, self.dest_box):
-            w.setEnabled(not on)
+        self.disk_box.setEnabled(not on)
         self.update_buttons()
         if self.model is not None:
             self.sync_mode()
 
     def save(self, then=None):
-        """Предпросмотр (service.marks_preview) -> окно «было → станет» -> «Записать» -> add_marks_batch одним пакетом.
-        then() - после успешной записи (подготовка заданий)."""
+        """Прежнее имя (тесты, переходы): записать черновик сейчас (автосохранение, этап 16)."""
+        if then:
+            self.save_then.append(then)
+        self.save_timer.stop()
+        self.autosave()
+
+    def schedule_save(self):
+        """Правка отметок -> запись сразу (на следующем шаге цикла событий: правки одного щелчка - одним пакетом)."""
+        if self.model is not None and self.model.drafts and not self.saving:
+            self.save_timer.start(AUTOSAVE_MS)
+
+    def autosave(self):
+        """Автосохранение (этап 16, решение владельца: «Сохранить отметки» убрать): черновик -> service.add_marks_batch
+        (те же проверки и одна запись под замком, без окна предпросмотра). Пока пакет пишется, он считается сохранённым
+        (Model.inflight): правки во время записи остаются черновиком и пишутся следующим пакетом. Отказ или ошибка -
+        сообщение, черновик этого пакета забывается (на экране - то, что сохранено)."""
         m = self.model
-        if m is None or not m.drafts or self.writing:
+        if m is None or self.saving:
+            return
+        if not m.drafts:
+            self.run_then()
             return
         rows, sent = m.batch()
-        changes, conflicts, nested = m.change_lines()
         disk = self.disk
-        self.set_writing(True)
-
-        def shown(res):
-            kind, val = res
-            if kind != 'ok':
-                self.set_writing(False)
-                QMessageBox.warning(self, TITLE, 'Предпросмотр не получился, ничего не записано:\n\n' +
-                                    (val if kind == 'refused' else val.strip().splitlines()[-1]))
-                return
-            h = [f'<p><b>{esc(val["lines"][0])}</b> Папок в списке: {len(rows)}.</p><p><b>Было → станет</b></p><ul>']
-            h += [f'<li>{esc(x)}</li>' for x in changes]
-            h.append('</ul><p><b>Что проверила программа</b></p><ul>')
-            h += [f'<li>{esc(x)}</li>' for x in val['lines'][1:]]
-            h.append('</ul>')
-            if nested:
-                h.append(f'<p style="color:{ORANGE}">Среди папок есть вложенные друг в друга: их размеры пересекаются, '
-                         'складывать их нельзя. Действует отметка самой глубокой папки.</p>')
-            if conflicts:
-                h.append(f'<p style="color:{RED}"><b>Изменено в другом месте:</b></p><ul>' +
-                         ''.join(f'<li>{esc(x)}</li>' for x in conflicts) + '</ul>')
-            h.append(f'<p style="color:{GRAY}">Запись - одним пакетом в «решения.tsv» (копия таблицы до записи - в '
-                     '«_БАЗА\\архив таблиц»). Файлы не копируются: это делают задания.</p>')
-            dlg = TextDialog(self, 'Сохранить отметки', ''.join(h), ok_text='Записать')
-            if dlg.exec() != QDialog.Accepted:
-                self.set_writing(False)
-                return
-            self.win.bg.run(lambda: (safe(sv.add_marks_batch, disk, rows), safe(sv.razbor_tree, disk)),
-                            ok=written, quiet=True)
+        m.inflight = dict(sent)
+        self.saving = True
+        self.update_buttons()
+        self.win.statusBar().showMessage(f'Сохраняю отметки ({len(rows)})…', 4000)
 
         def written(res):
             (kind, val), (tkind, tree) = res
-            self.set_writing(False)
-            if disk != self.disk or self.model is None:
+            self.saving = False
+            m.inflight = {}
+            if self.model is not m or disk != self.disk:
                 return
+            if kind != 'ok':
+                for k, v in sent.items():
+                    if k in m.drafts and m.drafts[k]['verdict'] == v:
+                        del m.drafts[k]
+                self.save_then = []
             if tkind == 'ok':
-                self.model.reload(tree)
+                m.reload(tree)
                 self.fill_dest()
-            left = {k for k in sent if k in self.model.drafts}
-            done = len(sent) - len(left)
-            if kind == 'ok':
-                self.win.statusBar().showMessage(f'Записано отметок: {len(val["fields"])}. Копия таблицы - в «_БАЗА\\'
-                                                 'архив таблиц».', 8000)
-            elif kind == 'refused':
-                QMessageBox.warning(self, TITLE, f'Не записано: {val}\n\nНесохранённые отметки остались на экране.')
             else:
-                sv_log(val)
-                QMessageBox.warning(self, TITLE, 'Запись прервалась ошибкой. Я перечитал таблицу: сохранено '
-                                    f'{done} из {len(sent)}, остальные остались несохранёнными.\n\n'
-                                    'Подробно - в «_БАЗА\\ответы\\окно - ошибки.log».')
-            self.changed(debounce=False)
-            if kind == 'ok' and then:
-                then()
-        self.win.bg.run(safe, sv.marks_preview, disk, rows, ok=shown, quiet=True)
+                m.recalc()
+            if kind == 'ok':
+                self.win.statusBar().showMessage(f'Отметки сохранены ({len(val["fields"])}). «Отменить последнее» — '
+                                                 'вернуть.', 6000)
+            else:
+                if kind == 'error':
+                    sv_log(val)
+                QMessageBox.warning(self, TITLE, 'Отметка не сохранена: ' + (val if kind == 'refused' else
+                                                                           val.strip().splitlines()[-1]) +
+                                    '\n\nНа экране — отметки, какие сохранены.')
+            self.update_items()
+            self.sync_mode()
+            self.changed(debounce=False)                  # оставшийся черновик (правки во время записи) - следующим пакетом
+            if not m.drafts:
+                self.run_then()
+        self.win.bg.run(lambda: (safe(sv.add_marks_batch, disk, rows), safe(sv.razbor_tree, disk)),
+                        ok=written, quiet=True)
+
+    def run_then(self):
+        then, self.save_then = self.save_then, []
+        for fn in then:
+            fn()
+
+    def flush_now(self, question):
+        """Перед сменой носителя и закрытием окна: идущая запись дожидается конца, черновик пишется сейчас же
+        (в этом потоке: одна строка таблицы, доли секунды). Не записалось - вопрос question. -> можно продолжать."""
+        from PySide6.QtCore import QThreadPool
+        if self.saving:
+            QThreadPool.globalInstance().waitForDone(30000)
+        m = self.model
+        self.save_timer.stop()
+        if m is None or not m.drafts:
+            return True
+        rows, _sent = m.batch()
+        try:
+            sv.add_marks_batch(self.disk, rows)
+            m.drafts = {}
+            return True
+        except Exception as e:                            # noqa: BLE001 - отказ или ошибка записи
+            if not isinstance(e, sv.Refused):
+                sv_log(traceback.format_exc())
+            return QMessageBox.question(self, TITLE, f'Отметки не сохранились: {e}\n\n{question}') == QMessageBox.Yes
 
     # ---------- задания ----------
     def prepare(self, nums=None):
@@ -2371,10 +2459,11 @@ class RazborPage(QWidget):
                 QMessageBox.information(self, TITLE, 'Диска назначения нет: назначьте диск направлению в «Обзоре».')
                 return
         nums = list(nums)
-        if m.drafts:
-            if QMessageBox.question(self, TITLE, f'Есть несохранённые отметки ({len(m.drafts)}). Задания строятся только '
-                                    'из сохранённых.\n\nСохранить отметки сейчас (сначала - предпросмотр)?') == QMessageBox.Yes:
-                self.save(then=lambda: self.prepare(nums))
+        if m.drafts or self.saving:                       # этап 16: задания - из сохранённых; сначала дописать отметки
+            self.save_then.append(lambda: self.prepare(nums))
+            if not self.saving:
+                self.save_timer.stop()
+                self.autosave()
             return
         disk = self.disk
         self.set_writing(True)
@@ -2444,6 +2533,58 @@ class RazborPage(QWidget):
                    'Проверьте их в «Заданиях на копирование» перед запуском.'
         if QMessageBox.question(self, TITLE, msg + '\n\nПерейти в «Задания на копирование»?') == QMessageBox.Yes:
             self.win.open_page(disk_ui.TASKS_PAGE)
+
+    # ---------- окно «Список файлов» (этап 16) ----------
+    def scope_folder(self):
+        """Папка для списков «спорные» и «уникальные»: одна выделенная или весь носитель ('')."""
+        fs = self.selected_folders()
+        return fs[0] if len(fs) == 1 else ''
+
+    def show_list(self, href):
+        """«Показать список» ячейки (copy:<диск> / have / type) и кнопки «спорные» / «уникальные»."""
+        import filelist_window
+        m = self.model
+        if m is None or not self.disk:
+            return None
+        kind, _, target = str(href).partition(':')
+        if kind in ('copy', 'have', 'type'):
+            if not self.dest:
+                return None
+            return filelist_window.open_list(self.win, kind=kind, disk=self.disk, num=self.dest, target=target or None,
+                                             drafts=m.draft_rows())
+        return filelist_window.open_list(self.win, kind=kind, disk=self.disk, folder=self.scope_folder())
+
+    def run_contested_count(self):
+        """Число на кнопке «Пересчитать хеши спорных файлов (N)» - для выделенной папки или всего носителя, в фоне;
+        пока считается и при 0 - кнопка неактивна; ответ для сменившегося выбора не показывается."""
+        if self.model is None or not self.disk:
+            return
+        self.cont_req += 1
+        req, disk, folder = self.cont_req, self.disk, self.scope_folder()
+        self.cont_n = None
+        self.contested_btn.setText('Пересчитать хеши спорных файлов (считаю…)')
+        self.update_buttons()
+
+        def show(res):
+            if req != self.cont_req:
+                return
+            kind, val = res
+            if kind != 'ok':
+                # число не получено: без ложного числа; кнопки активны - окно и список ищут спорные сами
+                self.contested_btn.setText('Пересчитать хеши спорных файлов (число не посчитано)…')
+                self.contested_btn.setToolTip('Посчитать спорные файлы не удалось: '
+                                              + (val if kind == 'refused' else val.strip().splitlines()[-1])
+                                              + '. Нажмите «Обновить» или откройте окно - оно ищет само.')
+                self.cont_n = -1                          # «неизвестно» (не 0 и не число)
+            else:
+                self.cont_n = val['total']
+                where = f'«{last(folder)}»' if folder else 'носителя'
+                self.contested_btn.setText(f'Пересчитать хеши спорных файлов ({num(val["total"])})…')
+                self.contested_btn.setToolTip(f'Спорных у {where}: {num(val["total"])} — на этом носителе '
+                                              f'{num(val["carrier"])}, на 45 и 77 {num(val["copies"])}. Окно покажет '
+                                              'папки и подключённые диски, их можно пересканировать с хешем.')
+            self.update_buttons()
+        self.win.bg.run(safe, sv.contested_count, disk, folder, ok=show, quiet=True)
 
     # ---------- спорные файлы ----------
     def contested(self):
@@ -2620,6 +2761,11 @@ def short_place(row, disk):
     return f'{row["letter"]} {title}' if row.get('letter') else f'{title} (не подключён)'
 
 
+def list_link(kind, x=''):
+    """Ссылка «Показать список» (этап 16) - окно «Список файлов»: copy:<диск> / have / type."""
+    return f' <a href="{kind}:{esc(x)}" style="{LINK}">Показать список</a>'
+
+
 def disk_line(x, c, P, place_fn):
     """«Копировать на диск H: Бэкап… (HDD45): 12,3 ГБ — помещается: свободно …» по service.capacity."""
     head = f'Копировать на диск {esc(place_fn(x))} ({esc(x)})'
@@ -2627,7 +2773,8 @@ def disk_line(x, c, P, place_fn):
         return f'{head}: это сам носитель'
     if c['state'] == 'none':
         return f'{head}: копировать нечего'
-    amount = f'<b>{gb(c["bytes"])} ГБ</b> <span style="color:{GRAY}">({files_word(c["files"])})</span>'
+    amount = (f'<b>{gb(c["bytes"])} ГБ</b> <span style="color:{GRAY}">({files_word(c["files"])})</span>'
+              + list_link('copy', x))
     where = where_html(c)
     q = (f'<br><span style="color:{GRAY}">&nbsp;&nbsp;в очереди на этот диск ещё {num(c["queued"][0])} незапущенных '
          f'заданий других носителей, {gb(c["queued"][1])} ГБ (учтено)</span>' if c['queued'][0] else '')
@@ -2659,10 +2806,14 @@ def dest_cell_html(d, P, cap, mode, sel, exc, place_fn, split=False):
     if size and not split:
         where = 'на диске' if len(d.disks) < 2 else 'на обоих дисках' if len(d.disks) == 2 else 'на всех дисках'
         h.append(f'<br>Уже есть {where}: <b>{gb(hv[1])} ГБ ({round(100 * hv[1] / size)} %)</b> '
-                 f'<span style="color:{GRAY}; font-size:8pt">{files_word(hv[0])}</span>')
+                 f'<span style="color:{GRAY}; font-size:8pt">{files_word(hv[0])}</span>' +
+                 (list_link('have') if hv[0] else ''))
+    elif split and hv[0]:
+        h.append(f'<br>Уже есть на всех дисках направления: {gb(hv[1])} ГБ '
+                 f'<span style="color:{GRAY}; font-size:8pt">{files_word(hv[0])}</span>' + list_link('have'))
     if tp[0]:
         h.append(f'<br><span style="color:{GRAY}">Не подходит по «что копировать» (останется на носителе): '
-                 f'{gb(tp[1])} ГБ, {files_word(tp[0])}</span>')
+                 f'{gb(tp[1])} ГБ, {files_word(tp[0])}</span>' + list_link('type'))
     state = 'ok'
     for x in d.disks:
         c = cap.get(x) or dict(state='none', files=0, bytes=0, free=None, queued=[0, 0, 0])
@@ -2699,7 +2850,7 @@ def disk_block_html(i, x, c, P, total, have, name):
                  (f' <span style="color:{GREEN}">· свободно {gb(c["free"])} ГБ</span>' if c.get('free') is not None
                   else f' <span style="color:{ORANGE}">· диск не подключён</span>'))
     else:
-        h.append(f'<br>Копировать <b>{gb(c["bytes"])} ГБ</b> ({files_word(c["files"])})')
+        h.append(f'<br>Копировать <b>{gb(c["bytes"])} ГБ</b> ({files_word(c["files"])})' + list_link('copy', x))
     if total[1]:
         if have is None:
             h.append(f'<br><span style="color:{GRAY}">Уже есть на диске: считаю…</span>')

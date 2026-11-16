@@ -801,7 +801,12 @@ class DisksServiceTest(DirBase):
         self.assertAlmostEqual(sum(found[0]['types']) * hb.GIB, 300)
         self.assertEqual(found[0]['mark']['kind'], 'dir')
         info = sv.disk_hash_info('HDD45')
-        self.assertIn('хеш у всех файлов · опись от', info['text'])
+        self.assertTrue(info['text'].startswith('опись от'), info['text'])           # этап 16: вместо «хеш у N %»
+        self.assertEqual(info['hash'], 'Хеш есть у всех фото и видео')
+        self.assertFalse(info['alarm'])
+        self.assertEqual(info['nohash']['total'], 0)
+        self.assertEqual(sv.rescans_text(2, 5), 'после полной описи 2 раза пересканированы выбранные папки (5 папок)')
+        self.assertEqual(sv.rescans_text(1, 2), 'после полной описи 1 раз пересканированы выбранные папки (2 папки)')
 
 
 if __name__ == '__main__':

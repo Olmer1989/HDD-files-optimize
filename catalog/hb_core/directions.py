@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from hb_core import paths
 from hb_core.consts import (CAT_DOC, CAT_PHOTO, CAT_VIDEO, COPY_CATS, DIRECTION_HEAD, DOCS_NEAR_WORD, KIND_ALL, KIND_MEDIA,
                             MARK_DIR, MARK_INHERIT, MARK_SKIP, SEP)
-from hb_core.util import copied_folder, disk_nums, tsv_rows
+from hb_core.util import clean_path, copied_folder, disk_nums, row_fields, tsv_rows
 
 DIR_NAME_BAD = set('\\/:*?"<>|;')
 DIR_NAME_MAX = 30
@@ -258,11 +258,11 @@ def mark_rows(disk, data):
     как у service (заголовок - строка 1). Строки «класс: …» пропускаются."""
     res = []
     for i, f in enumerate(_rows(data), start=1):
-        f = [x.strip() for x in f] + [''] * 4
+        f = row_fields(f, paths=(1,), pad=4)             # путь - как в таблице (пробелы - часть имени, этап 16)
         if i == 1 and f[0].lower() == 'диск':
             continue
         if f[0] in (disk, '*') and f[2] and not f[1].lower().startswith('класс:'):
-            res.append((i, f[1].strip(SEP), f[2]))
+            res.append((i, clean_path(f[1]), f[2]))       # одна нормализация пути - clean_path
     return res
 
 

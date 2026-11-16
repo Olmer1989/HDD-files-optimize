@@ -1,4 +1,13 @@
-﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.5 от 16.11.2026)
+﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.6 от 16.11.2026)
+#
+# Новое в 2.6 (логика v3, этап 16; «Логика_v3_разбор_носителя.md», раздел «Этап 16»; решение владельца 16.11.2026):
+#   - проверка свободного места считает только файлы, которых на месте назначения ещё НЕТ. Строка, у которой файл
+#     в цели уже лежит, места не займёт: тот же размер - «уже есть» (сверка SHA-256, ничего не пишется), другой
+#     размер - КОНФЛИКТ (ничего не пишется). Папки назначения перечисляются по одному разу (без чтения файлов);
+#     папку прочитать не удалось - её строки считаются новыми (места нужно больше, а не меньше). На экране - сколько
+#     файлов уже лежит на цели и сколько места нужно на новые;
+#   - папка цели третьей колонкой тома.tsv больше не обрезается по пробелам (пробел по краям - часть имени папки);
+#   - -TestFreeBytes <байт> - только вместе с -TestRoots: свободное место для проверки шаблона на тестовых папках.
 #
 # Новое в 2.5 (логика v3, этап 15; «Логика_v3_разбор_носителя.md», раздел «Этап 15»):
 #   - если на месте назначения уже лежит файл ТОГО ЖЕ размера, он читается и его SHA-256 сравнивается с эталоном:
@@ -70,6 +79,7 @@
 # Параметры очереди окна (2.4): -Confirmed -Expect <отпечаток задания> (см. выше).
 param(
     [string]$TestRoots = '',
+    [double]$TestFreeBytes = -1,
     [int]$TimeoutSec = 120,
     [switch]$Confirmed,
     [string]$Expect = ''
@@ -155,7 +165,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($VolFile, $U8)) {
     $VolSerial[$name] = $serial
     $Dest[$name] = $DestFolder
     if ($f.Count -ge 3 -and $f[2].Trim()) {
-        $Dest[$name] = $f[2].Trim().Trim('\')
+        $Dest[$name] = $f[2].Trim('\')        # 2.6: пробелы по краям - часть имени папки, не обрезаются
         if ($Dest[$name].Contains(':') -or $Dest[$name].Contains('/') -or ('\' + $Dest[$name] + '\').Contains('\..\')) { Stop-Script "тома.tsv: недопустимая папка «$($Dest[$name])» у $name. Ничего не сделано." 5 }
     }
     if ($Names.Count -eq 1 -and $f.Count -ge 3 -and $f[2].Trim()) { $SourceSubfolder = $f[2].Trim('\') }
@@ -308,15 +318,53 @@ foreach ($x in $Items) { if ($Root[$x.Target]) { $Todo.Add($x) } }
 $Missing = @($Targets | Where-Object { -not $Root[$_] })
 Write-Host ''
 [double]$Total = 0
+# 2.6: файлы папки назначения - словарь «имя -> размер» без учёта регистра (как в Windows); папки нет - $null.
+# Содержимое файлов не читается. Ошибка перечисления - исключение (строки этой папки считаются новыми).
+function Get-DestFiles([string]$dir) {
+    $full = $LongPrefix + $dir
+    if (-not [System.IO.Directory]::Exists($full)) { return $null }
+    $d = New-Object 'System.Collections.Generic.Dictionary[string,long]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($fi in [System.IO.DirectoryInfo]::new($full).EnumerateFiles()) {
+        if (-not $d.ContainsKey($fi.Name)) { $d[$fi.Name] = $fi.Length }
+    }
+    return ,$d
+}
 foreach ($t in $Targets) {
     $g = @($Items | Where-Object { $_.Target -eq $t })
-    [double]$need = 0
-    foreach ($x in $g) { $need += $x.Size }
-    if (-not $Root[$t]) { Write-Host ("{0}: {1} файлов, {2} - диск не подключён, пропускается" -f $t, $g.Count, (Fmt-GB $need)) -ForegroundColor Yellow; continue }
-    $Total += $need
+    [double]$all = 0
+    foreach ($x in $g) { $all += $x.Size }
+    if (-not $Root[$t]) { Write-Host ("{0}: {1} файлов, {2} - диск не подключён, пропускается" -f $t, $g.Count, (Fmt-GB $all)) -ForegroundColor Yellow; continue }
+    $Total += $all
+    # 2.6: место нужно только под файлы, которых на месте назначения ещё нет
+    [double]$need = 0; [double]$sameBytes = 0; $same = 0; $other = 0; $unread = 0
+    $destBase = $Root[$t] + '\' + $Dest[$t] + '\' + $SrcName
+    $haveBase = [System.IO.Directory]::Exists($LongPrefix + $destBase)
+    $dirs = @{}
+    foreach ($x in $g) {
+        $len = $null
+        if ($haveBase) {
+            $p = $destBase + '\' + $x.Rel
+            $k = $p.LastIndexOf('\')
+            $dir = $p.Substring(0, $k); $leaf = $p.Substring($k + 1)
+            if (-not $dirs.ContainsKey($dir)) {
+                try { $dirs[$dir] = Get-DestFiles $dir }
+                catch { $dirs[$dir] = 'не прочитана'; $unread++ }
+            }
+            $files = $dirs[$dir]
+            if ($null -ne $files -and $files -isnot [string] -and $files.ContainsKey($leaf)) { $len = $files[$leaf] }
+        }
+        if ($null -eq $len) { $need += $x.Size }
+        elseif ($len -eq $x.Size) { $same++; $sameBytes += $x.Size }
+        else { $other++ }
+    }
     $free = [double]([System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($Root[$t] + '\')).AvailableFreeSpace)
-    Write-Host ("{0}: {1} файлов, {2} -> {3}\{4}\{5}   (свободно {6})" -f $t, $g.Count, (Fmt-GB $need), $Root[$t], $Dest[$t], $SrcName, (Fmt-GB $free))
-    if ($free -lt $need + 1GB) { Stop-Script "На $t не хватает места. Ничего не сделано." 5 }
+    if ($TestRoots -and $TestFreeBytes -ge 0) { $free = $TestFreeBytes }
+    Write-Host ("{0}: {1} файлов, {2} -> {3}\{4}\{5}   (свободно {6})" -f $t, $g.Count, (Fmt-GB $all), $Root[$t], $Dest[$t], $SrcName, (Fmt-GB $free))
+    if ($same) { Write-Host ("  уже лежат на цели с тем же размером: {0} файлов, {1} - будут сверены по SHA-256, места не займут" -f $same, (Fmt-GB $sameBytes)) }
+    if ($other) { Write-Host ("  лежат на цели с другим размером: {0} файлов - КОНФЛИКТ, не копируются, места не займут" -f $other) -ForegroundColor Yellow }
+    if ($unread) { Write-Host ("  папок назначения не прочитано: {0} - их файлы посчитаны как новые" -f $unread) -ForegroundColor Yellow }
+    Write-Host ("  нужно места под новые файлы: {0} (+ запас 1 ГБ)" -f (Fmt-GB $need))
+    if ($free -lt $need + 1GB) { Stop-Script ("На $t не хватает места: нужно {0} с запасом 1 ГБ, свободно {1}. Ничего не сделано." -f (Fmt-GB ($need + 1GB)), (Fmt-GB $free)) 5 }
 }
 if ($Items.Count -eq 0) { Stop-Script 'Копировать нечего: список пуст.' $CodeOk }
 if ($Todo.Count -eq 0) { Stop-Script 'Копировать некуда: диски-цели не подключены. Ничего не сделано.' 5 }

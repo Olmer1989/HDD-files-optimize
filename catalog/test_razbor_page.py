@@ -96,7 +96,18 @@ class PageBase(V3Base):
 
     def settle(self):
         self.assertTrue(wait(lambda: self.p.plan_rev == self.p.rev and not self.p.sum_busy and not self.p.have_busy
-                             and not self.p.writing and self.p.model.have is not None, 60), self.p.sum_state.text())
+                             and not self.p.writing and not self.p.saving and not self.p.save_timer.isActive()
+                             and self.p.model.have is not None, 60), self.p.sum_state.text())
+
+    def own(self, path):
+        """Своя действующая отметка папки: черновик или уже сохранённая (этап 16: отметки сохраняются сразу)."""
+        return self.p.model.own_verdict(path.lower())
+
+    def owns(self):
+        """Все свои отметки носителя (черновик поверх сохранённых), кроме «как у родителя»: {путь: отметка}."""
+        m = self.p.model
+        keys = set(m.drafts) | set(m.saved_ms.by_key) | set(m.inflight)
+        return {k: m.own_verdict(k) for k in keys if m.own_verdict(k) != rp.INHERIT}
 
     def item(self, path):
         parts = path.split('\\')
@@ -225,8 +236,10 @@ class ChoiceTest(PageBase):
         self.open()
         self.assertEqual(self.p.dest, 'Н2')
         self.assertEqual(self.p.dest_box.currentData(), 'Н2')
-        self.assertIn('Работа', self.p.where.text())
-        self.assertIn('HDD91 по журналу сканирования дисков', self.p.where.text())
+        self.assertFalse(self.p.dest_box.isVisibleTo(self.p))                 # этап 16: строки выбора диска нет
+        self.assertTrue(self.p.where.text().startswith('Диск назначения: Накопитель — HDD91'), self.p.where.text())
+        self.assertNotIn('Работа', self.p.where.text())                        # имя направления - в ячейке, не в плашке
+        self.assertNotIn('отмечено ещё', self.p.where.text())
         self.assertEqual(self.p.model.drafts, {})                                # ничего не отмечено молча
         self.p.set_dest('Н1')                                                    # владелец выбрал другое
         self.assertEqual(self.p.dest, 'Н1')
@@ -234,6 +247,7 @@ class ChoiceTest(PageBase):
         self.p.set_dest('Н2')
         self.p.use_choice()
         self.assertEqual(self.p.dest, 'Н1')
+        self.assertIn('В «Обзоре» отмечено ещё: Н2 Работа', self.p.where.text())   # первое по номеру - и сказано
         self.mark(('', 'Н2'))                                                    # сохранённый режим - «всё в Н2»
         dp.save_choice(['Н1'])
         self.p.load_disk(SRC, keep=False)
@@ -266,30 +280,33 @@ class LayoutTest(PageBase):
         # этап 12: направление на двух дисках - коротко, диски не сливаются в одну строку
         self.assertEqual(rp.dest_text(d1, rows), 'Н1 Семейный архив — H: и HDD77 (две копии)')
         self.assertIn(f'<span style="color:{rp.ORANGE}"><b>Н1 Семейный архив</b></span>', rp.dest_html(d1, rows))
-        h = rp.head_html(d1, rows, {'HDD45': ('H:', 421 * 1024 ** 3, 2000 * 1024 ** 3, 4096)})
-        self.assertTrue(h.startswith('Диск: Семейный архив — две копии<br>'), h)
-        self.assertIn(f'<span style="color:{rp.ORANGE}"><b>Н1 Семейный архив</b></span> · два задания — по одному на '
-                      'каждый диск', h)
+        h = rp.head_html(d1, rows, {'HDD45': ('H:', 421 * 1024 ** 3, 2 * 10 ** 12, 4096)})
+        # этап 16: «Диск назначения: H: Бэкап фото и видео — HDD45, 2 ТБ · свободно …» - диск вместо направления
+        self.assertTrue(h.startswith('Диск назначения — две копии:<br>'), h)
+        self.assertNotIn('Семейный архив', h)
         lines = h.split('<br>')
-        self.assertEqual(len(lines), 4)                                        # заголовок, направление, два диска
-        self.assertTrue(lines[2].endswith('H: Бэкап фото и видео — HDD45 <span style="color:#33691e">· свободно '
-                                          '421,0 ГБ</span>'), lines[2])
-        self.assertIn('Путешествия — HDD77 <span', lines[3])
-        self.assertIn('не подключён', lines[3])                                 # плашка - у своего диска
-        self.assertNotIn('не подключён', lines[2])
+        self.assertEqual(len(lines), 3)                                        # заголовок, два диска
+        self.assertTrue(lines[1].endswith('H: Бэкап фото и видео — HDD45, 2 ТБ <span style="color:#33691e">· свободно '
+                                          '421,0 ГБ</span>'), lines[1])
+        self.assertIn('Путешествия — HDD77 <span', lines[2])
+        self.assertIn('не подключён', lines[2])                                 # плашка - у своего диска
+        self.assertNotIn('не подключён', lines[1])
         d3 = types.SimpleNamespace(num='Н3', name='Фильмы', disks=('HDD55',))
         h = rp.head_html(d3, [dict(disk='HDD55', label='WD20 - 2 ТБ - My Book', letter='I:')],
-                         {'HDD55': ('I:', 421 * 1024 ** 3, 2000 * 1024 ** 3, 4096)})
-        # замечание 3 (16.11.2026): «Диск: I: My Book — Н3 Фильмы» (направление оранжевым в той же строке)
-        self.assertTrue(h.startswith(f'Диск: I: My Book — <span style="color:{rp.ORANGE}">Н3 Фильмы</span><br>'), h)
-        self.assertNotIn('не подключён', h)
-        self.assertEqual(h.split('<br>')[1], '<span style="font-size:10pt; font-weight:normal; color:#33691e">HDD55 по '
-                                             'журналу сканирования дисков · свободно 421,0 ГБ</span>')
+                         {'HDD55': ('I:', 421 * 1024 ** 3, 16000900165632, 4096)})
+        self.assertEqual(h, 'Диск назначения: I: My Book — HDD55, 16 ТБ <span style="color:#33691e">· свободно 421,0 ГБ'
+                            '</span>')
         off = rp.head_html(d3, [dict(disk='HDD55', label='WD20 - 2 ТБ - My Book', letter='')])
-        self.assertTrue(off.startswith(f'Диск: My Book — <span style="color:{rp.ORANGE}">Н3 Фильмы</span> <span'), off)
-        self.assertIn('не подключён', off.split('<br>')[0])
-        self.assertNotIn('задани', h)
-        for x in (h, rp.carrier_text(rows[0]), rp.dest_text(d1, rows)):
+        self.assertTrue(off.startswith('Диск назначения: My Book — HDD55 <span'), off)   # объём не известен - нет
+        self.assertIn('не подключён', off)
+        self.assertNotIn('Фильмы', h + off)
+        self.assertEqual(rp.tb_text(500107862016), '500 ГБ')
+        self.assertEqual(rp.tb_text(4000787030016), '4 ТБ')
+        self.assertEqual(rp.tb_text(1500301910016), '1,5 ТБ')
+        o = rp.head_html(d3, [dict(disk='HDD55', label='', letter='I:')], others=[types.SimpleNamespace(num='Н7',
+                                                                                                         name='Ещё')])
+        self.assertIn('отмечено ещё: Н7 Ещё', o)
+        for x in (rp.carrier_text(rows[0]), rp.dest_text(d1, rows)):
             self.assertNotIn('ТБ)', x)                                          # ни модели, ни объёма
         # в окне: строки списков по той же схеме, подключённые сверху (в тестах дисков нет - все «не подключён»)
         self.open()
@@ -345,12 +362,12 @@ class ModesTest(PageBase):
         m = self.p.model
         self.assertEqual(self.p.mode(), rp.ONLY)
         self.p.toggle(['Поход 2010', 'Работа'], True)                           # «Только выбранные»: галочка = Н1
-        self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'поход 2010': N1, 'работа': N1})
+        self.assertEqual(self.owns(), {'поход 2010': N1, 'работа': N1})
         self.item('Поход 2010\\Фото')
         self.check_consistent()
         # «Все папки»: весь носитель - в Н1
         self.p.mode_every.setChecked(True)
-        self.assertEqual(m.drafts['']['verdict'], N1)
+        self.assertEqual(self.own(''), N1)
         self.assertEqual(self.p.mode(), rp.EVERY)
         self.assertTrue(self.p.mode_hint.text().startswith('•'))
         self.item('Друзья\\Наши')
@@ -361,7 +378,7 @@ class ModesTest(PageBase):
         self.assertEqual(self.p.mode(), rp.EXCEPT)
         self.assertEqual(self.p.items['Друзья'].checkState(rp.C_CHECK), rp.Qt.Unchecked)
         self.p.items['Друзья'].setCheckState(rp.C_CHECK, rp.Qt.Checked)
-        self.assertEqual(m.drafts['друзья']['verdict'], rp.SKIP)
+        self.assertEqual(self.own('друзья'), rp.SKIP)
         self.assertEqual(self.p.items['Друзья\\Наши'].checkState(rp.C_CHECK), rp.Qt.Checked)     # исключена с родителем
         self.assertTrue(self.p.items['Друзья\\Наши'].data(rp.C_CHECK, rp.GRAY_ROLE))
         self.check_consistent()
@@ -369,17 +386,17 @@ class ModesTest(PageBase):
         self.assertEqual(P.part_a[(rz.O_SKIP, None)][0], 2)                     # a.jpg и b.jpg
         self.assertIn('Отмечено: весь носитель, кроме 1 папки', self.p.copy_cell.body.text())
         self.p.items['Друзья'].setCheckState(rp.C_CHECK, rp.Qt.Unchecked)       # снять исключение
-        self.assertNotIn('друзья', m.drafts)
+        self.assertEqual(self.own('друзья'), rp.INHERIT)
         self.p.toggle(['Друзья'], True)
         # «Все папки» снимает исключения одним шагом отмены
         self.p.mode_every.setChecked(True)
-        self.assertNotIn('друзья', m.drafts)
+        self.assertEqual(self.own('друзья'), rp.INHERIT)
         self.p.undo()
-        self.assertEqual(m.drafts['друзья']['verdict'], rp.SKIP)
-        # обратно «Только выбранные»: сохранённой отметки носителя нет - «ничего, кроме отмеченных»; свои Н1 остались
+        self.assertEqual(self.own('друзья'), rp.SKIP)
+        # обратно «Только выбранные»: отметки носителя до «Все папки» не было - «ничего, кроме отмеченных»; свои Н1
         self.p.mode_only.setChecked(True)
-        self.assertEqual(m.drafts['']['verdict'], rp.SKIP)
-        self.assertEqual(m.drafts['поход 2010']['verdict'], N1)
+        self.assertEqual(self.own(''), rp.SKIP)
+        self.assertEqual(self.own('поход 2010'), N1)
         self.assertEqual(self.p.mode(), rp.ONLY)
         self.check_consistent()
         P = self.plan()
@@ -392,12 +409,14 @@ class ModesTest(PageBase):
         self.assertEqual(self.p.dest, 'Н2')                                     # «Обзор» пуст - направление носителя
         self.p.set_dest('Н1')
         self.assertTrue(self.p.mode_only.isChecked())
-        self.p.mode_except.setChecked(True)                                      # корень - Н1 черновиком
-        self.assertEqual(self.p.model.drafts['']['verdict'], N1)
-        self.p.mode_only.setChecked(True)                                        # вернуть сохранённое «всё в Н2»
-        self.assertNotIn('', self.p.model.drafts)
+        self.p.mode_except.setChecked(True)                                      # корень - Н1
+        self.assertEqual(self.own(''), N1)
+        self.settle()                                                            # этап 16: Н1 уже записано в таблицу
+        self.p.mode_only.setChecked(True)                                        # вернуть прежнее «всё в Н2»
+        self.assertEqual(self.own(''), sv.directions()['Н2'].verdict())
         self.assertEqual(self.p.model.route[''].num, 'Н2')
         self.settle()
+        self.assertEqual(self.p.model.saved_ms.get('').num, 'Н2')
 
     def test_check_applies_to_all_selected(self):
         """Решение 16.11: выделение нескольких папок (Shift/Ctrl) сразу ставит галочки всем выделенным (один шаг
@@ -419,17 +438,17 @@ class ModesTest(PageBase):
                 return QPointF(-5, -5)                                        # не по колонке галочек
         self.p.tree.multi(Ev(rp.Qt.NoModifier))                                  # без Shift/Ctrl - ничего
         wait(lambda: False, 0.5)
-        self.assertEqual(m.drafts, {})
+        self.assertEqual(self.owns(), {})
         self.p.tree.multi(Ev(rp.Qt.ControlModifier))                             # Ctrl-щелчок - всем сразу
-        self.assertTrue(wait(lambda: len(m.drafts) == 3))
-        self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'друзья': N1, 'работа': N1, 'документы': N1})
+        self.assertTrue(wait(lambda: len(self.owns()) == 3))
+        self.assertEqual(self.owns(), {'друзья': N1, 'работа': N1, 'документы': N1})
         self.assertEqual(len(m.undo_stack), 1)                                   # один шаг отмены
         self.assertTrue(wait(lambda: len(self.p.selected_folders()) == 3))       # выделение осталось
         self.item('Документы').setCheckState(rp.C_CHECK, rp.Qt.Unchecked)       # этап 12: у всей выделенной группы
-        self.assertEqual(set(m.drafts), set())
+        self.assertEqual(self.owns(), {})
         self.assertEqual(len(m.undo_stack), 2)
         self.p.check_selected()                                                  # повтор: уже отмеченные не трогаются
-        self.assertEqual(set(m.drafts), {'друзья', 'работа', 'документы'})
+        self.assertEqual(set(self.owns()), {'друзья', 'работа', 'документы'})
         self.settle()
 
     def test_folder_of_other_direction(self):
@@ -551,7 +570,7 @@ class SummaryTest(PageBase):
         self.assertIn('HDD45', text)
         self.assertIn('не подключён — место не проверено', text)
         self.assertIn('сравнение только по имени и размеру', text)              # описание.doc без хеша
-        self.assertIn('с несохранёнными', self.p.sum_state.text())
+        self.assertIn('Посчитано в', self.p.sum_state.text())
         # «Только выбранные» = «ничего, кроме отмеченных»: всё - «не копировать», кроме уже перенесённого
         self.p.mode_only.setChecked(True)
         P = self.plan()
@@ -561,7 +580,7 @@ class SummaryTest(PageBase):
         self.p.apply(['Друзья'], N2)
         P = self.plan()
         self.assertEqual(dict(P.part_b), {'HDD91': [2, 185]})
-        self.assertEqual(self.p.model.drafts['']['verdict'], rp.SKIP)
+        self.assertEqual(self.own(''), rp.SKIP)
 
     def test_stale_answer_is_not_shown(self):
         self.open()
@@ -573,58 +592,85 @@ class SummaryTest(PageBase):
 
 
 class SaveTest(PageBase):
+    """Этап 16 (решение владельца): кнопки «Сохранить отметки» нет - отметка пишется в решения.tsv сразу, без вопроса;
+    «Отменить последнее» - новой строкой с прежней отметкой."""
+
     def rows(self):
         return hb.DECISIONS.read_text(encoding='utf-8-sig').splitlines() if hb.DECISIONS.exists() else []
 
-    def test_save_marks_batch_and_prune(self):
+    def test_marks_are_saved_at_once_and_undo_writes_back(self):
         self.open()
-        self.p.mode_except.setChecked(True)
-        self.p.apply(['Поход 2010\\Монтаж', 'Друзья'], rp.SKIP)
-        self.p.apply(['Работа'], N2)
-        self.assertEqual(self.p.save_btn.text(), 'Сохранить отметки (4)')
+        for gone in ('save_btn', 'discard_btn'):
+            self.assertFalse(hasattr(self.p, gone), gone)
         before = self.rows()
         real = sv.add_marks_batch
         with mock.patch.object(sv, 'add_marks_batch', side_effect=real) as spy:
-            self.p.save()
-            self.assertTrue(wait(lambda: not self.p.writing and not self.p.model.drafts), self.asked)
-        self.assertEqual(spy.call_count, 1)                                     # одним пакетом
+            self.p.mode_except.setChecked(True)
+            self.p.apply(['Поход 2010\\Монтаж', 'Друзья'], rp.SKIP)          # одно событие - один пакет
+            self.settle()
+            self.p.apply(['Работа'], N2)
+            self.settle()
+        self.assertEqual(spy.call_count, 2)
         new = self.rows()[len(before):]
         self.assertEqual(len(new), 4, new)
         self.assertTrue(any(f'{SRC}\t\t{N1}' in x for x in new), new)
-        self.assertIn('Было → станет', self.dialogs[-1])
-        self.assertIn('было «режим не выбран', self.dialogs[-1])
-        self.assertFalse(self.p.save_btn.isEnabled())
+        self.assertEqual(self.dialogs, [])                                      # без окна «Было → станет»
+        self.assertEqual(self.p.model.drafts, {})
         self.assertEqual(self.to('Работа'), 'Работа (91)')                      # своя сохранённая - без «•»
-        # снаружи записали то же, что в черновике - черновик сам очищается; другое - конфликт в предпросмотре
-        self.p.apply(['Документы'], rp.SKIP)
-        self.p.apply(['Смешанная'], N2)
-        sv.add_marks_batch(SRC, [('Документы', 'не копировать'), ('Смешанная', 'Н3')])
-        self.p.refresh()
-        self.assertTrue(wait(lambda: 'документы' not in self.p.model.drafts and self.p.loading is None))
+        self.assertEqual(len(self.p.model.undo_stack), 3)
+        self.p.undo()                                                            # «Работа» - снова как у родителя
         self.settle()
-        self.assertIn('смешанная', self.p.model.drafts)
-        _lines, conflicts, _nested = self.p.model.change_lines()
-        self.assertTrue(conflicts and 'изменили в другом месте' in conflicts[0], conflicts)
+        last = self.rows()[-1]
+        self.assertTrue(last.startswith(f'{SRC}\tРабота\tкак у родителя'), last)
+        self.assertIsNone(self.p.model.saved_ms.get('Работа'))
+        self.p.undo()                                                            # исключения сняты (шаг 2)
+        self.settle()
+        self.assertIsNone(self.p.model.saved_ms.get('Друзья'))
+        self.assertEqual(self.p.model.saved_ms.get('').num, 'Н1')               # режим носителя ещё стоит
+        self.p.undo()                                                            # шаг 1 - режим «Все, кроме»
+        self.settle()
+        self.assertIsNone(self.p.model.saved_ms.get(''))
+        self.assertFalse(self.p.undo_btn.isEnabled())                            # отменять больше нечего
+        self.assertEqual(self.asked, [])
 
-    def test_refused_write_keeps_drafts(self):
+    def test_edit_while_writing_is_kept(self):
+        """Правка во время записи сравнивается с пакетом, который пишется (Model.inflight), и пишется следующим."""
         self.open()
         self.p.apply(['Работа'], N2)
+        self.p.save_timer.stop()
+        self.p.autosave()                                                        # пакет «Работа → Н2» в пути
+        self.assertTrue(self.p.saving)
+        self.p.apply(['Работа'], rp.INHERIT)                                     # владелец передумал до конца записи
+        self.assertEqual(self.p.model.drafts['работа']['verdict'], rp.INHERIT)
+        self.settle()
+        self.assertIsNone(self.p.model.saved_ms.get('Работа'))                  # последнее слово - «как у родителя»
+        self.assertEqual(self.p.model.drafts, {})
+
+    def test_refused_write_is_reported_and_forgotten(self):
+        self.open()
         with mock.patch.object(sv, 'add_marks_batch', side_effect=sv.Refused('проба отказа')):
-            self.p.save()
-            self.assertTrue(wait(lambda: not self.p.writing))
-        self.assertIn('работа', self.p.model.drafts)
+            self.p.apply(['Работа'], N2)
+            self.settle()
+        self.assertEqual(self.p.model.drafts, {})                               # на экране - сохранённое
+        self.assertIsNone(self.p.model.saved_ms.get('Работа'))
         self.assertTrue(any('проба отказа' in x for x in self.asked), self.asked)
 
-    def test_close_and_disk_change_ask_about_drafts(self):
+    def test_close_and_disk_change_write_drafts_first(self):
         self.open()
         self.p.apply(['Работа'], N2)
-        self.answer = rp.QMessageBox.No
-        self.assertFalse(self.w.close())                                        # окно не закрылось
-        self.assertTrue(any('несохранённые отметки (1)' in x for x in self.asked), self.asked)
-        self.p.disk_box.setCurrentText('HDD90')                                 # смена носителя - тот же вопрос
-        self.assertEqual(self.p.disk, SRC)
-        self.assertEqual(self.p.disk_box.value(), SRC)
+        self.p.save_timer.stop()                                                 # запись ещё не началась
+        self.p.disk_box.setCurrentText('HDD90')                                 # смена носителя - сначала запись
+        self.assertTrue(wait(lambda: self.p.model is not None and self.p.model.disk == 'HDD90'))
+        self.assertTrue(any(f'{SRC}\tРабота\t{N2}' in x for x in self.rows()), self.rows())
+        self.settle()
+        self.p.apply(['A'], N2)
+        self.p.save_timer.stop()
+        with mock.patch.object(sv, 'add_marks_batch', side_effect=sv.Refused('проба отказа')):
+            self.answer = rp.QMessageBox.No
+            self.assertFalse(self.w.close())                                    # не записалось - окно не закрылось
+        self.assertTrue(any('Отметки не сохранились: проба отказа' in x for x in self.asked), self.asked)
         self.answer = rp.QMessageBox.Yes
+        self.p.model.drafts.clear()
 
 
 TOC_OK = dict(connected=True, reason='', letter='K:', checked=5, problems=[])
@@ -652,9 +698,9 @@ class TasksTest(PageBase):
         self.open()
         self.p.mode_every.setChecked(True)
         self.p.apply(['Работа'], N2)
-        self.p.prepare(['Н1', 'Н2'])         # черновик есть - сначала сохранить (предпросмотр), затем задания
+        self.p.prepare(['Н1', 'Н2'])         # черновик есть - сначала записывается (этап 16: без вопроса), затем задания
         self.assertTrue(wait(lambda: self.made() and not self.p.writing, 60), self.asked)
-        self.assertTrue(any('Задания строятся только из сохранённых' in x for x in self.asked), self.asked)
+        self.assertFalse(any('несохранённ' in x for x in self.asked), self.asked)
         self.assertTrue(any(f'{SRC} — Работа — Работа' in x for x in self.dialogs), self.dialogs)
         self.assertIn(f'{SRC} — Работа — Работа', self.made())
         self.assertTrue(list(hb.RAZBORY.glob(f'{SRC} *.json')))
@@ -1127,29 +1173,29 @@ class Stage12Test(PageBase):
         self.p.tree.clearSelection()
         for f in group:
             self.item(f).setSelected(True)
-        self.assertEqual(m.drafts, {})
+        self.assertEqual(self.owns(), {})
         self.click_check('Работа')                                               # галочка одной из выделенных
-        self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'друзья': N1, 'работа': N1, 'документы': N1})
+        self.assertEqual(self.owns(), {'друзья': N1, 'работа': N1, 'документы': N1})
         self.assertEqual(len(m.undo_stack), 1)                                   # одним шагом отмены
         self.assertTrue(wait(lambda: sorted(self.p.selected_folders()) == sorted(group)))   # выделение осталось
         self.assertTrue(all(self.item(f).checkState(rp.C_CHECK) == rp.Qt.Checked for f in group))
         self.click_check('Друзья')                                               # снять - тоже у всей группы
-        self.assertEqual(m.drafts, {})
+        self.assertEqual(self.owns(), {})
         self.assertEqual(len(m.undo_stack), 2)
         self.assertTrue(all(self.item(f).checkState(rp.C_CHECK) == rp.Qt.Unchecked for f in group))
         self.assertTrue(wait(lambda: sorted(self.p.selected_folders()) == sorted(group)))
         self.click_check('Смешанная')                                            # невыделенная - только она
-        self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'смешанная': N1})
+        self.assertEqual(self.owns(), {'смешанная': N1})
         self.assertEqual(len(m.undo_stack), 3)
         self.assertEqual(sorted(self.p.selected_folders()), sorted(group))         # Qt: щелчок по галочке выделение не меняет
         self.assertTrue(all(self.item(f).checkState(rp.C_CHECK) == rp.Qt.Unchecked for f in group))
         self.click_check('Смешанная')                                            # снова невыделенная - только она
-        self.assertEqual(m.drafts, {})
+        self.assertEqual(self.owns(), {})
         self.p.undo()                                                            # «Отменить последнее» - шагами
-        self.assertEqual(set(m.drafts), {'смешанная'})
+        self.assertEqual(set(self.owns()), {'смешанная'})
         self.p.undo()
         self.p.undo()
-        self.assertEqual(set(m.drafts), {'друзья', 'работа', 'документы'})
+        self.assertEqual(set(self.owns()), {'друзья', 'работа', 'документы'})
         self.assertIsNone(self.p.tree.press_sel)                                 # после щелчка не осталось
         self.settle()
 
@@ -1166,7 +1212,7 @@ class Stage12Test(PageBase):
         self.assertIn('Уже есть на диске', c.body.text())
         self.assertIn('Копировать на диск ', c.body.text())
         h = self.p.where.text()
-        self.assertTrue(h.startswith('Диск: '))
+        self.assertTrue(h.startswith('Диск назначения: '))
         self.assertNotIn('копии', h)
         self.assertNotIn('Копия', self.p.dest_info.text())
 
@@ -1252,14 +1298,14 @@ class Stage12Test(PageBase):
         steps = len(m.undo_stack)
         self.click_check('Работа', rp.Qt.ControlModifier)                       # Ctrl-щелчок по галочке выделенной
         wait(lambda: False, 0.3)
-        self.assertEqual(set(m.drafts), {'друзья', 'работа', 'документы'})
+        self.assertEqual(set(self.owns()), {'друзья', 'работа', 'документы'})
         self.assertEqual(len(m.undo_stack), steps + 1)
         self.click_check('Работа', double=True)                                   # двойной щелчок
         wait(lambda: False, 0.3)
         states = {self.item(f).checkState(rp.C_CHECK) for f in group}
         self.assertEqual(len(states), 1)                                         # у всей группы одинаково
         self.assertEqual(len(m.undo_stack), steps + 2)                           # двойной щелчок - одно переключение
-        self.assertEqual(set(m.drafts), set())                                   # у всей группы - снято
+        self.assertEqual(set(self.owns()), set())                                   # у всей группы - снято
         self.assertIsNone(tree.press_sel)
         # Ctrl-щелчок по ИМЕНИ ещё одной папки: выделенным ставятся галочки - одним шагом (нажатие + отпускание)
         before = len(m.undo_stack)
@@ -1270,7 +1316,7 @@ class Stage12Test(PageBase):
                          tree.visualItemRect(it).center())
         wait(lambda: len(self.p.selected_folders()) == 4)
         wait(lambda: False, 0.3)
-        self.assertEqual(set(m.drafts), {'друзья', 'работа', 'документы', 'смешанная'})
+        self.assertEqual(set(self.owns()), {'друзья', 'работа', 'документы', 'смешанная'})
         self.assertEqual(len(m.undo_stack), before + 1)
         self.settle()
 
@@ -1372,6 +1418,293 @@ class CopiedRootMarksTest(V3Base):
         ms = hb.MarkSet.build(hb.mark_rows(SRC, hb.table_bytes(hb.DECISIONS)), dirs)
         self.assertEqual(sv.folder_mark(R + '\\Работа', ms, dirs, m.roots)['text'], 'Н1 Семейный архив')
         self.assertEqual(sv.folder_mark(R, ms, dirs, m.roots)['own'], True)
+
+
+class FileModelTest(unittest.TestCase):
+    """Этап 16: модель окна «Список файлов» без базы - сортировка всего набора (пустые - в конце), фильтры без обрезки
+    пробелов, итог по фильтру, выгрузка."""
+
+    def rows(self):
+        import filelist_window as fw
+        from hb_core.consts import F_ARCH, F_MUSIC, F_PHOTO, F_TEXT, F_VIDEO
+        data = {'rows': [
+            ('HDD62', ' X\\a.jpg', 300, 1700000000, 'S', F_PHOTO, '', ''),
+            ('HDD62', 'X \\B.mp4', None, 1600000000, None, F_VIDEO, '', ''),          # размер неизвестен
+            ('HDD62', 'X\\c.doc', 100, None, 'Z', F_TEXT, '⚠ проба', ''),             # дата неизвестна
+            ('HDD62', 'X\\d.zip', 200, 0, 'U', F_ARCH, '', ''),                       # нулевая дата - как пустая
+            ('HDD62', 'e.mp3', 50, 1800000000, 'X', F_MUSIC, '', ''),                  # файл в корне
+        ]}
+        return fw, fw.prepare(data)['model_rows']
+
+    def names(self, m):
+        return [m.row(i)[2] for i in range(m.rowCount())]
+
+    def test_sort_filter_totals(self):
+        fw, rows = self.rows()
+        m = fw.FileModel('nohash')
+        m.set_rows('nohash', rows)
+        self.assertEqual([m.headerData(i, rp.Qt.Horizontal) for i in range(m.columnCount())],
+                         ['Папка', 'Имя', 'Тип', 'Размер', 'Дата', 'Хеш', 'Почему'])
+        size, date, hsh = m.cols.index(fw.C_SIZE), m.cols.index(fw.C_DATE), m.cols.index(fw.C_HASH)
+        m.sort(size, rp.Qt.AscendingOrder)
+        self.assertEqual(self.names(m), ['e.mp3', 'c.doc', 'd.zip', 'a.jpg', 'B.mp4'])     # пустой размер - в конце
+        m.sort(size, rp.Qt.DescendingOrder)
+        self.assertEqual(self.names(m), ['a.jpg', 'd.zip', 'c.doc', 'e.mp3', 'B.mp4'])     # и при обратном порядке
+        m.sort(date, rp.Qt.DescendingOrder)
+        self.assertEqual(self.names(m), ['e.mp3', 'a.jpg', 'B.mp4', 'c.doc', 'd.zip'])     # без даты - в конце
+        self.assertEqual(m.data(m.index(4, date)), '—')
+        self.assertEqual(m.data(m.index(2, size)), '—')
+        m.sort(hsh)
+        self.assertEqual([m.data(m.index(i, hsh)) for i in range(5)],
+                         ['посчитан сканером', 'сверен только размер', 'со слов владельца', 'файл изменился',
+                          'не считался'])
+        m.sort(0)                                                                # по папке: корень, « X», «X», «X »
+        self.assertEqual(m.data(m.index(0, 0)), '(корень носителя)')
+        self.assertEqual(self.names(m), ['e.mp3', 'a.jpg', 'c.doc', 'd.zip', 'B.mp4'])
+        m.set_filter(folder_sub=' x')                                            # пробел ввода не обрезается
+        self.assertEqual(self.names(m), ['a.jpg'])
+        m.set_filter(folder_sub='x ')
+        self.assertEqual(self.names(m), ['B.mp4'])
+        m.set_filter(folder_sub='', name_sub='.MP')                              # без учёта регистра
+        self.assertEqual(sorted(self.names(m)), ['B.mp4', 'e.mp3'])
+        m.set_filter(name_sub='', types={2, 3})                                  # документы и архивы
+        self.assertEqual(sorted(self.names(m)), ['c.doc', 'd.zip'])
+        self.assertEqual(m.totals(), (2, 300, [0, 0, 1, 1, 0], [0, 0, 100, 200, 0]))
+        self.assertEqual(m.totals(visible=False)[0], 5)
+        self.assertEqual(m.totals(visible=False)[2], [1, 1, 1, 1, 1])            # музыка - «другие»
+        self.assertIn('2 файла · 0,0 ГБ', fw.totals_line(m.totals()))
+        self.assertEqual(m.export_rows()[0][:2], ['X', 'c.doc'])
+        self.assertEqual(m.data(m.index(0, m.cols.index(fw.C_WHY)), rp.Qt.ForegroundRole).name(), '#c62828')
+        m.set_filter(types=set(range(5)))
+        self.assertFalse(m.filtered())
+
+    def test_columns_of_lists_and_big_set(self):
+        import time as _t
+        fw, rows = self.rows()
+        self.assertEqual(fw.columns('contested')[0], fw.C_DISK)
+        self.assertEqual(fw.head('contested', fw.C_WHY), 'Почему спорный')
+        self.assertIn(fw.C_WHERE, fw.columns('have'))
+        self.assertEqual(fw.collapse(['A\\B', 'A', ' A', 'a\\c']), [' A', 'A'])
+        big = rows * 60000                                                       # 300 тыс. строк
+        m = fw.FileModel('nohash')
+        m.set_rows('nohash', big)
+        t0 = _t.time()
+        m.sort(m.cols.index(fw.C_SIZE), rp.Qt.DescendingOrder)
+        m.sort(m.cols.index(fw.C_NAME))
+        m.set_filter(name_sub='.jpg')
+        self.assertLess(_t.time() - t0, 15)                                     # без прокси: секунды, не минуты
+        self.assertEqual(m.rowCount(), 60000)
+
+    def test_save_csv_and_xlsx(self):
+        import csv as _csv
+        import tempfile
+        from openpyxl import load_workbook
+        fw, rows = self.rows()
+        tmp = Path(tempfile.mkdtemp(prefix='filelist_'))
+        heads = ['Папка', 'Имя']
+        data = [[' X', 'a;"b".jpg'], ['X ', 'c.doc']]
+        fw.save_table(str(tmp / 'a.csv'), heads, data)
+        with open(tmp / 'a.csv', encoding='utf-8-sig', newline='') as f:
+            self.assertEqual(list(_csv.reader(f, delimiter=';')), [heads] + data)    # «;» и кавычки не ломают столбцы
+        fw.save_table(str(tmp / 'a.xlsx'), heads, data)
+        ws = load_workbook(tmp / 'a.xlsx').active
+        self.assertEqual([[c.value for c in r] for r in ws.iter_rows()], [heads] + data)
+        with mock.patch.object(fw, 'XLSX_MAX', 1), self.assertRaises(sv.Refused):
+            fw.save_table(str(tmp / 'b.xlsx'), heads, data)
+
+
+class FileWindowTest(PageBase):
+    """Этап 16: окно «Список файлов» из «Разбора носителя» на временной базе: ссылки ячейки, число спорных, Проводник,
+    Excel/CSV, пересканирование папок выделенных."""
+
+    def setUp(self):
+        super().setUp()
+        import filelist_window as fw
+        self.fw = fw
+        self.fw_asked = []
+        self.fw_answer = rp.QMessageBox.Yes
+        self.fwp = [mock.patch.object(fw.QMessageBox, 'information', lambda *a, **k: self.fw_asked.append(a[2])),
+                    mock.patch.object(fw.QMessageBox, 'question',
+                                      lambda *a, **k: self.fw_asked.append(a[2]) or self.fw_answer)]
+        for x in self.fwp:
+            x.start()
+
+    def tearDown(self):
+        for w in list(getattr(self.w, 'file_lists', [])):
+            w.close()
+        for x in self.fwp:
+            x.stop()
+        super().tearDown()
+
+    def loaded(self, w):
+        self.assertTrue(wait(lambda: w.data is not None, 60), w.total.text())
+        return w
+
+    def test_links_open_lists_matching_cell(self):
+        import directions_page as dp
+        dp.save_choice(['Н2'])
+        self.mark(('Работа', 'Н2'), ('Документы', 'Н2'))
+        self.open()
+        P = self.plan()
+        body = self.p.copy_cell.body.text()
+        self.assertIn('href="copy:HDD91"', body)
+        w = self.loaded(self.p.show_list('copy:HDD91'))
+        self.assertEqual(w.model.rowCount(), P.part_b['HDD91'][0])               # список = число в ячейке
+        self.assertTrue(w.title.text().startswith(f'{SRC} · к копированию на '), w.title.text())
+        self.assertIn('HDD91', w.title.text())
+        self.assertIn('Почему эти файлы: отмечены для «Н2 Работа»', w.sub.text())
+        self.assertIn('Всего: <b>3 файла', w.total.text())
+        self.assertIn('Показаны все: 3 файла', w.shown.text())
+        w.folder_edit.setText('докум')
+        w.apply_filter()
+        self.assertEqual(w.model.rowCount(), 1)
+        self.assertIn('Показаны по фильтру: <b>1 файл', w.shown.text())
+        # Excel: весь отфильтрованный набор
+        import tempfile
+        from openpyxl import load_workbook
+        out = Path(tempfile.mkdtemp(prefix='filelist_')) / 'список.xlsx'
+        with mock.patch.object(self.fw.QFileDialog, 'getSaveFileName', lambda *a, **k: (str(out), '')):
+            w.save_excel()
+        self.assertTrue(wait(lambda: out.exists() and w.state.text().startswith('Сохранено'), 30), w.state.text())
+        ws = load_workbook(out).active
+        self.assertEqual([c.value for c in next(ws.iter_rows())][:3], ['Папка', 'Имя', 'Тип'])
+        self.assertEqual(ws.max_row, 2)
+        out2 = out.with_suffix('.csv')
+        with mock.patch.object(self.fw, 'XLSX_MAX', 0), \
+                mock.patch.object(self.fw.QFileDialog, 'getSaveFileName', lambda *a, **k: (str(out2), '')):
+            w.save_excel()                                                       # больше листа Excel - вопрос и CSV
+        self.assertTrue(wait(lambda: out2.exists() and w.state.text().startswith('Сохранено'), 30), w.state.text())
+        self.assertTrue(any('больше, чем помещается на лист Excel' in x for x in self.fw_asked), self.fw_asked)
+        # «уже есть» и «не подходит по типу»
+        w2 = self.loaded(self.p.show_list('type:'))
+        self.assertEqual(w2.model.rowCount(), P.part_a.get((rz.O_TYPE, 'Н2'), (0, 0))[0])
+        self.assertTrue(w2.title.text().endswith('не подходит по типу для «Н2 Работа»'), w2.title.text())
+
+    def test_explorer_rescan_and_refresh(self):
+        self.open()
+        w = self.loaded(self.p.show_list('contested'))
+        self.assertGreater(w.model.rowCount(), 0)
+        self.assertEqual(w.model.cols[0], self.fw.C_DISK)
+        self.assertEqual(w.model.headerData(len(w.model.cols) - 1, rp.Qt.Horizontal), 'Почему спорный')
+        w.view.selectAll()
+        rows = w.selected_rows()
+        self.assertTrue(wait(lambda: 'файл' in w.rescan_btn.text() or 'папок)' in w.rescan_btn.text(), 10),
+                        w.rescan_btn.text())
+        # не подключён - подсказка
+        with mock.patch.object(sv, 'disk_letter', side_effect=sv.Refused('HDD60 не подключён: подключите диск')):
+            w.open_explorer()
+            self.assertTrue(wait(lambda: any('не подключён' in x for x in self.fw_asked), 10), self.fw_asked)
+        # подключён - папка файла с выделением
+        import tempfile
+        root = Path(tempfile.mkdtemp(prefix='letter_'))
+        w.view.clearSelection()
+        w.view.selectRow(next(i for i in range(w.model.rowCount()) if w.model.row(i)[1]))
+        r = w.current()
+        (root / r[1]).mkdir(parents=True, exist_ok=True)
+        (root / r[1] / r[2]).write_bytes(b'x')
+        calls = []
+        with mock.patch.object(sv, 'disk_letter', lambda d: str(root)), \
+                mock.patch.object(self.fw.subprocess, 'Popen', lambda cmd, *a, **k: calls.append(cmd)):
+            w.open_explorer()
+            self.assertTrue(wait(lambda: calls, 10))
+        self.assertEqual(calls[0], f'explorer /select,"{root}\\{r[1]}\\{r[2]}"')
+        # пересканирование папок выделенных: один диск, вопрос с числами, окно пересканирования, «данные устарели»
+        w.view.clearSelection()
+        own = [i for i in range(w.model.rowCount()) if w.model.row(i)[0] == SRC and w.model.row(i)[1]]
+        from PySide6.QtCore import QItemSelectionModel
+        for i in own:
+            w.view.selectionModel().select(w.model.index(i, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
+        made = []
+
+        class FakeDlg:
+            def __init__(self, win, disk, folders):
+                made.append((disk, folders))
+                self.running = False
+                from PySide6.QtCore import QObject, Signal
+
+                class S(QObject):
+                    finished = Signal(int)
+                self.s = S()
+                self.finished = self.s.finished
+
+            def show(self):
+                pass
+        with mock.patch('rescan_dialog.RescanDialog', FakeDlg):
+            w.rescan()
+        self.assertEqual(made[0][0], SRC)
+        self.assertEqual(made[0][1], self.fw.collapse(w.model.row(i)[1] for i in own))
+        self.assertTrue(any(x.startswith(f'Пересканировать {len(made[0][1])} папок {SRC} — ') for x in self.fw_asked),
+                        self.fw_asked)
+        self.w.rescan.finished.emit(0)
+        self.assertTrue(w.stale.isVisibleTo(w))
+        w.load()
+        self.loaded(w)
+        self.assertTrue(wait(lambda: not w.stale.isVisibleTo(w), 30))
+
+    def test_contested_button_counts_and_unique(self):
+        self.open()
+        self.assertTrue(wait(lambda: getattr(self.p, 'cont_n', None) is not None, 30))
+        n = sv.contested_count(SRC)['total']
+        self.assertGreater(n, 0)
+        self.assertEqual(self.p.contested_btn.text(), f'Пересчитать хеши спорных файлов ({n})…')
+        self.assertTrue(self.p.contested_btn.isEnabled() and self.p.contested_list_btn.isEnabled())
+        self.assertIn('Спорные — файлы, чью копию нельзя проверить по SHA-256', self.p.contested_note.text())
+        with mock.patch.object(sv, 'contested_count', lambda d, f='': dict(total=0, carrier=0, copies=0)):
+            self.p.run_contested_count()
+            self.assertTrue(wait(lambda: self.p.cont_n == 0, 10))
+        self.assertFalse(self.p.contested_btn.isEnabled())                       # 0 - неактивна
+        self.assertFalse(self.p.contested_list_btn.isEnabled())
+        self.item('Работа').setSelected(True)                                    # выделена папка - число для неё
+        self.assertTrue(wait(lambda: self.p.cont_n == sv.contested_count(SRC, 'Работа')['total'], 30))
+        w = self.loaded(self.p.show_list('unique'))
+        self.assertEqual({w.model.row(i)[2] for i in range(w.model.rowCount())}, {'схема.jpg'})
+        self.assertIn('без хеша', w.notes.text())
+        w.close()
+        self.assertTrue(w.closed)
+        w.got(w.req, ('ok', {}))                                                 # ответ после закрытия не показывается
+
+
+class CodeReview16UiTest(PageBase):
+    """Этап 16, замечания критиков по коду окна: число спорных не посчитано - без ложного числа; пустые «Почему» и
+    «Где копия» сортируются; строки Excel готовятся в фоне из снимка; выделены только файлы корня - кнопка неактивна."""
+
+    def test_contested_count_error_has_no_false_number(self):
+        self.open()
+        with mock.patch.object(sv, 'contested_count', side_effect=sv.Refused('проба')):
+            self.p.run_contested_count()
+            self.assertTrue(wait(lambda: self.p.cont_n == -1, 10))
+        self.assertNotRegex(self.p.contested_btn.text(), r'\(\d')
+        self.assertIn('не посчитано', self.p.contested_btn.text())
+        self.assertIn('проба', self.p.contested_btn.toolTip())
+        self.assertTrue(self.p.contested_btn.isEnabled())                       # окно ищет спорные само
+
+    def test_empty_why_sorted_and_export_from_snapshot(self):
+        import filelist_window as fw
+        from hb_core.consts import F_PHOTO
+        data = fw.prepare({'rows': [('HDD62', 'A\\b.jpg', 5, 1, 'S', F_PHOTO, None, None),
+                                    ('HDD62', 'c.jpg', None, None, None, F_PHOTO, 'z', '')]})
+        m = fw.FileModel('nohash')
+        m.set_rows('nohash', data['model_rows'])
+        m.sort(m.cols.index(fw.C_WHY))                                           # None -> '' - без ошибки
+        self.assertEqual([m.row(i)[2] for i in range(2)], ['b.jpg', 'c.jpg'])
+        snap = (m.rows, list(m.idx), list(m.cols))
+        m.sort(m.cols.index(fw.C_WHY), rp.Qt.DescendingOrder)                   # окно сортирует дальше
+        self.assertEqual([r[1] for r in fw.export_values(*snap)], ['b.jpg', 'c.jpg'])    # снимок не меняется
+        self.assertEqual(fw.export_values(*snap)[1][3], '')                     # размер неизвестен - пусто
+
+    def test_root_files_only_disable_rescan(self):
+        self.open()
+        import filelist_window as fw
+        w = fw.open_list(self.w, kind='nohash', disk=SRC, folder='')
+        self.assertTrue(wait(lambda: w.data is not None, 60))
+        w.view.clearSelection()
+        w.view.selectRow(next(i for i in range(w.model.rowCount()) if not w.model.row(i)[1]))   # корень.txt
+        w.count_selected()
+        self.assertFalse(w.rescan_btn.isEnabled())
+        w.view.selectRow(next(i for i in range(w.model.rowCount()) if w.model.row(i)[1]))
+        w.count_selected()
+        self.assertTrue(wait(lambda: w.rescan_btn.isEnabled() and w.sel_files is not None, 10))
+        w.close()
 
 
 if __name__ == '__main__':

@@ -22,7 +22,8 @@ def apply_partial(c, pj, seen, excl, report):
     if pj['time'] <= seen.full[disk]:
         report['old'].append(f'{label}: не применён - полная опись носителя новее')
         return False
-    folders = sorted({f.strip().strip(SEP) for f in pj['folders'] if f.strip().strip(SEP)}, key=lambda f: -len(f))
+    # папки скана - как их записал сканер: пробелы - часть имени (« Перемещение…», этап 16)
+    folders = sorted({f.strip(SEP) for f in pj['folders'] if f.strip(SEP).strip()}, key=lambda f: -len(f))
     if not folders:
         report['warn'].add(f'{label}: в result.json нет списка папок - скан не принят')
         return False

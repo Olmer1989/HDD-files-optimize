@@ -1,7 +1,7 @@
 """Применение модуля «строка ручных операций»."""
 # Перенесено из hashbase.py механически 15.11.2026 (разбивка на модули); логика не менялась.
 from hb_core.consts import EV_USER, SEP
-from hb_core.util import prefix_cond
+from hb_core.util import prefix_cond, row_fields
 from hb_core.sources import manual_rows, manual_time
 from hb_core.apply_common import put_row
 
@@ -9,7 +9,7 @@ from hb_core.apply_common import put_row
 def apply_manual_row(c, line_no, f, report, seen):
     """Одна ручная операция (то, что пользователь сделал в Проводнике). Копия «со слов» никогда не становится
     подтверждённой. Операция не действует на место, которое ПОЗЖЕ описал частичный скан: скан и есть итог."""
-    f = [x.strip() for x in f] + [''] * 7
+    f = row_fields(f, paths=(3, 5), pad=7)          # пути - как в таблице (этап 16)
     date, act, disk, path, disk2, path2 = f[:6]
     act = act.lower()
     when = manual_time(date)

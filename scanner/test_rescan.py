@@ -218,6 +218,13 @@ class RescanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             rescan.normalize_folders(str(self.root), ['Нет такой'])
         self.assertEqual(rescan.normalize_folders(str(self.root), ['КОТУЙ 2026\\ДЕНЬ 1']), ['Котуй 2026\\день 1'])
+        # 1.6.1 (этап 16): пробел в начале имени папки - часть имени, не обрезается; папки « П» и «П» - разные
+        (self.root / ' Перемещение').mkdir()
+        (self.root / 'Перемещение').mkdir()
+        self.assertEqual(rescan.normalize_folders(str(self.root), [' Перемещение\\']), [' Перемещение'])
+        self.assertEqual(rescan.normalize_folders(str(self.root), ['Перемещение']), ['Перемещение'])
+        with self.assertRaises(ValueError):
+            rescan.normalize_folders(str(self.root), ['   '])                                  # одни пробелы - не папка
         other = dict(self.record, volume_serial='FFFF0000')
         args = Namespace(disk='HDD03', letter='Z', folder=['Котуй 2026'], rehash_all=False, prior_root=None, yes=True)
         with self.assertRaises(RuntimeError), redirect_stdout(io.StringIO()):

@@ -656,7 +656,7 @@ def offline_rows(disk, act, folders, disk2='', dest=''):
         else:
             if not disk2:
                 raise sv.Refused('Выберите диск, куда скопировали или переместили.')
-            d = dest.strip().strip(SEP)
+            d = (dest or '').strip(SEP)                   # пробелы - часть имени (этап 16)
             res.append((act, disk, f, disk2, (d + SEP if d else '') + f.rsplit(SEP, 1)[-1]))
     return res
 
@@ -711,8 +711,8 @@ def fix(line_no, old_fields, fields, reason, fixer=None):
     if not (reason or '').strip():
         raise sv.Refused('Напишите, почему исправляете: это сохранится в комментарии строки.')
     now = dict(hb.manual_rows()).get(line_no)
-    if now is None or [x.strip() for x in now[:7]] != [x.strip() for x in old_fields[:7]]:
+    if now is None or hb.row_fields(now[:7], (3, 5)) != hb.row_fields(old_fields[:7], (3, 5)):
         raise sv.Refused('Эту строку за это время изменили. Обновите список и выберите её снова.')
-    if [x.strip() for x in fields[:7]] == [x.strip() for x in old_fields[:7]]:
+    if hb.row_fields(fields[:7], (3, 5)) == hb.row_fields(old_fields[:7], (3, 5)):
         raise sv.Refused('Вы ничего не изменили.')
     (fixer or sv.fix_manual)(line_no, list(fields), reason.strip())

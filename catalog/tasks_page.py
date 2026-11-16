@@ -124,7 +124,7 @@ _DRIVE_RE = re.compile(r'^[A-Za-z]:')
 def _file_key(k):
     """(диск-цель, путь источника) без буквы тома и без регистра: у повтора буква носителя могла смениться."""
     target, path = k
-    return target.strip().upper(), _DRIVE_RE.sub('', path.strip()).lower()
+    return target.strip().upper(), _DRIVE_RE.sub('', path).lower()      # путь - без обрезки пробелов (этап 16)
 
 
 def progress(task, kind, running=False, now=None):

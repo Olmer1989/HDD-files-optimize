@@ -113,8 +113,9 @@ def append_row(path, fields):
 # ---------- проверки ----------
 
 def check_rel(path, what='путь'):
-    p = (path or '').strip().strip(SEP)
-    if not p or ':' in p or '/' in p or (SEP + p + SEP).find(SEP + '..' + SEP) >= 0:
+    """Путь от корня диска: убираются только «\» по краям; пробелы - часть имени (этап 16: « Перемещение…»)."""
+    p = hb.clean_path(path)
+    if not p.strip() or ':' in p or '/' in p or (SEP + p + SEP).find(SEP + '..' + SEP) >= 0:
         raise Refused(f'Недопустимый {what} «{path}»: нужен путь от корня диска без буквы, например «Фото\\2014».')
     return p
 
@@ -159,7 +160,7 @@ def manual_preview(date, act, disk, path, disk2='', path2='', c=None):
         raise Refused(f'В базе нет файлов по пути {disk}\\{path}. Проверьте номер диска и путь (папку можно '
                       'выбрать и на отключённом диске - из каталога базы).')
     for ln, f in hb.manual_rows():
-        if [x.strip() for x in f[:6]] == [date, act, disk, path, disk2, path2]:
+        if hb.row_fields(f[:6], paths=(3, 5)) == [date, act, disk, path, disk2, path2]:
             raise Refused(f'Такая операция уже записана (строка {ln}). Повторно не записываю.')
     lines = [f'{date} {act}: {disk}\\{path}' + (f' -> {disk2}\\{path2}' if disk2 else ''),
              f'Затронет записей базы: {n}, {hb.gb(size)} ГБ. Например: ' + '; '.join(sample)]
@@ -256,7 +257,7 @@ def decision_preview(disk, path, verdict):
         if disk != '*' and not n:
             raise Refused(f'В базе нет файлов по пути {disk}\\{path}.')
     for f in hb.read_table(hb.DECISIONS)[1:]:
-        f = [x.strip() for x in f] + ['', '', '']
+        f = hb.row_fields(f, paths=(1,), pad=3)          # путь - как в таблице (этап 16)
         if f[:3] == [disk, path, verdict]:
             raise Refused('Такое решение уже записано.')
     return dict(fields=[disk, path, verdict],
@@ -352,8 +353,9 @@ def volumes():
 
 
 def disks():
-    """Таблица носителей: номер, метка, подключён ли (буква), файлов, ГБ, опись от, состояние, частичных сканов;
-    у подключённых - free_gib (свободно, ГиБ)."""
+    """Таблица носителей: номер, метка, подключён ли (буква), файлов, ГБ, опись от, состояние; partial - сколько раз
+    после полной описи пересканировали выбранные папки (разные времена частичных сканов в scan_folders; этап 16 - не
+    число папок), partial_folders - сколько папок; у подключённых - free_gib (свободно, ГиБ) и total_bytes (объём тома)."""
     jobs = bp.find_jobs()
     serial_of = {v: k for k, v in hb.serial_map(jobs).items()}
     try:
@@ -364,18 +366,21 @@ def disks():
     try:
         rows = []
         size = dict(c.execute("select disk, bytes from folders where folder=''"))
-        parts = collections.Counter(r[0] for r in c.execute('select disk from scan_folders'))
+        parts, pfolders = {}, {}
+        for d, n_t, n_f in c.execute('select disk, count(distinct time), count(*) from scan_folders group by disk'):
+            parts[d], pfolders[d] = n_t, n_f
         for d, label, total, status, scanned in c.execute('select disk, label, total, status, scanned from disks order by disk'):
             rows.append(dict(disk=d, label=label.split(' - ', 1)[-1] if label else '', letter=vols.get(serial_of.get(d, '?'), ''),
                              files=total, gib=(size.get(d) or 0) / hb.GIB, status=status,
                              scanned=time.strftime('%d.%m.%Y', time.localtime(scanned)) if scanned else '',
-                             partial=parts.get(d, 0)))
+                             partial=parts.get(d, 0), partial_folders=pfolders.get(d, 0)))
     finally:
         c.close()
     for r in rows:                         # свободное место подключённых: сведения о томе, диск не читается
         if r['letter']:
             try:
-                r['free_gib'] = shutil.disk_usage(r['letter'] + SEP).free / hb.GIB
+                u = shutil.disk_usage(r['letter'] + SEP)
+                r['free_gib'], r['total_bytes'] = u.free / hb.GIB, u.total
             except OSError:
                 pass
     return rows
@@ -566,27 +571,87 @@ def folder_missing(disk, folder, targets):
         c.close()
 
 
+def rescans_text(n, folders=0):
+    """«после полной описи 2 раза пересканированы выбранные папки (5 папок)» (этап 16, вместо «частичных: 2»)."""
+    if not n:
+        return ''
+    word = 'раза' if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else 'раз'
+    f = f' ({folders} {"папка" if folders % 10 == 1 and folders % 100 != 11 else "папки" if folders % 10 in (2, 3, 4) and folders % 100 not in (12, 13, 14) else "папок"})' if folders else ''
+    return f'после полной описи {n} {word} пересканированы выбранные папки{f}'
+
+
+TYPE5 = ('фото', 'видео', 'документы', 'архивы', 'другие')       # 5 типов окна «Список файлов» и «Без хеша»
+
+
+def type5(k):
+    """Тип файла (derived.copy_kind, 9 видов) -> один из 5 типов окна: прочие, проекты, музыка, программы и мусор -
+    «другие»."""
+    return {hb.F_PHOTO: 0, hb.F_VIDEO: 1, hb.F_TEXT: 2, hb.F_ARCH: 3}.get(k, 4)
+
+
+NOHASH_SQL = "(sha is null or sha = '') and size > 0"            # «без хеша» - одно определение (этап 16)
+
+
+def nohash_info(disk, c=None):
+    """«Без хеша» носителя (этап 16): ОДИН проход по его записям без хеша (sha пуст, size > 0; Z/U/X тоже - у них хеш не
+    измерен) - всего, фото и видео, по 5 типам, Z/U/X и число в каждой папке вместе с подпапками (для столбца «Без хеша»
+    дерева «Дисков и папок»; агрегат в базе не хранится - считается по требованию).
+    -> dict(total, media, by_type=[5], zux, folders={папка: файлов})."""
+    own = c is None
+    c = c or ro()
+    try:
+        ft = hb.fast_folder_type(fine=True)
+        direct = collections.Counter()
+        by, total, media, zux = [0] * 5, 0, 0, 0
+        for path, size, nm, ev in c.execute(f'select path, size, name_lc, ev from files where disk=? and {NOHASH_SQL}',
+                                            (disk,)):
+            k = ft(path, nm, size)
+            by[type5(k)] += 1
+            total += 1
+            media += k in (hb.F_PHOTO, hb.F_VIDEO)
+            zux += ev in (hb.EV_SIZE, hb.EV_USER, hb.EV_STALE)
+            direct[hb.parent_of(path)] += 1
+    finally:
+        if own:
+            c.close()
+    sub = collections.Counter()
+    for f, n in direct.items():
+        while True:
+            sub[f] += n
+            if not f:
+                break
+            f = hb.parent_of(f)
+    return dict(total=total, media=media, by_type=by, zux=zux, folders=dict(sub))
+
+
 def disk_hash_info(disk):
-    """Строка над деревом «Диски и папки»: у скольких файлов есть хеш и откуда даты (полная опись, пересканирования).
-    -> dict(text, tip). Один проход по записям носителя (в фоне)."""
+    """Строки над деревом «Диски и папки» (этап 16): text - откуда даты («опись от …» и «после полной описи N раз
+    пересканированы выбранные папки»); hash - «Хеш есть у всех фото и видео» или тревога; nohash - nohash_info (тот же
+    проход даёт столбец «Без хеша»). -> dict(text, tip, hash, alarm, nohash)."""
     c = ro()
     try:
-        total, with_sha = c.execute('select count(*), count(sha) from files where disk=?', (disk,)).fetchone()
+        total = c.execute('select count(*) from files where disk=?', (disk,)).fetchone()[0]
         scanned = (c.execute('select scanned from disks where disk=?', (disk,)).fetchone() or [None])[0]
-        parts = c.execute('select count(*) from scan_folders where disk=?', (disk,)).fetchone()[0]
+        parts, pf = c.execute('select count(distinct time), count(*) from scan_folders where disk=?', (disk,)).fetchone()
+        media_all = (c.execute("select coalesce(n0, 0) + coalesce(n1, 0) from folders where disk=? and folder=''",
+                               (disk,)).fetchone() or [0])[0]
+        info = nohash_info(disk, c)
     finally:
         c.close()
-    if not total:
-        return dict(text='файлов в описи нет', tip='')
-    if not with_sha:
-        return dict(text='хешей нет', tip='Ни у одного файла носителя хеш не посчитан.')
-    pct = 100 * with_sha / total
-    share = 'хеш у всех файлов' if with_sha == total else f'хеш у {pct:.0f} % файлов'.replace('.', ',')
     when = f'опись от {_day(scanned)}' if scanned else 'дата описи неизвестна'
     if parts:
-        when += f' + {parts} {"пересканирование" if parts == 1 else "пересканирования" if parts < 5 else "пересканирований"}'
-    return dict(text=f'{share} · {when}', tip='Точно, когда измерены хеши выбранной папки, — строка в панели ниже '
-                                               '(выделите одну папку).')
+        when += ' · ' + rescans_text(parts, pf)
+    if not total:
+        return dict(text='файлов в описи нет', tip='', hash='', alarm=False, nohash=info)
+    if info['media']:
+        hash_ = (f'⚠ Без хеша {info["media"]:,} фото и видео'.replace(',', ' ') +
+                 ' — копию нельзя проверить: пересканируйте их папки с типами «Фото» и «Видео»')
+    elif not media_all:
+        hash_ = 'Фото и видео на носителе нет'              # «есть у всех» при нуле фото и видео сбивало бы с толку
+    else:
+        hash_ = 'Хеш есть у всех фото и видео'
+    return dict(text=when, tip='Точно, когда измерены хеши выбранной папки, — строка в панели ниже (выделите одну '
+                               'папку).', hash=hash_, alarm=bool(info['media']), nohash=info)
 
 
 def folder_presence(disk, folder):
@@ -1237,7 +1302,7 @@ def marks_preview(disk, rows, c=None, snap=None):
     roots = hb.moved_roots(c, disk)
     fields, lines, skipped, seen = [], [], [], set()
     for path, text in rows:
-        path = (path or '').strip().strip(SEP)
+        path = hb.clean_path(path)                       # этап 16: пробелы по краям имени не обрезаются
         if path:
             real = _real_path(c, disk, check_rel(path), roots)
             orig = hb.mark_path(real, roots)              # этап 13: внутри «Скопировано на …» - нынешний путь
@@ -1468,11 +1533,255 @@ def razbor_tasks(disk, dry=True, only=None):
 
 def contested(disk, folder):
     """«Пересчитать хеши спорных файлов»: папки по дискам и подключён ли диск. -> [(диск, буква или '', [(папка, n)])]."""
-    c = db()
-    check_disk(c, disk)
-    got = hb.contested(c, disk, folder)
+    c = ro()                       # своё соединение только для чтения (этап 16: окно спрашивает и в фоне)
+    try:
+        check_disk(c, disk)
+        got = hb.contested(c, disk, folder)
+    finally:
+        c.close()
     free = free_space(list(got))
     return [(d, free.get(d, ('', 0))[0], got[d]) for d in sorted(got)]
+
+
+def contested_count(disk, folder=''):
+    """Сколько спорных файлов (contested_rows: файл один раз) у папки носителя или у всего носителя - число на кнопке
+    «Пересчитать хеши спорных файлов (N)» (этап 16). -> dict(total, carrier, copies)."""
+    c = ro()
+    try:
+        check_disk(c, disk)
+        rows = hb.contested_rows(c, disk, folder)
+    finally:
+        c.close()
+    own = sum(1 for r in rows if r[0] == disk)
+    return dict(total=len(rows), carrier=own, copies=len(rows) - own)
+
+
+# ---------- окно «Список файлов» (этап 16, 16.11.2026; filelist_window.py) ----------
+# Документ - «Логика_v3_разбор_носителя.md», раздел «Этап 16». Ничего не пишет. Строка списка:
+# (диск, путь, размер, дата, ev, тип 0..8, почему, где копия). Списки «к копированию», «уже есть», «не подходит по
+# типу» - тот же расчёт, что числа ячейки «Разбора» (planner с collect); «без хеша» - то же условие, что столбец «Без
+# хеша» (NOHASH_SQL); «спорные» - contested_rows; «уникальные» - presence.ndisks = 1.
+
+LIST_KINDS = ('copy', 'have', 'type', 'nohash', 'contested', 'unique')
+LIST_MAX = 1_500_000                  # строк в окне не больше (память); больше - откройте список для папки поменьше
+EV_TEXT = {hb.EV_SCAN: 'посчитан сканером', hb.EV_COPY: 'проверен при копировании', hb.EV_SIZE: 'сверен только размер',
+           hb.EV_USER: 'со слов владельца', hb.EV_STALE: 'файл изменился'}
+NO_HASH_TEXT = 'не считался'
+TYPE_WORD = {hb.F_PHOTO: 'фото', hb.F_VIDEO: 'видео', hb.F_TEXT: 'документ', hb.F_ARCH: 'архив', hb.F_OTHER: 'другие',
+             hb.F_PROJ: 'другие · проект', hb.F_MUSIC: 'другие · музыка', hb.F_NEVER: 'другие · программа',
+             hb.F_JUNK: 'другие · служебный'}
+WHY_HEAD = {'copy': 'Почему', 'type': 'Почему', 'nohash': 'Почему', 'contested': 'Почему спорный', 'unique': 'Почему'}
+
+
+def hash_text(ev):
+    """Столбец «Хеш» окна по степени подтверждения записи."""
+    return EV_TEXT.get(ev or '', NO_HASH_TEXT)
+
+
+def _too_many(n):
+    if n > LIST_MAX:
+        raise Refused(f'В списке {n:,} файлов - больше {LIST_MAX:,}: окно столько не покажет. Откройте список для '
+                      'папки поменьше.'.replace(',', ' '))
+
+
+def _meta(c, disk, paths_):
+    """Дата и степень подтверждения файлов носителя по путям: {путь: (mtime, ev)} (одна временная таблица)."""
+    c.execute('create temp table if not exists fl_p(path text primary key)')
+    c.execute('delete from fl_p')
+    c.executemany('insert or ignore into fl_p values (?)', ((x,) for x in paths_))
+    return {r[0]: r[1:] for r in c.execute('select f.path, f.mtime, f.ev from fl_p q cross join files f '
+                                           'on f.disk=? and f.path=q.path', (disk,))}
+
+
+def _copies(c, shas, disks_, skip):
+    """«Где копия»: все записи с тем же SHA-256 на дисках disks_ - подтверждённые (S/C) и с ожидаемым хешем (Z/U/X, с
+    пометкой «не проверена»). skip - (диск, путь) самих файлов списка. -> {sha: ['HDD45: путь', …]}."""
+    if not shas or not disks_:
+        return {}
+    c.execute('create temp table if not exists fl_s(sha text primary key)')
+    c.execute('delete from fl_s')
+    c.executemany('insert or ignore into fl_s values (?)', ((x,) for x in shas))
+    q = ','.join('?' * len(disks_))
+    res = collections.defaultdict(list)
+    for sha, d, p, ev in c.execute(f'select s.sha, f.disk, f.path, f.ev from fl_s s cross join files f on f.sha=s.sha '
+                                   f"where f.disk in ({q}) and f.ev in ('S', 'C') order by f.disk, f.path", list(disks_)):
+        if (d, p) not in skip:
+            res[sha].append(f'{d}: {p}')
+    for sha, d, p, ev in c.execute(f'select s.sha, f.disk, f.path, f.ev from fl_s s cross join files f '
+                                   f"on f.sha_exp=s.sha where f.disk in ({q}) and coalesce(f.ev, '') not in ('S', 'C') "
+                                   'order by f.disk, f.path', list(disks_)):
+        res[sha].append(f'{d}: {p} (не проверена: {hash_text(ev)})')
+    return res
+
+
+def _takes(d):
+    """«фото, видео» - что берёт направление (его «что копировать»), словами окна."""
+    words = [x for x in hb.COPY_CATS if x in d.cats]
+    if d.docs_near and hb.CAT_DOC in words:
+        words[words.index(hb.CAT_DOC)] = 'документы (только рядом с фото и видео)'
+    return ', '.join(words) if len(words) < len(hb.COPY_CATS) else 'все файлы'
+
+
+def _type_why(d, k):
+    """«Почему» в списке «не подходит по типу»: правило направления словами."""
+    cat = hb.CAT_OF_TYPE.get(k)
+    if cat is None:
+        return 'программы, системные и служебные файлы не копируются никогда'
+    if cat == hb.CAT_DOC and d.docs_near and hb.CAT_DOC in d.cats:
+        return 'документ не рядом с фото и видео: направление берёт документы только рядом с ними'
+    return f'направление берёт только {_takes(d)}; это — {TYPE_WORD.get(k, "другие")}'
+
+
+def _plan_list(kind, disk, num, target, drafts):
+    """Списки «Разбора» (к копированию на target / уже есть / не подходит по типу) по направлению num - planner с collect
+    (тот же расчёт, что ячейка): каждый файл один раз (исход файла единственный)."""
+    outs = {'copy': hb.O_COPY, 'have': hb.O_HAVE, 'type': hb.O_TYPE}[kind]
+    snap = snapshot()
+    c = ro()                       # окно: своё соединение только для чтения, одно состояние базы (транзакция чтения)
+    try:
+        check_disk(c, disk)
+    except Refused:
+        c.close()
+        raise
+    c.execute('begin')
+    try:
+        dirs = hb.parse_directions(snap['directions'])
+        d = dirs.get(num)
+        if d is None:
+            raise Refused(f'Нет направления {num}.')
+        ms = hb.MarkSet.build(hb.mark_rows(disk, snap['decisions']), dirs, drafts)
+        P = hb.planner(c, disk, dirs, ms, collect=(num, {outs}))
+        if kind == 'copy':
+            target = target or next((x for x in d.disks if x != disk), None)
+            if not target or target not in d.disks or target == disk:      # не «на None» и не чужой диск
+                raise Refused(f'Нет диска «{target}» среди дисков направления «{d.num} {d.name}» '
+                              f'({", ".join(d.disks) or "диска нет"}) - список «к копированию» не построить.')
+            items = [it for it in P.items if target in it[5]]
+        else:
+            items = list(P.items)
+        _too_many(len(items))
+        meta = _meta(c, disk, [it[0] for it in items])
+        rows, notes, counts = [], [], collections.Counter()
+        where = {}
+        if kind == 'have':
+            where = _copies(c, {it[2] for it in items if it[2]}, sorted(set(d.disks) | set(hb.MAIN)),
+                            {(disk, it[0]) for it in items})
+        for it in items:
+            path, size, sha, k = it[0], it[1], it[2], it[3]
+            mt, ev = meta.get(path, (None, None))
+            why, wh = '', ''
+            if kind == 'copy':
+                st = it[6].get(target, ('nohash', ''))
+                counts[st[0]] += 1
+                if st[0] == 'rep':
+                    why = f'нет на {target} (по SHA-256)'
+                elif st[0] == 'nohash':
+                    why = 'без хеша — сравнить нельзя, копируется'
+                elif st[0] == 'dup':
+                    why = f'повтор: то же содержимое, что «{st[1]}» — пишется один раз'
+                else:
+                    why = f'не будет скопирован: {st[1]}' + (f'; то же содержимое пишется из «{st[2]}»' if st[2] else '')
+            elif kind == 'have':
+                wh = '; '.join(where.get(sha, ()))
+            else:
+                why = _type_why(d, k)
+            rows.append((disk, path, size, mt, ev, k, why, wh))
+        if kind == 'copy':
+            write = counts['rep'] + counts['nohash']
+            pb = P.part_b.get(target, [0, 0])[0]
+            notes.append(f'В задание войдёт {write} файлов — как в ячейке «Разбора»; повторы того же содержимого '
+                         f'(пишутся один раз): {counts["dup"]}; не будут скопированы (заблокированы): {counts["blocked"]}.')
+            if write != pb:
+                notes.append(f'ВНИМАНИЕ: список не сходится с частью Б ({pb} файлов) - сообщите о расхождении.')
+        if P.errors:
+            notes.append('ИТОГ НЕВЕРЕН: ' + '; '.join(P.errors))
+        why_text = {'copy': f'отмечены для «{d.num} {d.name}», а на {target} их нет по SHA-256 (или у файла нет хеша — '
+                            'сравнить нельзя)',
+                    'have': f'отмечены для «{d.num} {d.name}», и такой же файл (тот же SHA-256) уже есть на '
+                            f'{" и ".join(d.disks)}',
+                    'type': f'отмечены для «{d.num} {d.name}», но их тип не входит в «что копировать» направления '
+                            f'({_takes(d)})'}[kind]
+        gen = (c.execute("select value from meta where key='built'").fetchone() or [''])[0]
+    finally:
+        c.rollback()
+        c.close()
+    return dict(kind=kind, disk=disk, folder='', num=num, direction=f'{d.num} {d.name}', target=target,
+                targets=list(d.disks), scope='весь носитель — отмеченные папки', why=why_text, notes=notes, rows=rows,
+                built=gen)
+
+
+def file_list(kind, disk, folder='', num=None, target=None, drafts=()):
+    """Данные окна «Список файлов» (этап 16). kind - LIST_KINDS; folder - папка носителя (и вложенные; '' - весь
+    носитель); num, target, drafts - для списков «Разбора». Ничего не пишет.
+    -> dict(kind, disk, folder, scope, why, notes, rows, built, …)."""
+    if kind not in LIST_KINDS:
+        raise Refused(f'Неизвестный список «{kind}».')
+    if kind in ('copy', 'have', 'type'):
+        return _plan_list(kind, disk, num, target, list(drafts))
+    folder = hb.clean_path(folder)
+    c = ro()
+    try:
+        check_disk(c, disk)
+        cond, args = hb.prefix_cond('path', folder)
+        ft = hb.fast_folder_type(fine=True)
+        rows, notes = [], []
+        if kind == 'nohash':
+            n = c.execute(f'select count(*) from files where disk=? and {NOHASH_SQL} and {cond}',
+                          [disk] + args).fetchone()[0]
+            _too_many(n)
+            media = 0
+            for path, size, mt, ev, nm in c.execute(f'select path, size, mtime, ev, name_lc from files where disk=? and '
+                                                    f'{NOHASH_SQL} and {cond}', [disk] + args):
+                k = ft(path, nm, size)
+                if k in (hb.F_PHOTO, hb.F_VIDEO):
+                    media += 1
+                    why = '⚠ фото/видео без хеша — пересканируйте с типами «Фото» и «Видео»'
+                elif ev in (hb.EV_SIZE, hb.EV_USER, hb.EV_STALE):
+                    why = f'хеш не измерен: {hash_text(ev)}'
+                else:
+                    why = 'хеш не считался: тип не выбирался при сканировании'
+                rows.append((disk, path, size, mt, ev, k, why, ''))
+            if media:
+                notes.append(f'Из них фото и видео: {media} — у них хеш должен быть: пересканируйте их папки.')
+            why_text = 'у файла нет SHA-256 (размер больше нуля): копию нельзя проверить по содержимому'
+        elif kind == 'contested':
+            got = hb.contested_rows(c, disk, folder)
+            _too_many(len(got))
+            for d, path, size, mt, ev, why in got:
+                rows.append((d, path, size, mt, ev, ft(path, hb.name_key(path), size or 0), why, ''))
+            why_text = ('копию нельзя проверить по SHA-256: без хеша на этом носителе, тёзки без хеша и непроверенные '
+                        'копии (Z/U/X) на 45 и 77')
+        else:                                                   # unique
+            fcond, fargs = hb.prefix_cond('f.path', folder)
+            n = c.execute(f'select count(*) from files f join presence p on p.sha=f.sha where f.disk=? and '
+                          f'f.sha is not null and p.ndisks=1 and {fcond}', [disk] + fargs).fetchone()[0]
+            _too_many(n)                                         # предел - до того, как строки собраны в память
+            q = (f'select f.path, f.size, f.mtime, f.ev, f.name_lc from files f join presence p on p.sha=f.sha '
+                 f'where f.disk=? and f.sha is not null and p.ndisks=1 and {fcond}')
+            for path, size, mt, ev, nm in c.execute(q, [disk] + fargs):
+                rows.append((disk, path, size, mt, ev, ft(path, nm, size or 0),
+                             'тот же SHA-256 подтверждён только на этом носителе', ''))
+            n = c.execute(f'select count(*) from files where disk=? and {NOHASH_SQL} and {cond}',
+                          [disk] + args).fetchone()[0]
+            if n:
+                notes.append(f'Ещё {n} файлов без хеша — есть ли они где-то ещё, по базе неизвестно (в список не вошли).')
+            why_text = 'файл с хешем, подтверждённая копия (S/C) с тем же SHA-256 есть только на этом носителе'
+        gen = (c.execute("select value from meta where key='built'").fetchone() or [''])[0]
+    finally:
+        c.close()
+    return dict(kind=kind, disk=disk, folder=folder, scope=(folder or 'весь носитель'), why=why_text, notes=notes,
+                rows=rows, built=gen)
+
+
+def folders_files(disk, folders):
+    """Сколько файлов в папках носителя (по таблице folders, вместе с подпапками) - для вопроса перед
+    пересканированием из окна «Список файлов». -> {папка: файлов}."""
+    c = ro()
+    try:
+        return {f: (c.execute('select files from folders where disk=? and folder=?', (disk, f)).fetchone() or [0])[0]
+                for f in folders}
+    finally:
+        c.close()
 
 
 # ---------- экран «Разбор носителя» (логика v3, этап 2, 15.11.2026; razbor_page.py) ----------
@@ -1584,7 +1893,7 @@ def direction_usage(num, dirs=None, root=None):
     data = hb.table_bytes(hb.DECISIONS)
     last = {}
     for i, f in enumerate(hb.tsv_rows(data[:data.rfind(b'\n') + 1]), start=1):
-        f = [x.strip() for x in f] + [''] * 3
+        f = hb.row_fields(f, paths=(1,), pad=3)          # путь - как в таблице (этап 16)
         if i == 1 and f[0].lower() == 'диск':
             continue
         if f[1].lower().startswith('класс:') or not f[2]:
@@ -1718,9 +2027,10 @@ TEMPLATE_VER_RE = re.compile(r'версия (\d+)\.(\d+)')
 
 
 def copy_template_version(task):
-    """Версия шаблона копирования в папке задания: (2, 5) / (2, 4) / (2, 3) / None. Для очереди: -Confirmed понимают
-    только задания 2.4 и новее (2.5 - как 2.4: те же параметры, отпечаток и коды выхода; сравнивать кортежем
-    `>= (2, 4)`); старые в автоматическую очередь не включаются (Дискуссия этапа 4, р2-7)."""
+    """Версия шаблона копирования в папке задания: (2, 6) / (2, 5) / (2, 4) / (2, 3) / None. Для очереди: -Confirmed
+    понимают только задания 2.4 и новее (2.5 и 2.6 - как 2.4: те же параметры, отпечаток и коды выхода; сравнивать
+    кортежем `>= (2, 4)`); старые в автоматическую очередь не включаются (Дискуссия этапа 4, р2-7). Задание хранит свою
+    копию шаблона: задания, подготовленные с 2.5, так и работают с 2.5."""
     try:
         with open(Path(task) / 'Копировать.ps1', encoding='utf-8-sig') as f:
             m = TEMPLATE_VER_RE.search(f.readline())
@@ -1794,7 +2104,7 @@ def copy_left(name):
     sub = ''
     vols = [f for f in hb.read_tsv(t / 'тома.tsv') if len(f) >= 2]
     if vols and len(vols[0]) >= 3:
-        sub = vols[0][2].strip().strip(SEP)
+        sub = vols[0][2].strip(SEP)                      # подпапка источника: пробелы - часть имени (этап 16)
     res = []
     for f in hb.read_tsv(t / 'список.tsv'):
         if len(f) < 3 or not f[0].strip():

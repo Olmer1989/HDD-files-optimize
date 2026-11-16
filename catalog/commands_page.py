@@ -493,8 +493,12 @@ class Field:
         if k == 'int':
             v = self.widget.value()
             return '' if (v == 0 and self.act.default is None) else str(v)
-        if k in ('folders', 'lines'):
+        if k == 'folders':                               # пути папок: пробелы по краям - часть имени (этап 16)
+            return [x for x in self.edit.toPlainText().splitlines() if x.strip()]
+        if k == 'lines':
             return [x.strip() for x in self.edit.toPlainText().splitlines() if x.strip()]
+        if k == 'folder':
+            return self.line.text() if self.line.text().strip() else ''
         return self.line.text().strip()
 
     def empty(self):

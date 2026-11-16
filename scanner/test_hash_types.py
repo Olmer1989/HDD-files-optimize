@@ -158,7 +158,7 @@ class RuleAndKeysTests(unittest.TestCase):
         self.assertIn('empty list', run('--folder', 'A', '--hash-ext', ' , '))
         self.assertIn('only with --hash-ext', run('--folder', 'A', '--hash-skip-names', 'thumbs.db'))
         self.assertIn('--hash-skip-path-re', run('--folder', 'A', '--hash-ext', '.jpg', '--hash-skip-path-re', '('))
-        self.assertEqual(portable.APP_VERSION, '1.6.0')
+        self.assertEqual(portable.APP_VERSION, '1.6.1')
         ns = Namespace(hash_ext='JPG, .Mp4', hash_skip_ext=None, hash_skip_names='~$*', hash_skip_path_re='')
         self.assertEqual(portable.hash_types_of(ns), {'mode': 'only', 'ext': ['.jpg', '.mp4'], 'junk_names': ['~$*'],
                                                        'junk_path_re': ''})

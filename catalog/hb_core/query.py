@@ -8,7 +8,7 @@ from pathlib import Path
 from hb_core import paths
 from hb_core.paths import journal_paths
 from hb_core.consts import CLASS_ORDER, C_EMPTY, C_JUNK, MAIN, NOHASH_NOTE, SEP, SIGNIFICANT, copy_ok
-from hb_core.util import class_of, gb, is_v3_mark, original_path, out, prefix_cond, rel_of
+from hb_core.util import class_of, clean_path, gb, is_v3_mark, original_path, out, prefix_cond, rel_of, row_fields
 from hb_core.report import save, table
 from hb_core.sources import log_time, read_table, read_tsv, serial_map
 
@@ -39,9 +39,9 @@ def decisions_for(disk):
     """Решения по путям для диска (строки с диском «*» действуют на все диски)."""
     res = Decisions()
     for f in read_table(paths.DECISIONS)[1:]:
-        f = [x.strip() for x in f] + [''] * 4
+        f = row_fields(f, paths=(1,), pad=4)             # путь - как в таблице (этап 16)
         if f[0] in (disk, '*') and f[2] and not f[1].lower().startswith('класс:') and not is_v3_mark(f[2]):
-            res.append((f[1].rstrip(SEP), f[2]))        # отметки разбора v3 старые команды не видят (логика v3, 1.3)
+            res.append((clean_path(f[1]), f[2]))        # отметки разбора v3 старые команды не видят (логика v3, 1.3)
     res.roots = copied_roots(disk)
     return res
 

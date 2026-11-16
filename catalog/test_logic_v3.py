@@ -7,6 +7,7 @@ import collections
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -692,6 +693,248 @@ class CategoriesTest(V3Base):
         self.assertTrue(res['specs'])
         self.assertTrue(all(x['targets'] == ['HDD77'] and x['name'].endswith('— на 77') for x in res['specs']))
         self.assertNotIn('HDD45', res['plan'].part_b)
+
+
+SP_DISK = 'HDD62'
+SP_FILES = [                                                 # (путь, размер, sha или None); папки « X», «X », «X»
+    (' X\\a.jpg', 100, H[30]),
+    (' X\\ заметка.doc', 11, None),                          # пробел и в начале имени файла
+    (' X\\Под\\b.jpg', 110, H[31]),
+    ('X \\c.jpg', 120, H[32]),
+    ('X \\d.jpg ', 125, None),                               # хвостовой пробел в имени файла
+    ('X\\e.jpg', 130, H[33]),
+    ('X\\f.doc', 12, None),
+    ('X\\g.zip', 13, None),
+]
+
+
+class SpacesTest(V3Base):
+    """Этап 16, ОШИБКА владельца: «В базе нет файлов по пути HDD51\\Перемещение перед Индонезией - временное» - имя
+    папки на диске начинается с пробела, программа обрезала путь. Папки « X» (пробел в начале), «X » (в конце) и «X»
+    лежат рядом: отметка, чтение отметок, маршрут, задания, исключение, ручная операция, частичный скан и списки окна
+    действуют ровно на свою папку."""
+
+    def setUp(self):
+        super().setUp()
+        make_disk(self.scans, SP_DISK, 'AAAA0062', [(p, s, h) for p, s, h in SP_FILES if h],
+                  unhashed=[(p, s) for p, s, h in SP_FILES if not h])
+        self.quiet(hb.connect)
+
+    def files(self, disk=SP_DISK):
+        c = self.db()
+        return {r[0] for r in c.execute('select path from files where disk=?', (disk,))}
+
+    def test_helpers(self):
+        self.assertEqual(hb.clean_path(' X\\'), ' X')
+        self.assertEqual(hb.clean_path('\\X \\'), 'X ')
+        self.assertEqual(sv.check_rel(' Перемещение перед Индонезией - временное\\'),
+                         ' Перемещение перед Индонезией - временное')
+        with self.assertRaises(sv.Refused):
+            sv.check_rel('   ')
+        self.assertEqual(hb.row_fields([' HDD51 ', ' X ', ' не копировать '], paths=(1,), pad=1),
+                         ['HDD51', ' X ', 'не копировать', ''])
+
+    def test_marks_route_and_tasks_keep_spaces(self):
+        pv = sv.marks_preview(SP_DISK, [(' X', 'Н1')])                          # было: «В базе нет файлов по пути…»
+        self.assertEqual(pv['fields'], [[SP_DISK, ' X', sv.directions()['Н1'].verdict()]])
+        self.assertIn(f'{SP_DISK}\\ X → ', pv['lines'][1])
+        self.assertIn('3 файлов', pv['lines'][1])
+        sv.add_marks_batch(SP_DISK, [(' X', 'Н1'), ('X ', 'Н2'), ('X', 'не копировать')])
+        rows = hb.mark_rows(SP_DISK, sv.snapshot()['decisions'])
+        self.assertEqual([r[1] for r in rows], [' X', 'X ', 'X'])              # в таблице и при чтении - как есть
+        ms = hb.MarkSet.build(rows, sv.directions())
+        self.assertEqual((ms.get(' X').num, ms.get('X ').num, ms.get('X').kind), ('Н1', 'Н2', hb.R_SKIP))
+        with self.assertRaises(sv.Refused):                                      # уже так - не пишется второй раз
+            sv.add_marks_batch(SP_DISK, [(' X', 'Н1')])
+        P = self.plan(SP_DISK)
+        self.assertEqual(self.a(P, rz.O_SKIP), (3, 130 + 12 + 13))
+        self.assertEqual(P.part_a[(rz.O_COPY, 'Н2')][0], 2)                     # «X »: c.jpg и «d.jpg »
+        P = self.plan(SP_DISK, detail=True)
+        got = {p for rows_ in P.rows.values() for _d, p, *_ in rows_}
+        self.assertTrue({' X\\a.jpg', ' X\\ заметка.doc', ' X\\Под\\b.jpg', 'X \\c.jpg', 'X \\d.jpg '} <= got, got)
+        self.assertFalse({p for p in got if p.startswith('X\\')})
+        res = sv.razbor_tasks(SP_DISK, dry=False)
+        lst = []
+        for s in res['specs']:
+            t = hb.TASKS / s['name']
+            lst += [x.split('\t')[1] for x in (t / 'список.tsv').read_text(encoding='utf-8').splitlines()]
+        self.assertIn(' X\\ заметка.doc', lst)
+        self.assertIn('X \\d.jpg ', lst)
+        self.assertNotIn('X\\e.jpg', lst)
+        # старые решения тоже не теряют пробел
+        sv.add_decision(SP_DISK, ' X', 'пока не трогаем')
+        self.assertIn((' X', 'пока не трогаем'), list(hb.decisions_for(SP_DISK)))
+
+    def test_exclusion_manual_and_partial_hit_only_own_folder(self):
+        sv.add_exclusion(SP_DISK, ' X')
+        self.assertEqual({p for p in self.files() if p.startswith((' X', 'X'))},
+                         {'X \\c.jpg', 'X \\d.jpg ', 'X\\e.jpg', 'X\\f.doc', 'X\\g.zip'})   # ушла только « X»
+        sv.add_manual(time.strftime('%d.%m.%Y'), 'удалено', SP_DISK, 'X ')
+        self.assertEqual({p for p in self.files() if p.startswith(('X', ' X'))}, {'X\\e.jpg', 'X\\f.doc', 'X\\g.zip'})
+        self.assertEqual(hb.manual_rows()[-1][1][3], 'X ')                     # в таблице - как есть
+        with self.assertRaises(sv.Refused):
+            sv.add_manual(time.strftime('%d.%m.%Y'), 'удалено', SP_DISK, 'X ')               # повтор (сравнение без обрезки)
+        from test_hashbase import make_partial
+        make_partial(self.scans, SP_DISK, 'AAAA0062', ['X\\'], [('X\\e.jpg', 130, H[33]), ('X\\new.jpg', 7, H[34])])
+        self.quiet(hb.connect)
+        self.assertEqual({p for p in self.files() if p.startswith(('X', ' X'))}, {'X\\e.jpg', 'X\\new.jpg'})
+
+    def test_partial_scan_of_leading_space_folder(self):
+        from test_hashbase import make_partial
+        make_partial(self.scans, SP_DISK, 'AAAA0062', [' X'], [(' X\\a.jpg', 100, H[30])])
+        self.quiet(hb.connect)
+        fs = self.files()
+        self.assertNotIn(' X\\Под\\b.jpg', fs)                                  # скан « X» заменил только её
+        self.assertTrue({'X \\c.jpg', 'X\\e.jpg', 'X\\f.doc'} <= fs)
+
+    def test_lists_and_contested_keep_spaces(self):
+        res = sv.file_list('nohash', SP_DISK, ' X')
+        self.assertEqual([r[1] for r in res['rows']], [' X\\ заметка.doc'])
+        self.assertEqual(res['scope'], ' X')
+        res = sv.file_list('nohash', SP_DISK, 'X')
+        self.assertEqual(sorted(r[1] for r in res['rows']), ['X\\f.doc', 'X\\g.zip'])
+        rows = hb.contested_rows(self.db(), SP_DISK, 'X ')
+        self.assertEqual([(r[0], r[1]) for r in rows], [(SP_DISK, 'X \\d.jpg ')])
+
+
+class FileListTest(V3Base):
+    """Этап 16: данные окна «Список файлов» - тот же расчёт, что числа «Разбора» (каждый файл один раз), «без хеша»,
+    спорные поштучно, уникальные."""
+
+    def test_copy_have_type_lists_match_plan(self):
+        self.mark(('', 'Семейный архив'), ('Работа', 'Н2'), ('Друзья', 'не копировать'))
+        P = self.plan()
+        for num, kind, out in (('Н1', 'have', rz.O_HAVE), ('Н1', 'type', rz.O_TYPE), ('Н2', 'have', rz.O_HAVE),
+                               ('Н2', 'type', rz.O_TYPE)):
+            res = sv.file_list(kind, SRC, num=num)
+            self.assertEqual((len(res['rows']), sum(r[2] for r in res['rows'])), self.a(P, out, num), (num, kind))
+            self.assertEqual(len({r[1] for r in res['rows']}), len(res['rows']))     # файл - один раз
+        for x in ('HDD45', 'HDD77'):
+            res = sv.file_list('copy', SRC, num='Н1', target=x)
+            st = {r[1]: r[6] for r in res['rows']}
+            write = [p for p, w in st.items() if w.startswith(('нет на', 'без хеша'))]
+            self.assertEqual(len(write), P.part_b[x][0], (x, st))              # войдёт в задание = часть Б (ячейка)
+            self.assertIn(f'В задание войдёт {P.part_b[x][0]} файлов', res['notes'][0])
+            self.assertNotIn('ВНИМАНИЕ', ' '.join(res['notes']))
+        st = {r[1]: r[6] for r in sv.file_list('copy', SRC, num='Н1', target='HDD77')['rows']}
+        self.assertEqual(st['Поход 2010\\Монтаж\\clip копия.mp4'], 'нет на HDD77 (по SHA-256)')     # представитель
+        self.assertTrue(st['Поход 2010\\Монтаж\\clip.mp4'].startswith('повтор: то же содержимое, что «Поход 2010'
+                                                                       '\\Монтаж\\clip копия.mp4»'))
+        self.assertEqual(st['Поход 2010\\описание.doc'], 'без хеша — сравнить нельзя, копируется')
+        self.assertNotIn('Поход 2010\\Фото\\1.jpg', st)                          # уже есть на 45 и 77
+        have = {r[1]: r[7] for r in sv.file_list('have', SRC, num='Н1')['rows']}
+        self.assertEqual(have['Поход 2010\\Фото\\1.jpg'], 'HDD45: X\\1.jpg; HDD77: Y\\1.jpg')      # все копии
+        typ = {r[1]: r[6] for r in sv.file_list('type', SRC, num='Н1')['rows']}
+        self.assertEqual(typ['Поход 2010\\Монтаж\\проект.prproj'],
+                         'направление берёт только фото, видео, документы (только рядом с фото и видео); это — '
+                         'другие · проект')
+        self.assertEqual(typ['Документы\\письмо.doc'], 'документ не рядом с фото и видео: направление берёт '
+                                                       'документы только рядом с ними')
+
+    def test_drafts_overlap_and_errors(self):
+        n2 = sv.directions()['Н2'].verdict()
+        res = sv.file_list('copy', SRC, num='Н2', drafts=[('Работа', n2), ('Работа\\x', n2)])
+        self.assertEqual(sorted(r[1] for r in res['rows']), ['Работа\\отчёт.doc', 'Работа\\схема.jpg'])  # черновик
+        res = sv.file_list('copy', SRC, num='Н2', drafts=[('', n2), ('Работа', n2)])       # отметки пересекаются
+        paths = [r[1] for r in res['rows']]
+        self.assertEqual(len(paths), len(set(paths)))
+        with self.assertRaises(sv.Refused):
+            sv.file_list('nothing', SRC)
+        with self.assertRaises(sv.Refused):
+            sv.file_list('copy', SRC, num='Н9')
+
+    def test_nohash_contested_unique(self):
+        res = sv.file_list('nohash', SRC, 'Поход 2010')
+        got = {r[1]: (r[5], r[6]) for r in res['rows']}
+        self.assertEqual(set(got), {'Поход 2010\\Фото\\Thumbs.db', 'Поход 2010\\описание.doc',
+                                    'Поход 2010\\Монтаж\\проект.prproj'})
+        info = sv.nohash_info(SRC)
+        self.assertEqual(info['folders']['Поход 2010'], 3)                      # столбец «Без хеша» - то же условие
+        self.assertEqual(info['folders'][''], info['total'])
+        self.assertEqual(info['total'], sum(1 for _p, s, h in FILES if not h and s))
+        self.assertEqual(info['media'], 0)
+        rows = hb.contested_rows(self.db(), SRC, 'Поход 2010')
+        self.assertEqual(len(rows), len({(r[0], r[1]) for r in rows}))          # файл - один раз
+        self.assertEqual(sv.contested_count(SRC, 'Поход 2010')['total'], len(rows))
+        self.assertEqual({d: dict(f) for d, _l, f in sv.contested(SRC, 'Поход 2010')}, {SRC: {'Поход 2010': 3}})
+        res = sv.file_list('contested', SRC, 'Поход 2010')
+        self.assertTrue(all(r[6] == 'без хеша на этом носителе' for r in res['rows']))
+        uniq = {r[1] for r in sv.file_list('unique', SRC)['rows']}
+        self.assertNotIn('Поход 2010\\Фото\\1.jpg', uniq)                       # есть и на 45, и на 77
+        self.assertIn('Работа\\схема.jpg', uniq)
+        self.assertIn('без хеша', sv.file_list('unique', SRC)['notes'][0])
+
+    def test_contested_counts_a_file_once(self):
+        """Тёзка без хеша и запись Z/U/X на 45 - одна строка с двумя причинами."""
+        import sqlite3
+        c = sqlite3.connect(hb.DB)
+        c.execute("insert into files(disk, path, size, sha, origin, name_lc, mtime, ev, sha_exp) values "
+                  "('HDD45', 'Z\\2.jpg', 200, null, 'тест', '2.jpg', 0, 'U', ?)", (S[2],))
+        c.commit()
+        c.close()
+        rows = [r for r in hb.contested_rows(self.db(), 'HDD90', 'A') if r[0] == 'HDD45']
+        self.assertEqual([r[1] for r in rows], ['Z\\2.jpg'])
+        self.assertIn('копия не проверена (со слов владельца)', rows[0][5])
+
+
+class CodeReview16Test(V3Base):
+    """Этап 16, замечания критиков по коду: цель списка, степени в «Где копия» и спорных, одна нормализация пути,
+    предел до сбора строк, «Фото и видео на носителе нет», расхождение итога видно в списке."""
+
+    def raw(self, sql, args=()):
+        import sqlite3
+        c = sqlite3.connect(hb.DB)
+        c.execute(sql, args)
+        c.commit()
+        c.close()
+
+    def test_copy_target_must_be_disk_of_direction(self):
+        self.mark(('Работа', 'Н2'))
+        with self.assertRaises(sv.Refused):
+            sv.file_list('copy', SRC, num='Н2', target='HDD999')
+        with self.assertRaises(sv.Refused):
+            sv.file_list('copy', SRC, num='Н2', target=SRC)
+        with self.assertRaises(sv.Refused):
+            sv.file_list('copy', SRC, num='Н3')                                    # у направления нет диска
+        self.assertEqual(sv.file_list('copy', SRC, num='Н2')['target'], 'HDD91')
+
+    def test_confirmed_record_never_contested_or_unchecked(self):
+        # искусственная запись: S с заполненным sha_exp (в настоящей базе так не бывает - проверено чтением)
+        self.raw("insert into files(disk, path, size, sha, origin, name_lc, mtime, ev, sha_exp) values "
+                 "('HDD45', 'W\\2.jpg', 200, ?, 'тест', '2.jpg', 0, 'S', ?)", (S[2], S[2]))
+        rows = hb.contested_rows(self.db(), 'HDD90', 'A')
+        self.assertNotIn(('HDD45', 'W\\2.jpg'), {(r[0], r[1]) for r in rows})
+        c = self.db()
+        got = sv._copies(c, {S[2]}, ['HDD45'], set())
+        self.assertIn('HDD45: W\\2.jpg', got[S[2]])                                 # подтверждённая - без пометки
+        self.assertFalse(any('W\\2.jpg (не проверена' in x for x in got[S[2]]))
+
+    def test_one_path_normalization(self):
+        p = hb.DECISIONS
+        with open(p, 'a', encoding='utf-8') as f:
+            f.write(f'{SRC}\t\\ Поход 2010 \\\tпока не трогаем\t\n')
+            f.write(f'{SRC}\t\\ Поход 2010 \\\t{sv.directions()["Н2"].verdict()}\t\n')
+        self.assertIn((' Поход 2010 ', 'пока не трогаем'), list(hb.decisions_for(SRC)))
+        self.assertIn(' Поход 2010 ', [r[1] for r in hb.mark_rows(SRC, sv.snapshot()['decisions'])])
+        self.assertEqual(sv.check_rel('\\ Поход 2010 \\'), ' Поход 2010 ')
+
+    def test_unique_limit_before_rows_and_no_media_text(self):
+        from unittest import mock
+        stop = mock.Mock(side_effect=AssertionError('строки не собирать'))
+        with mock.patch.object(sv, 'LIST_MAX', 1), mock.patch.object(sv.hb, 'fast_folder_type', return_value=stop):
+            with self.assertRaises(sv.Refused):
+                sv.file_list('unique', SRC)
+        make_disk(self.scans, 'HDD63', 'AAAA0063', [], unhashed=[('Д\\письмо.doc', 10)])
+        self.quiet(hb.connect)
+        info = sv.disk_hash_info('HDD63')
+        self.assertEqual(info['hash'], 'Фото и видео на носителе нет')
+        self.assertEqual(sv.disk_hash_info('HDD90')['hash'], 'Хеш есть у всех фото и видео')
+
+    def test_wrong_totals_are_reported_in_list(self):
+        self.mark(('Работа', 'Н2'))
+        self.raw("update folders set n2 = n2 + 1, files = files + 1 where disk=? and folder='Работа'", (SRC,))
+        res = sv.file_list('copy', SRC, num='Н2')
+        self.assertTrue(any(x.startswith('ИТОГ НЕВЕРЕН') for x in res['notes']), res['notes'])
 
 
 if __name__ == '__main__':

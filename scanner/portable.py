@@ -28,7 +28,7 @@ VERSION = '1.0.0'
 # Partial (selected folders) jobs have their own format version, so that a program
 # before 1.4.0 refuses to continue them as a full scan of the whole disk.
 VERSION_PARTIAL = '1.1.0'
-APP_VERSION = '1.6.0'
+APP_VERSION = '1.6.1'   # 1.6.1 (16.11.2026): папки с пробелом по краям имени не обрезаются (rescan.normalize_folders)
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
