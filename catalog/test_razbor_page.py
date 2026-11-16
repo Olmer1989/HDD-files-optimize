@@ -506,8 +506,12 @@ class ModesTest(PageBase):
         self.assertEqual(self.p.mode(), rp.ONLY)
         P = self.plan()
         cp, hv = P.part_a[(rz.O_COPY, 'Н1')], P.part_a.get((rz.O_HAVE, 'Н1'), (0, 0))
+        tp, jk = P.part_a.get((rz.O_TYPE, 'Н1'), (0, 0)), P.junk_dir['Н1']
         body = self.p.copy_cell.body.text()
-        self.assertIn(f'Отмечено 2 папки · {rp.files_word(cp[0] + hv[0])} · {rp.gb(cp[1] + hv[1])} ГБ', body)
+        # этап 18: «Отмечено» - все файлы отмеченных папок: копировать + уже есть + не копируются по типу (и мусор)
+        n_all, b_all = cp[0] + hv[0] + tp[0] + jk[0], cp[1] + hv[1] + tp[1] + jk[1]
+        self.assertIn(f'Отмечено 2 папки · {rp.files_word(n_all)} · {rp.vol(b_all)}', body)
+        self.assertIn(rp.SKIP_TEXT, body)                                        # общая серая строка
         # этап 12: два диска - два блока «Копия 1 / Копия 2», числа каждого - по плану ядра для этого диска
         texts = self.p.copy_cell.block_texts()
         self.assertEqual(list(texts), ['HDD45', 'HDD77'])
@@ -522,14 +526,12 @@ class ModesTest(PageBase):
             pb = P.part_b[x]
             self.assertEqual(pb[0], total[0] - have[x][0])                       # недостающее на диске = часть Б ядра
             self.assertIn(f'Копия {i} — {rp.esc(rp.disk_ui.disk_place(by[x]))} ({x})', t)
-            self.assertIn(f'Копировать <b>{rp.gb(pb[1])} ГБ</b> ({rp.files_word(pb[0])})', t)
-            self.assertIn(f'Уже есть на диске: <b>{rp.gb(have[x][1])} ГБ ({round(100 * have[x][1] / total[1])} %)</b>', t)
-            self.assertIn(rp.files_word(have[x][0]), t)
-            self.assertIn('место не проверено (диск не подключён)', t)
-        self.assertIn('(75 %)', texts['HDD45'])
-        self.assertIn('(25 %)', texts['HDD77'])
+            self.assertIn(f'<b>Копировать на {x}</b></td><td align="right" style="color:{rp.GREEN}">'
+                          f'{rp.files_word(pb[0])}', t)
+            self.assertIn(f'Уже есть на {x}</td><td align="right">{rp.files_word(have[x][0])}', t)
+            self.assertIn(f'Место не проверено: {x} не подключён', t)
         self.assertNotIn('Уже есть на обоих', body)                              # общая часть - одна строка «Отмечено»
-        self.assertNotIn('место не проверено', body)
+        self.assertNotIn('Место не проверено', body)
         self.assertNotIn('на 45', body + ''.join(texts.values()))                # никаких голых «на 45»
         self.assertEqual(self.p.copy_cell.block_states(), {'HDD45': 'unknown', 'HDD77': 'unknown'})
         blocks = [b[1] for b in self.p.copy_cell.blocks]
@@ -819,9 +821,10 @@ class CapacityTest(PageBase):
             c = self.p.copy_cell
             self.assertEqual(self.p.dest, 'Н1')
             self.assertEqual(c.state, 'short')
-            self.assertIn('не помещается', c.block_texts()['HDD45'])           # в блоке своего диска (этап 12)
+            self.assertIn('Не помещается', c.block_texts()['HDD45'])           # в блоке своего диска (этап 12)
+            self.assertIn(f'bgcolor="#ffebee"><span style="color:{rp.RED}"><b>Не помещается', c.block_texts()['HDD45'])
             self.assertEqual(c.block_states(), {'HDD45': 'short', 'HDD77': 'unknown'})
-            self.assertIn('место не проверено (диск не подключён)', c.block_texts()['HDD77'])
+            self.assertIn('Место не проверено: HDD77 не подключён', c.block_texts()['HDD77'])
             self.assertFalse(c.btn.isEnabled())
             self.assertIn('снимите галочки', c.btn.toolTip())
             self.p.prepare(['Н1', 'Н2'])                                         # Н1 исключается целиком
@@ -958,25 +961,39 @@ class Review6Test(PageBase):
         self.assertEqual(cap['HDD77']['state'], 'unknown')                      # копировать, не подключён
         self.assertEqual((cap['HDD91']['state'], cap['HDD91']['free']), ('none', 100 * G))   # нечего, подключён
         self.assertEqual((cap['HDD92']['state'], cap['HDD92']['free']), ('none', None))      # нечего, не подключён
-        d = sv.directions()['Н1']
-        P = types.SimpleNamespace(part_a={}, disk=SRC)
-        name = {'HDD45': 'F: Бэкап', 'HDD77': 'Путешествия (не подключён)'}.get
-        html_, state = rp.dest_cell_html(d, P, cap, rp.ONLY, 0, 0, name)
-        self.assertIn('Копировать на диск F: Бэкап (HDD45): <b>1,0 ГБ</b>', html_)
-        self.assertIn('помещается: свободно 500,0 ГБ', html_)
-        self.assertIn('Копировать на диск Путешествия (не подключён) (HDD77): <b>1,0 ГБ</b>', html_)
-        self.assertIn('место не проверено (диск не подключён)', html_)
-        self.assertEqual(state, 'unknown')
-        cap2 = sv.capacity({}, space, {}, disks=['HDD45', 'HDD77'])
-        html_, state = rp.dest_cell_html(d, P, cap2, rp.ONLY, 0, 0, name)
-        self.assertIn('Копировать на диск F: Бэкап (HDD45): копировать нечего', html_)
-        self.assertNotIn('место не проверено', html_)
+        d = types.SimpleNamespace(num='Н9', disks=('HDD45',))                   # этап 18: направление на один диск
+        P = types.SimpleNamespace(part_a={(rz.O_COPY, 'Н9'): [3, G], (rz.O_HAVE, 'Н9'): [2, G // 2],
+                                          (rz.O_TYPE, 'Н9'): [1, 5000]}, junk_dir={'Н9': [1, 50]}, disk=SRC)
+        label = {'HDD45': 'F:'}.get
+        html_, state = rp.dest_cell_html(d, P, cap, rp.EVERY, 0, 0, label)
+        self.assertIn(f'Отмечено: весь носитель · 7 файлов · {rp.vol(G + G // 2 + 5050)}', html_)   # сумма трёх строк
+        self.assertIn(f'<td style="color:{rp.GREEN}"><b>Копировать на F:</b>', html_)              # > 0 - зелёным
+        self.assertIn('Уже есть на F:</td><td align="right">2 файла', html_)
+        self.assertIn(f'{rp.SKIP_TEXT}</td><td align="right" style="color:{rp.GRAY}">2 файла', html_)
+        self.assertIn('<b>5 КБ</b>', html_)                                       # малое - в КБ
+        self.assertIn('Поместится: нужно', html_)
         self.assertEqual(state, 'ok')
-        cap3 = sv.capacity({'HDD45': [3, 600 * G]}, space, {}, disks=['HDD45', 'HDD77'])
-        html_, state = rp.dest_cell_html(d, P, cap3, rp.ONLY, 0, 0, name)
-        self.assertIn('не помещается: нужно', html_)
+        self.assertEqual(html_.count('Показать</a>'), 3)
+        P0 = types.SimpleNamespace(part_a={(rz.O_HAVE, 'Н9'): [1, 100]}, junk_dir={}, disk=SRC)
+        cap2 = sv.capacity({}, space, {}, disks=['HDD45'])
+        html_, state = rp.dest_cell_html(d, P0, cap2, rp.EVERY, 0, 0, label)
+        self.assertIn(f'<td style="color:{rp.RED}"><b>Копировать на F:</b>', html_)                # 0 - красным
+        self.assertIn(f'<span style="color:{rp.RED}"><b>Копировать нечего: все файлы выбранного в настройках типа уже '
+                      'есть на F:</b>', html_)                                    # правка владельца: красная
+        self.assertEqual(html_.count('Показать</a>'), 1)                         # только у ненулевой
+        self.assertEqual(state, 'none')
+        cap3 = sv.capacity({'HDD45': [3, 600 * G]}, space, {}, disks=['HDD45'])
+        html_, state = rp.dest_cell_html(d, P, cap3, rp.EVERY, 0, 0, label)
+        self.assertIn('Не помещается: нужно', html_)
         self.assertIn('свободно 500,0 ГБ', html_)
         self.assertEqual(state, 'short')
+        d2 = types.SimpleNamespace(num='Н9', disks=('HDD77',))
+        html_, state = rp.dest_cell_html(d2, P, sv.capacity({'HDD77': [3, G]}, space, {}, disks=['HDD77']), rp.EVERY, 0,
+                                         0, lambda x: x)
+        self.assertIn(f'<span style="color:{rp.ORANGE}"><b>Место не проверено: HDD77 не подключён', html_)
+        self.assertEqual(state, 'unknown')
+        self.assertEqual((rp.vol(0), rp.vol(300), rp.vol(5 * 1024 ** 2), rp.vol(2 * G)), ('0 ГБ', '1 КБ', '5,0 МБ',
+                                                                                         '2,0 ГБ'))
         q = sv.capacity({'HDD45': [1, G]}, space, {'HDD45': [1, G, 10]})['HDD45']
         self.assertEqual(q['need'], G + 4096 + G + 10 * 4096)                   # кластер и на файлы очереди
 
@@ -1215,8 +1232,8 @@ class Stage12Test(PageBase):
         c = self.p.copy_cell
         self.assertEqual(c.blocks, [])
         self.assertFalse(c.blocks_box.isVisibleTo(c))
-        self.assertIn('Уже есть на диске', c.body.text())
-        self.assertIn('Копировать на диск ', c.body.text())
+        self.assertIn('Уже есть на HDD91', c.body.text())
+        self.assertIn('Копировать на HDD91', c.body.text())
         h = self.p.where.text()
         self.assertTrue(h.startswith('Диск назначения: '))
         self.assertNotIn('копии', h)
@@ -1228,37 +1245,26 @@ class Stage12Test(PageBase):
         P = types.SimpleNamespace(part_a={}, disk=SRC)
         space = {'HDD45': ('H:', 500 * G, 1000 * G, 4096)}
         cap = sv.capacity({'HDD45': [3, G], 'HDD77': [2, G]}, space, {}, disks=['HDD45', 'HDD77'])
-        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (2, 3 * G), 'H: Бэкап фото и видео')
+        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (2, 3 * G), 'H: Бэкап фото и видео', 'H:',
+                                   2)
         self.assertEqual(st, 'ok')
         self.assertIn('Копия 1 — H: Бэкап фото и видео (HDD45)', t)
-        self.assertIn('Копировать <b>1,0 ГБ</b> (3 файла)', t)
-        self.assertIn('Уже есть на диске: <b>3,0 ГБ (75 %)</b>', t)
-        self.assertIn('помещается: свободно 500,0 ГБ', t)
+        self.assertIn(f'<b>Копировать на H:</b></td><td align="right" style="color:{rp.GREEN}">3 файла', t)
+        self.assertIn('Уже есть на H:</td><td align="right">2 файла</td><td align="right"><b>3,0 ГБ</b></td><td> <a', t)
+        self.assertIn('Поместится: нужно', t)
         t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), None, 'Путешествия')
-        self.assertEqual(st, 'unknown')
-        self.assertIn('Уже есть на диске: считаю…', t)
-        self.assertIn('место не проверено (диск не подключён)', t)
+        self.assertIn('Уже есть на HDD77: считаю…', t)
         cap = sv.capacity({'HDD45': [3, 600 * G]}, space, {}, disks=['HDD45', 'HDD77'])
-        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (0, 0), 'H: Бэкап')
+        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (0, 0), 'H: Бэкап', 'H:')
         self.assertEqual(st, 'short')
-        self.assertIn('не помещается: нужно', t)
-        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), (5, 4 * G), 'Путешествия')
+        self.assertIn('Не помещается: нужно', t)
+        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), (5, 4 * G), 'Путешествия', 'HDD77', 1)
         self.assertEqual(st, 'none')
-        self.assertIn('Копировать нечего — всё отмеченное уже есть на этом диске', t)
-        self.assertIn('(100 %)', t)
-        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (0, 0), None, 'Путешествия')
-        self.assertNotIn('Уже есть', t)                                          # отмечено пусто - процента нет
+        self.assertIn(f'<span style="color:{rp.RED}"><b>Копировать нечего: все файлы выбранного в настройках типа уже есть '
+                      'на HDD77</b>', t)
+        self.assertNotIn('Показать', t)                                          # нули без «Показать»; «уже есть» не совпал
         t, st = rp.disk_block_html(1, SRC, cap['HDD77'], P, (5, 4 * G), None, 'Носитель')
         self.assertIn('Это сам носитель', t)
-        # проверка кода (п. 2): «копировать нечего» - единообразно, с местом или «диск не подключён»
-        cap = sv.capacity({}, space, {}, disks=['HDD45', 'HDD77'])
-        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (5, 4 * G), 'H: Бэкап')
-        self.assertIn('Копировать нечего — всё отмеченное уже есть на этом диске <span style="color:#2e7d32">'
-                      '· свободно 500,0 ГБ</span>', t)
-        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), (5, 4 * G), 'Путешествия')
-        self.assertIn(f'Копировать нечего — всё отмеченное уже есть на этом диске <span style="color:{rp.ORANGE}">'
-                      '· диск не подключён</span>', t)
-        self.assertEqual(st, 'none')
 
     def test_disk_missing_from_rows(self):
         """Проверка кода (п. 1): диска направления нет в списке дисков - подписи не падают, диск - номером."""
@@ -1450,7 +1456,7 @@ class FileModelTest(unittest.TestCase):
         m = fw.FileModel('nohash')
         m.set_rows('nohash', rows)
         self.assertEqual([m.headerData(i, rp.Qt.Horizontal) for i in range(m.columnCount())],
-                         ['Папка', 'Имя', 'Тип', 'Размер', 'Дата', 'Хеш', 'Почему'])
+                         ['Где лежит', 'Имя', 'Тип', 'Размер', 'Дата', 'Хеш', 'Почему'])
         size, date, hsh = m.cols.index(fw.C_SIZE), m.cols.index(fw.C_DATE), m.cols.index(fw.C_HASH)
         m.sort(size, rp.Qt.AscendingOrder)
         self.assertEqual(self.names(m), ['e.mp3', 'c.doc', 'd.zip', 'a.jpg', 'B.mp4'])     # пустой размер - в конце
@@ -1465,7 +1471,7 @@ class FileModelTest(unittest.TestCase):
                          ['посчитан сканером', 'сверен только размер', 'со слов владельца', 'файл изменился',
                           'не считался'])
         m.sort(0)                                                                # по папке: корень, « X», «X», «X »
-        self.assertEqual(m.data(m.index(0, 0)), '(корень носителя)')
+        self.assertEqual(m.data(m.index(0, 0)), 'HDD62\\')       # корень: «HDD62\» (этап 18)
         self.assertEqual(self.names(m), ['e.mp3', 'a.jpg', 'c.doc', 'd.zip', 'B.mp4'])
         m.set_filter(folder_sub=' x')                                            # пробел ввода не обрезается
         self.assertEqual(self.names(m), ['a.jpg'])
@@ -1479,7 +1485,7 @@ class FileModelTest(unittest.TestCase):
         self.assertEqual(m.totals(visible=False)[0], 5)
         self.assertEqual(m.totals(visible=False)[2], [1, 1, 1, 1, 1])            # музыка - «другие»
         self.assertIn('2 файла · 0,0 ГБ', fw.totals_line(m.totals()))
-        self.assertEqual(m.export_rows()[0][:2], ['X', 'c.doc'])
+        self.assertEqual(m.export_rows()[0][:2], ['HDD62\\X', 'c.doc'])     # «Где лежит» - полный путь
         self.assertEqual(m.data(m.index(0, m.cols.index(fw.C_WHY)), rp.Qt.ForegroundRole).name(), '#c62828')
         m.set_filter(types=set(range(5)))
         self.assertFalse(m.filtered())
@@ -1573,7 +1579,7 @@ class FileWindowTest(PageBase):
             w.save_excel()
         self.assertTrue(wait(lambda: out.exists() and w.state.text().startswith('Сохранено'), 30), w.state.text())
         ws = load_workbook(out).active
-        self.assertEqual([c.value for c in next(ws.iter_rows())][:3], ['Папка', 'Имя', 'Тип'])
+        self.assertEqual([c.value for c in next(ws.iter_rows())][:3], ['Где лежит', 'Имя', 'Тип'])
         self.assertEqual(ws.max_row, 2)
         out2 = out.with_suffix('.csv')
         with mock.patch.object(self.fw, 'XLSX_MAX', 0), \
@@ -2008,6 +2014,68 @@ class Stage17CodeReviewTest(PageBase):
         self.assertGreaterEqual(n('saving_changed(bool)'), 1)
         w.close()
         self.assertEqual((n('saving_changed(bool)'), n('marks_changed(int)')), (0, 0))   # закрытое окно отключено
+
+
+class Stage18Test(PageBase):
+    """Этап 18: «Отмечено» = сумма трёх строк ячейки (с мусором и вложенными отметками), частичная галочка у
+    неотмеченной папки с отмеченными подпапками (оба дерева), пути с буквой и без, строка выделенного файла."""
+
+    def tearDown(self):
+        for w in list(getattr(self.w, 'file_lists', [])):
+            w.close()
+        super().tearDown()
+
+    def test_marked_equals_three_rows(self):
+        import directions_page as dp
+        dp.save_choice(['Н1'])
+        self.mark(('Поход 2010', 'Н1'), ('Поход 2010\\Фото', 'Н1'), ('Поход 2010\\Монтаж', 'не копировать'),
+                  ('Документы', 'Н1'))
+        self.open()
+        P = self.plan()
+        v = rp.cell_numbers(self.p.dest_dir(), P)
+        m = self.p.model
+        ref = [(p, s) for p, s, _h in FILES if m.is_dir(m.route[hb.parent_of(p)], 'Н1')]   # независимо: маршрут папки
+        self.assertEqual(v['total'], (len(ref), sum(s for _p, s in ref)))       # без двойного счёта
+        self.assertEqual(tuple(a + b + c for a, b, c in zip(v['copy'], v['have'], v['skip'])), v['total'])
+        self.assertGreater(P.junk_dir['Н1'][0], 0)                               # Thumbs.db - в «не копируются»
+        self.assertIn(f'Отмечено 2 папки · {rp.files_word(len(ref))}', self.p.copy_cell.body.text())
+        lst = sv.file_list('type', SRC, num='Н1')
+        self.assertEqual(len(lst['rows']), v['skip'][0])                         # «Показать» = число строки
+        self.assertIn('Поход 2010\\Фото\\Thumbs.db', {r[1] for r in lst['rows']})
+
+    def test_unmarked_parent_with_marked_subfolders(self):
+        import directions_page as dp
+        dp.save_choice(['Н2'])
+        self.mark(('Поход 2010\\Фото', 'Н2'), ('Поход 2010\\Монтаж', 'Н2'))     # как «Алтай 2022 …» на HDD09
+        self.open()
+        it = self.item('Поход 2010')
+        self.assertEqual(it.checkState(rp.C_CHECK), rp.Qt.PartiallyChecked)      # «Разбор»: частичная
+        self.assertEqual(it.data(rp.C_CHECK, rp.PART_ROLE), 'on')
+        self.plan()
+        w = self.p.show_list('copy:HDD91')
+        self.assertTrue(wait(lambda: w.data is not None, 60))
+        par = w.f_items['Поход 2010']
+        self.assertEqual(par.checkState(0), rp.Qt.PartiallyChecked)             # окно: частичная, раскрыта
+        self.assertTrue(par.isExpanded())
+        self.assertEqual(w.f_items['Поход 2010\\Фото'].checkState(0), rp.Qt.Checked)
+        self.assertEqual(w.f_items['Поход 2010\\Монтаж'].checkState(0), rp.Qt.Checked)
+        par.setCheckState(0, rp.Qt.Checked)                                      # щелчок по частичной - выбрать всю
+        self.assertEqual(self.own('Поход 2010'), sv.directions()['Н2'].verdict())
+        self.settle()
+        self.assertEqual(self.item('Поход 2010').checkState(rp.C_CHECK), rp.Qt.Checked)
+        # пути: носитель не подключён - «HDD60\…»; строка выделенного файла
+        self.assertIn('Носитель: <b>HDD60</b>', w.carrier.text())
+        self.assertIn('не подключён', w.carrier.text())
+        self.assertTrue(wait(lambda: w.model.rowCount() > 0, 30))
+        w.view.selectRow(0)
+        w.show_file_line()
+        r = w.model.row(0)
+        self.assertEqual(w.model.data(w.model.index(0, 0)), f'HDD60\\{r[1]}')
+        self.assertTrue(w.file_line.text().startswith(f'Файл: HDD60\\{r[1]}\\{r[2]}'))
+        w.model.letters = {'HDD60': 'F:'}                                        # подключён - с буквой
+        self.assertEqual(w.model.data(w.model.index(0, 0)), f'F:\\{r[1]}')
+        self.assertEqual(rp.sv.full_path('HDD60', '', {'HDD60': 'F:'}), 'F:\\')
+        self.assertEqual(rp.sv.full_path('HDD60', ' X ', {}), 'HDD60\\ X ')       # пробелы не трогаются
 
 
 if __name__ == '__main__':

@@ -1593,9 +1593,29 @@ def _meta(c, disk, paths_):
                                            'on f.disk=? and f.path=q.path', (disk,))}
 
 
-def _copies(c, shas, disks_, skip):
+def disk_letters(disks_):
+    """Буквы подключённых сейчас носителей по серийному номеру тома из описи (диски не читаются): {диск: 'H:'}.
+    Не подключён или узнать нельзя - диска в ответе нет."""
+    try:
+        serial_of = {v: k for k, v in hb.serial_map(bp.find_jobs()).items()}
+        vols = volumes()
+    except (OSError, AttributeError):
+        return {}
+    return {d: vols[serial_of[d]] for d in disks_ if serial_of.get(d) in vols}
+
+
+def full_path(disk, path, letters):
+    """Полный путь файла или папки (этап 18): «H:\\путь» у подключённого носителя, иначе «HDD45\\путь». Пробелы не
+    трогаются."""
+    head = letters.get(disk) or disk
+    return f'{head}{SEP}{path}' if path else head + SEP
+
+
+def _copies(c, shas, disks_, skip, letters=None):
     """«Где копия»: все записи с тем же SHA-256 на дисках disks_ - подтверждённые (S/C) и с ожидаемым хешем (Z/U/X, с
-    пометкой «не проверена»). skip - (диск, путь) самих файлов списка. -> {sha: ['HDD45: путь', …]}."""
+    пометкой «не проверена»). skip - (диск, путь) самих файлов списка. Этап 18: полный путь копии с именем файла и
+    буквой подключённого диска («H:\\…»), иначе «HDD45\\…». -> {sha: ['H:\\путь', …]}."""
+    letters = letters or {}
     if not shas or not disks_:
         return {}
     c.execute('create temp table if not exists fl_s(sha text primary key)')
@@ -1606,11 +1626,11 @@ def _copies(c, shas, disks_, skip):
     for sha, d, p, ev in c.execute(f'select s.sha, f.disk, f.path, f.ev from fl_s s cross join files f on f.sha=s.sha '
                                    f"where f.disk in ({q}) and f.ev in ('S', 'C') order by f.disk, f.path", list(disks_)):
         if (d, p) not in skip:
-            res[sha].append(f'{d}: {p}')
+            res[sha].append(full_path(d, p, letters))
     for sha, d, p, ev in c.execute(f'select s.sha, f.disk, f.path, f.ev from fl_s s cross join files f '
                                    f"on f.sha_exp=s.sha where f.disk in ({q}) and coalesce(f.ev, '') not in ('S', 'C') "
                                    'order by f.disk, f.path', list(disks_)):
-        res[sha].append(f'{d}: {p} (не проверена: {hash_text(ev)})')
+        res[sha].append(f'{full_path(d, p, letters)} (не проверена: {hash_text(ev)})')
     return res
 
 
@@ -1664,8 +1684,8 @@ def _plan_list(kind, disk, num, target, drafts):
         rows, notes, counts = [], [], collections.Counter()
         where = {}
         if kind == 'have':
-            where = _copies(c, {it[2] for it in items if it[2]}, sorted(set(d.disks) | set(hb.MAIN)),
-                            {(disk, it[0]) for it in items})
+            cd = sorted(set(d.disks) | set(hb.MAIN))
+            where = _copies(c, {it[2] for it in items if it[2]}, cd, {(disk, it[0]) for it in items}, disk_letters(cd))
         for it in items:
             path, size, sha, k = it[0], it[1], it[2], it[3]
             mt, ev = meta.get(path, (None, None))

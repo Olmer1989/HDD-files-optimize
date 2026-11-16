@@ -224,6 +224,7 @@ class Plan:
         self.total = [0, 0]
         self.info = {}
         self.items = []                                              # collect: пофайловый список (окно, этап 16)
+        self.junk_dir = collections.defaultdict(lambda: [0, 0])      # этап 18: мусор в папках направления -> [файлов, байт]
 
     def group(self, g, route):
         if g not in self.groups:
@@ -245,6 +246,14 @@ class Plan:
         if x['eligible'][0]:
             return G_HAVE
         return G_TYPE
+
+
+def wanted_item(want, o, num, r):
+    """collect: подходит ли файл с исходом o (номер num) и маршрутом r. Этап 18: мусор (исход без направления) в папке,
+    идущей в направление, входит в список «не подходит по типу» этого направления."""
+    if num == want[0] and o in want[1]:
+        return True
+    return o == O_JUNK and O_TYPE in want[1] and r is not None and r.state == R_DIR and r.num == want[0]
 
 
 def planner(c, disk, dirs, marks, detail=False, collect=None):
@@ -489,8 +498,10 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
         o, num, miss = outcome(r, k, mask, dok)
         P.part_a[(o, num)][0] += 1
         P.part_a[(o, num)][1] += size
+        if o == O_JUNK and r.state == R_DIR:
+            P.junk_dir[r.num][0] += 1; P.junk_dir[r.num][1] += size
         item = None
-        if want is not None and num == want[0] and o in want[1]:
+        if want is not None and wanted_item(want, o, num, r):
             item = [path, size, sha, k, o, tuple(miss), {}]
             P.items.append(item)
         if r.state != R_DIR or r.mark is None:
@@ -573,6 +584,8 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
             o, num, miss = outcome(r, k, src_bit, docs_ok[f])
             P.part_a[(o, num)][0] += n
             P.part_a[(o, num)][1] += b
+            if o == O_JUNK and r.state == R_DIR:
+                P.junk_dir[r.num][0] += n; P.junk_dir[r.num][1] += b
             if r.state != R_DIR or r.mark is None:
                 continue
             g = P.group(_group(r, original_of(f, roots)[0] if r.moved else f, roots), r)
@@ -713,7 +726,7 @@ def _collect_rest(c, P, disk, want, folders, dn, route, docs_ok, outcome, src_bi
     суммам есть нужный исход; тот же outcome. Число собранных = сумме по папкам, иначе - ошибка итога."""
     def wanted(f, k):
         o, num, _m = outcome(route[f], k, src_bit, docs_ok[f])
-        return num == want[0] and o in want[1]
+        return wanted_item(want, o, num, route[f])
     need = {f for f in folders if any(dn[f][k] and wanted(f, k) for k in range(N_TYPES))}
     if not need:
         return
@@ -741,7 +754,7 @@ def _collect_rest(c, P, disk, want, folders, dn, route, docs_ok, outcome, src_bi
             size = size or 0
             k = ftype(path, nm, size)
             o, num, miss = outcome(route[f], k, src_bit, docs_ok[f])
-            if num != want[0] or o not in want[1]:
+            if not wanted_item(want, o, num, route[f]):
                 continue
             seen += 1
             st = {}

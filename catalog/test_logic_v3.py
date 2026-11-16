@@ -807,7 +807,10 @@ class FileListTest(V3Base):
         for num, kind, out in (('Н1', 'have', rz.O_HAVE), ('Н1', 'type', rz.O_TYPE), ('Н2', 'have', rz.O_HAVE),
                                ('Н2', 'type', rz.O_TYPE)):
             res = sv.file_list(kind, SRC, num=num)
-            self.assertEqual((len(res['rows']), sum(r[2] for r in res['rows'])), self.a(P, out, num), (num, kind))
+            want = self.a(P, out, num)
+            if out == rz.O_TYPE:                                                 # этап 18: и мусор этого направления
+                want = (want[0] + P.junk_dir[num][0], want[1] + P.junk_dir[num][1])
+            self.assertEqual((len(res['rows']), sum(r[2] for r in res['rows'])), want, (num, kind))
             self.assertEqual(len({r[1] for r in res['rows']}), len(res['rows']))     # файл - один раз
         for x in ('HDD45', 'HDD77'):
             res = sv.file_list('copy', SRC, num='Н1', target=x)
@@ -823,7 +826,7 @@ class FileListTest(V3Base):
         self.assertEqual(st['Поход 2010\\описание.doc'], 'без хеша — сравнить нельзя, копируется')
         self.assertNotIn('Поход 2010\\Фото\\1.jpg', st)                          # уже есть на 45 и 77
         have = {r[1]: r[7] for r in sv.file_list('have', SRC, num='Н1')['rows']}
-        self.assertEqual(have['Поход 2010\\Фото\\1.jpg'], 'HDD45: X\\1.jpg; HDD77: Y\\1.jpg')      # все копии
+        self.assertEqual(have['Поход 2010\\Фото\\1.jpg'], 'HDD45\\X\\1.jpg; HDD77\\Y\\1.jpg')      # все копии
         typ = {r[1]: r[6] for r in sv.file_list('type', SRC, num='Н1')['rows']}
         self.assertEqual(typ['Поход 2010\\Монтаж\\проект.prproj'],
                          'направление берёт только фото, видео, документы (только рядом с фото и видео); это — '
@@ -906,7 +909,7 @@ class CodeReview16Test(V3Base):
         self.assertNotIn(('HDD45', 'W\\2.jpg'), {(r[0], r[1]) for r in rows})
         c = self.db()
         got = sv._copies(c, {S[2]}, ['HDD45'], set())
-        self.assertIn('HDD45: W\\2.jpg', got[S[2]])                                 # подтверждённая - без пометки
+        self.assertIn('HDD45\\W\\2.jpg', got[S[2]])                                 # подтверждённая - без пометки
         self.assertFalse(any('W\\2.jpg (не проверена' in x for x in got[S[2]]))
 
     def test_one_path_normalization(self):

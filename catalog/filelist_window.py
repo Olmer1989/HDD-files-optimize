@@ -43,7 +43,7 @@ KIND_TITLE = {'copy': 'к копированию на', 'have': 'уже есть
 # столбцы: ключ -> заголовок
 C_DISK, C_FOLDER, C_NAME, C_TYPE, C_SIZE, C_DATE, C_HASH, C_WHY, C_WHERE = (
     'disk', 'folder', 'name', 'type', 'size', 'date', 'hash', 'why', 'where')
-HEAD = {C_DISK: 'На каком диске', C_FOLDER: 'Папка', C_NAME: 'Имя', C_TYPE: 'Тип', C_SIZE: 'Размер', C_DATE: 'Дата',
+HEAD = {C_DISK: 'На каком диске', C_FOLDER: 'Где лежит', C_NAME: 'Имя', C_TYPE: 'Тип', C_SIZE: 'Размер', C_DATE: 'Дата',
         C_HASH: 'Хеш', C_WHY: 'Почему', C_WHERE: 'Где копия'}
 WIDTH = {C_DISK: 90, C_FOLDER: 330, C_NAME: 220, C_TYPE: 110, C_SIZE: 80, C_DATE: 115, C_HASH: 150, C_WHY: 330,
          C_WHERE: 420}
@@ -121,7 +121,18 @@ class Busy:
             QApplication.restoreOverrideCursor()
 
 
-def export_values(rows, idx, cols):
+def place_of(r, letters):
+    """«Где лежит» (этап 18): полный путь папки файла - с буквой подключённого носителя («F:\\Алёнкин клип»), иначе
+    «HDD09\\Алёнкин клип». Пробелы в именах не трогаются."""
+    return sv.full_path(r[R_DISK], r[R_FOLDER], letters)
+
+
+def file_path(r, letters):
+    """Полный путь файла строки (с буквой или номером носителя)."""
+    return place_of(r, letters).rstrip(SEP) + SEP + r[R_NAME]
+
+
+def export_values(rows, idx, cols, letters=None):
     """Строки для Excel/CSV в порядке показа (размер - числом байт, дата - текстом); в фоновом потоке: rows и idx -
     снимок модели (список строк модели не меняется, сортировка и фильтр создают новые списки номеров)."""
     out = []
@@ -134,7 +145,7 @@ def export_values(rows, idx, cols):
             elif col == C_DATE:
                 vals.append(date_text(r[R_MTIME]) if date_ok(r[R_MTIME]) else '')
             elif col == C_FOLDER:
-                vals.append(r[R_FOLDER])
+                vals.append(place_of(r, letters or {}))
             else:
                 vals.append(FileModel.text(None, r, col))
         out.append(vals)
@@ -167,6 +178,7 @@ class FileModel(QAbstractTableModel):
         self.sort_col, self.sort_desc = None, False
         self.types, self.folder_sub, self.name_sub = set(range(5)), '', ''
         self.folder_prefix, self.min_size = '', 0          # этап 17: щелчок по папке дерева; «меньше N КБ - скрыть»
+        self.letters = {}                                   # этап 18: буквы подключённых носителей («Где лежит»)
 
     # --- данные ---
     def set_rows(self, kind, rows):
@@ -191,7 +203,7 @@ class FileModel(QAbstractTableModel):
         if col == C_DISK:
             return r[R_DISK]
         if col == C_FOLDER:
-            return r[R_FOLDER] or '(корень носителя)'
+            return place_of(r, self.letters if self is not None else {})
         if col == C_NAME:
             return r[R_NAME]
         if col == C_TYPE:
@@ -214,7 +226,7 @@ class FileModel(QAbstractTableModel):
             return self.text(r, col)
         if role == Qt.ToolTipRole:
             if col in (C_FOLDER, C_NAME):
-                return f'{r[R_DISK]}\\{r[R_FOLDER] + SEP if r[R_FOLDER] else ""}{r[R_NAME]}'
+                return file_path(r, self.letters)
             if col in (C_WHY, C_WHERE):
                 return self.text(r, col)
             if col == C_SIZE and r[R_SIZE] is not None:
@@ -334,7 +346,7 @@ class FileModel(QAbstractTableModel):
     # --- выгрузка ---
     def export_rows(self):
         """Видимые строки в порядке показа: значения для Excel/CSV (см. export_values)."""
-        return export_values(self.rows, self.idx, self.cols)
+        return export_values(self.rows, self.idx, self.cols, self.letters)
 
 
 def totals_line(t):
@@ -403,6 +415,9 @@ class FileListWindow(QWidget):
         self.sub.setTextFormat(Qt.RichText)
         self.sub.setStyleSheet('color:#37474f')
         lay.addWidget(self.sub)
+        self.carrier = QLabel('')                          # этап 18: «Носитель: HDD09 «SN850» — сейчас подключён как F:»
+        self.carrier.setTextFormat(Qt.RichText)
+        lay.addWidget(self.carrier)
         self.total = QLabel('Загружаю список из базы (диски не читаются)…')
         self.total.setTextFormat(Qt.RichText)
         self.total.setWordWrap(True)
@@ -465,6 +480,7 @@ class FileListWindow(QWidget):
         self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.setAlternatingRowColors(True)
         self.view.setWordWrap(False)
+        self.view.setTextElideMode(Qt.ElideMiddle)        # этап 18: длинный путь - многоточие в середине, полный - в подсказке
         self.view.setToolTip('Щелчок по заголовку столбца - сортировка по всему списку. Ctrl/Shift - выделить несколько.')
         # этап 17: слева - дерево папок списка (щелчок - фильтр; галочки - отметки «Разбора»)
         left = QWidget()
@@ -475,7 +491,6 @@ class FileListWindow(QWidget):
         self.small.setWordWrap(True)
         self.small.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
         self.small.linkActivated.connect(self.toggle_small)
-        ll.addWidget(self.small)
         self.ftree = QTreeWidget()
         self.ftree.setHeaderLabels(['Папка', 'Файлов'])
         self.ftree.header().setStretchLastSection(False)
@@ -486,6 +501,7 @@ class FileListWindow(QWidget):
         self.ftree.itemClicked.connect(self.f_clicked)
         self.ftree.itemChanged.connect(self.f_changed)
         ll.addWidget(self.ftree, 1)
+        ll.addWidget(self.small)                           # этап 18: под деревом - дерево и таблица выровнены по верху
         self.marks_note = QLabel('')
         self.marks_note.setWordWrap(True)
         self.marks_note.setStyleSheet('color:#757575; font-size:8pt')
@@ -522,6 +538,11 @@ class FileListWindow(QWidget):
         self.state = QLabel('')
         self.state.setStyleSheet('color:#555')
         self.state.setWordWrap(True)
+        self.file_line = QLabel('')                        # этап 18: «Файл: …» / «Копия: …» выделенной строки
+        self.file_line.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.file_line.setWordWrap(True)
+        self.file_line.setStyleSheet('color:#263238')
+        lay.addWidget(self.file_line)
         lay.addWidget(self.state)
         self.ftimer = QTimer(self)
         self.ftimer.setSingleShot(True)
@@ -530,6 +551,7 @@ class FileListWindow(QWidget):
         self.sel_timer.setSingleShot(True)
         self.sel_timer.timeout.connect(self.count_selected)
         self.view.selectionModel().selectionChanged.connect(lambda *_: self.sel_timer.start(250))
+        self.view.selectionModel().currentChanged.connect(lambda *_: self.show_file_line())
         self.sel_folders = []
         self.reload_timer = QTimer(self)
         self.reload_timer.setSingleShot(True)
@@ -570,7 +592,10 @@ class FileListWindow(QWidget):
             return
         self.data = val
         self.disk_rows = val.get('disk_rows') or []
+        self.model.letters = {r['disk']: r['letter'] for r in self.disk_rows if r.get('letter')}
         self.model.set_rows(self.kind, val['model_rows'])
+        self.carrier.setText(self.carrier_text())
+        self.show_file_line()
         self.set_widths()
         self.stale.hide()
         self.title.setText(self.title_text())
@@ -585,6 +610,52 @@ class FileListWindow(QWidget):
         self.update_buttons()
 
     # --- дерево папок списка (этап 17) ---
+    def carrier_text(self):
+        """«Носитель: HDD09 «SN850» — сейчас подключён как F:» / «… — не подключён» (буква - по серийному номеру тома из
+        описи, как у «Открыть в Проводнике»)."""
+        r = next((x for x in self.disk_rows if x['disk'] == self.disk), None) or {'disk': self.disk, 'label': '',
+                                                                                   'letter': ''}
+        name = disk_ui.disk_name(r)
+        head = f'Носитель: <b>{_esc(self.disk)}</b>' + (f' «{_esc(name)}»' if name else '')
+        if r.get('letter'):
+            return head + f' — <span style="color:#2e7d32">сейчас подключён как <b>{_esc(r["letter"])}</b></span>'
+        return head + ' — <span style="color:#e65100">не подключён</span> (пути — от номера носителя)'
+
+    def show_file_line(self):
+        """Строка под таблицей: «Файл: <полный путь>» и (у списка «уже есть») «Копия: <полный путь>» - текущей строки;
+        текст выделяется мышью."""
+        ix = self.view.currentIndex()
+        if not ix.isValid() or ix.row() >= self.model.rowCount():
+            self.file_line.setText('')
+            return
+        r = self.model.row(ix.row())
+        lines = ['Файл: ' + file_path(r, self.model.letters)]
+        if r[R_WHERE]:
+            lines.append('Копия: ' + r[R_WHERE])
+        self.file_line.setText('\n'.join(lines))
+
+    def expand_marked(self):
+        """Этап 18 (правка владельца): папки дерева, которые идут в диск назначения, а родитель - нет (верхние
+        отмеченные, как 4 подпапки «Алтай 2022 …» на HDD09), видны сразу: их предки раскрываются."""
+        p = self.page
+        if p is None or p.model is None or p.disk != self.disk:
+            return
+        m, num = p.model, self.spec.get('num')
+        tops = [f for f in self.f_count if f and m.is_dir(m.route.get(f), num)
+                and not m.is_dir(m.route.get(f.rsplit(SEP, 1)[0] if SEP in f else ''), num)]
+        for f in sorted(tops, key=lambda x: x.count(SEP)):
+            chain, a = [], f
+            while SEP in a:
+                a = a.rsplit(SEP, 1)[0]
+                chain.append(a)
+            for a in reversed(chain):
+                it = self.f_items.get(a)
+                if it is None:
+                    break
+                if not it.data(1, F_ROLE):
+                    self.f_fill(it)
+                it.setExpanded(True)
+
     def build_tree(self):
         """Папки с файлами списка и их предки (+ снятые в этом окне - с 0 файлов); число - файлов в папке с вложенными.
         Дети создаются по раскрытию, порциями по TREE_CHUNK. Раскрытые узлы сохраняются по путям."""
@@ -642,6 +713,8 @@ class FileListWindow(QWidget):
         finally:
             self.ftree.blockSignals(False)
             self.painting = False
+        self.refresh_checks()
+        self.expand_marked()
         self.refresh_checks()
 
     def f_fill(self, item, start=0):
@@ -726,7 +799,7 @@ class FileListWindow(QWidget):
         else:
             self.marks_note.setText('Галочка снята — папка не копируется (сохраняется сразу; «Отменить последнее» — в '
                                     '«Разборе носителя»). Щелчок по имени — показать файлы папки.')
-        part = m.partial(num) if m is not None else set()
+        part = m.partial(num) if m is not None else {}
         self.painting = True
         was = self.ftree.signalsBlocked()
         self.ftree.blockSignals(True)
@@ -736,11 +809,13 @@ class FileListWindow(QWidget):
                     it.setData(0, Qt.CheckStateRole, None)
                     continue
                 on = m.is_dir(m.route.get(f), num)
-                st = (Qt.PartiallyChecked if f in part else Qt.Checked) if on else Qt.Unchecked
+                pm = part.get(f)
+                st = Qt.PartiallyChecked if (on and pm == 'off') or (not on and pm == 'on') else \
+                    (Qt.Checked if on else Qt.Unchecked)
                 fl = it.flags()
                 it.setFlags((fl | Qt.ItemIsUserCheckable) if ok else (fl & ~Qt.ItemIsUserCheckable))
                 it.setCheckState(0, st)
-                it.setData(1, F_PART, st == Qt.PartiallyChecked)
+                it.setData(1, F_PART, pm if st == Qt.PartiallyChecked else None)   # что делает щелчок
         finally:
             self.ftree.blockSignals(was)
             self.painting = False
@@ -757,7 +832,8 @@ class FileListWindow(QWidget):
         if not f or not self.can_mark():
             self.refresh_checks()
             return
-        on = item.checkState(0) == Qt.Checked and not item.data(1, F_PART)   # частичная - снять всю
+        part = item.data(1, F_PART)                    # частичная: 'off' - снять всю, 'on' - выбрать всю
+        on = (part == 'on') if part else item.checkState(0) == Qt.Checked
         self.keep.add(f)
         if not self.page.set_in_dest([f], on):
             self.refresh_checks()
@@ -899,7 +975,7 @@ class FileListWindow(QWidget):
         if not path.lower().endswith(ext):
             path += ext
         heads = [head(self.kind, c) for c in m.cols]
-        snap = (m.rows, list(m.idx), list(m.cols))            # строки готовятся в фоне (510 тыс. - 2,7 с)
+        snap = (m.rows, list(m.idx), list(m.cols), dict(m.letters))            # строки готовятся в фоне (510 тыс. - 2,7 с)
         self.state.setText(f'Сохраняю {files_word(len(snap[1]))}…')
         self.excel_btn.setEnabled(False)
 
