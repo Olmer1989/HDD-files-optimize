@@ -24,7 +24,7 @@ import service as sv                                        # noqa: E402
 import tasks_page as tp                                     # noqa: E402
 from hb_cmd import mvlist as mv                             # noqa: E402
 from hb_core import razbor as rz                            # noqa: E402
-from test_hashbase import LOG_HEAD, NS, S                   # noqa: E402
+from test_hashbase import LOG_HEAD, NS, S, make_disk        # noqa: E402
 from test_logic_v3 import H, SRC, V3Base                    # noqa: E402
 from test_tasks_move import FakeWin                         # noqa: E402
 
@@ -77,9 +77,11 @@ class MoveBase(V3Base):
         self.quiet(hb.cmd_rebuild, NS())
         self.disk = self.tmp / 'диск HDD60'
 
-    def copy_log(self, task, stamp, lines):
-        """lines: (цель, результат, размер, sha, путь от корня носителя)."""
-        rows = [('10:00:0%d' % (i % 10), t, res, str(size), sha, 'K:\\' + p, f'X:\\ПЕРЕНОС с других дисков\\{SRC}\\' + p)
+    def copy_log(self, task, stamp, lines, sub=''):
+        """lines: (цель, результат, размер, sha, путь из списка); sub - подпапка источника (этап 14), как пишет
+        шаблон: источник - с ней, назначение - без неё."""
+        src = 'K:\\' + (sub + '\\' if sub else '')
+        rows = [('10:00:0%d' % (i % 10), t, res, str(size), sha, src + p, f'X:\\ПЕРЕНОС с других дисков\\{SRC}\\' + p)
                 for i, (t, res, size, sha, p) in enumerate(lines)]
         (hb.TASKS / task / f'Журнал копирования {stamp}.tsv').write_text(
             '\t'.join(LOG_HEAD) + '\n' + ''.join('\t'.join(x) + '\n' for x in rows), encoding='utf-8-sig')
@@ -431,7 +433,8 @@ class SecondPassTest(MoveBase):
                 lines.append((t, 'ОШИБКА: устройство не готово', int(size), '', path))
             else:
                 lines.append((t, OK if sha and sha[0] else OK_NOHASH, int(size), (sha[0].lower() if sha and sha[0] else DOC1), path))
-        self.copy_log(task, stamp, lines)
+        vol = (hb.TASKS / task / 'тома.tsv').read_text(encoding='utf-8').splitlines()[0].split('\t')
+        self.copy_log(task, stamp, lines, sub=vol[2] if len(vol) > 2 else '')
 
     def first_pass(self, fail=()):
         """Поход 2010 -> Н1 (только 45): копия, проверка, перенос в «Скопировано на Семейный архив 45»."""
@@ -483,8 +486,10 @@ class SecondPassTest(MoveBase):
         self.assertEqual(s['name'], 'HDD60 — Поход 2010 — Семейный архив 77')
         rows = {r[1] for r in s['rows']}
         # 1.jpg уже есть на 77 (по хешу) - не копируется; клип - один раз (дубль в задании)
-        self.assertEqual(rows, {R45 + '\\Поход 2010\\Фото\\2.jpg', R45 + '\\Поход 2010\\Монтаж\\clip копия.mp4',
-                                R45 + '\\Поход 2010\\описание.doc'})
+        # этап 14: пути - от подпапки источника «Скопировано на …» (на 77 ляжет как на 45, без служебной папки)
+        self.assertEqual(rows, {'Поход 2010\\Фото\\2.jpg', 'Поход 2010\\Монтаж\\clip копия.mp4',
+                                'Поход 2010\\описание.doc'})
+        self.assertEqual(s['sub'], R45)
         P = self.plan()
         self.assertEqual(self.a(P, rz.O_HAVE, self.n77), (1, 100))
         self.log_all(s['name'], '2025-07-01 10-00-00')   # после журнала первого переноса
@@ -612,7 +617,7 @@ class SecondPassTest(MoveBase):
             f'10:00\tперемещён\t80\t{H[26]}\tK:\\корень.jpg\tK:\\{R45}\\корень.jpg\n', encoding='utf-8-sig')
         hb.close_last()
         s = self.second_task(R45)
-        self.assertEqual([r[1] for r in s['rows']], [R45 + '\\корень.jpg'])
+        self.assertEqual([r[1] for r in s['rows']], ['корень.jpg'])                 # от подпапки источника R45
         self.log_all(s['name'], '2025-07-01 10-00-00')
         self.mv(razbor=s['name'])
         task = hb.TASKS / (s['name'] + mv.V3_SUFFIX)
@@ -676,6 +681,194 @@ class SecondPassTest(MoveBase):
         # старая «ПЕРЕНЕСЕНО → …»: как раньше - сама не отмечается, внутри отметка по исходному пути
         with self.assertRaises(sv.Refused):
             sv.marks_preview(SRC, [('ПЕРЕНЕСЕНО → 45 и 77', 'Н2')])
+
+
+def rz_children(c, disk):
+    """Дети папок носителя по таблице folders (как в planner) - для прямого вызова razbor._twins."""
+    ch = {}
+    for (f,) in c.execute('select folder from folders where disk=?', (disk,)):
+        if f:
+            ch.setdefault(f.rpartition('\\')[0], []).append(f)
+    return ch
+
+
+COPY_TPL = Path(__file__).resolve().parents[1] / 'Каталог дисков' / '_ШАБЛОН копирования' / 'Копировать.ps1'
+DEST = 'ПЕРЕНОС с других дисков'
+
+
+class CleanDestTest(MoveBase):
+    """Этап 14: копия второго прохода ложится на 77 без «Скопировано на …» - как на 45 при первом проходе. Задание
+    составляется со служебной папкой как подпапкой источника (третья колонка тома.tsv), шаблон копирования 2.4 не
+    менялся и запускается настоящий (Windows PowerShell 5.1, -TestRoots) на временных папках."""
+    log_all, first_pass, second_task = SecondPassTest.log_all, SecondPassTest.first_pass, SecondPassTest.second_task
+
+    def setUp(self):
+        MoveBase.setUp(self)
+        sv.add_direction(num='Н1', name='Семейный архив 45', disks=['HDD45'])
+        sv.add_direction(name='Семейный архив 77', disks=['HDD77'], kind=hb.KIND_MEDIA)
+        self.n77 = hb.find_direction(sv.directions(), 'Семейный архив 77').num
+        self.files(*HIKE_FILES)
+
+    def put_scan(self, disk, rows):
+        """Дописать в опись диска файлы (путь, размер, sha) и вернуть описи прежнюю дату (2020 - раньше журналов)."""
+        import sqlite3
+        job = next(self.scans.glob(f'{disk} - тест/*'))
+        for fn, q, args_ in (('hashes.sqlite', "insert into hashes values (?, ?, ?, '0', '', ?, 'verified', '')",
+                              [(disk, p, s, h) for p, s, h in rows if h]),             # h=None - файл без хеша
+                             ('inventory.sqlite', "insert into files values (?, ?, '0', '0', '', 32, 'media_small')",
+                              [(p, s) for p, s, _h in rows])):
+            con = sqlite3.connect(job / fn)
+            con.executemany(q, args_)
+            con.commit(); con.close()
+            os.utime(job / fn, (1580000000, 1580000000))
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+
+    def run_copy(self, task, t77):
+        shutil.copy2(COPY_TPL, hb.TASKS / task / 'Копировать.ps1')
+        t77.mkdir(parents=True, exist_ok=True)
+        p = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                            str(hb.TASKS / task / 'Копировать.ps1'), '-TestRoots', f'{SRC}={self.disk};HDD77={t77}'],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180, stdin=subprocess.DEVNULL)
+        logs = sorted((hb.TASKS / task).glob('Журнал копирования *.tsv'))
+        rows = [x.split('\t') for x in logs[-1].read_text(encoding='utf-8-sig').splitlines()[1:] if x.strip()]
+        return p.returncode, {Path(r[5]).name: r for r in rows}, logs[-1]
+
+    def test_second_copy_same_layout_as_first(self):
+        self.first_pass()
+        s = self.second_task(R45 + '\\Поход 2010')
+        task = hb.TASKS / s['name']
+        vol = (task / 'тома.tsv').read_text(encoding='utf-8').splitlines()
+        self.assertEqual(vol[0], f'{SRC}\tAAAA0060\t{R45}')                       # подпапка источника - служебная
+        self.assertEqual(vol[1], 'HDD77\tAAAA0077')
+        meta = json.loads((task / 'разбор.json').read_text(encoding='utf-8'))
+        self.assertEqual((meta['папка'], meta['подпапка источника']), (R45 + '\\Поход 2010', R45))
+        self.assertEqual(meta['зависимые']['HDD77'][0][0], 'Поход 2010\\Монтаж\\clip.mp4')   # дубль - тоже от подпапки
+        # настоящий шаблон 2.4: читает F:\R45\Поход 2010\…, пишет в …\HDD60\Поход 2010\… (на 45 - тот же путь)
+        t77 = self.tmp / 'диск HDD77'
+        code, got, log = self.run_copy(s['name'], t77)
+        self.assertEqual(code, 1)                    # у фото в описи вымышленный SHA-256 - «не совпал», это ожидаемо
+        doc = got['описание.doc']
+        self.assertEqual(doc[2], OK_NOHASH)
+        self.assertEqual(doc[5], str(self.disk / R45 / 'Поход 2010' / 'описание.doc'))
+        self.assertEqual(doc[6], str(t77 / DEST / SRC / 'Поход 2010' / 'описание.doc'))
+        self.assertTrue((t77 / DEST / SRC / 'Поход 2010' / 'описание.doc').exists())
+        self.assertFalse((t77 / DEST / SRC / R45).exists())
+        self.assertTrue(all(r[6].startswith(str(t77 / DEST / SRC / 'Поход 2010') + '\\') for r in got.values()))
+        self.assertTrue(got['2.jpg'][2].startswith('ОШИБКА: SHA-256'))           # копия не оставлена
+        self.assertFalse((t77 / DEST / SRC / 'Поход 2010' / 'Фото' / '2.jpg').exists())
+        log.unlink()                                 # дальше - журнал «всё скопировано» (содержимое - как в описи)
+        # сборка: копия на 77 - по очищенному пути, связь с файлом носителя - по SHA-256
+        self.log_all(s['name'], '2025-07-01 10-00-00')
+        hb.close_last()
+        c = self.db()
+        dst = f'{DEST}\\{SRC}\\Поход 2010\\Фото\\2.jpg'
+        self.assertEqual(c.execute('select sha, ev from files where disk=? and path=?', ('HDD77', dst)).fetchone(),
+                         (S[2], 'C'))                                                          # C - копия по журналу
+        self.assertFalse(c.execute('select 1 from files where disk=? and path like ?', ('HDD77', f'%{R45}%')).fetchone())
+        P = self.plan()                       # «уже есть» на 77 - по SHA-256; без хеша в описи - всегда «копировать»
+        self.assertEqual(self.a(P, rz.O_COPY, self.n77), (1, 10))
+        # переименование в «… 45 и 77» находит подтверждения на обоих дисках
+        text = self.mv(razbor=s['name'], dry=True)
+        self.assertIn(f'«{R4577}»', text)
+        self.assertIn('папкой целиком', text)
+        self.mv(razbor=s['name'])
+        mvt = hb.TASKS / (s['name'] + mv.V3_SUFFIX)
+        rows = [x.split('\t') for x in (mvt / 'перемещение.tsv').read_text(encoding='utf-8').splitlines()]
+        self.assertTrue(rows and all(r[5] == 'копия подтверждена: HDD45, HDD77' or 'мусор' in r[5] for r in rows))
+        code, outp = run_ps(mvt, self.disk)
+        self.assertEqual(code, 0, outp)
+        self.assertTrue((self.disk / R4577 / 'Поход 2010' / 'Фото' / '2.jpg').exists())
+        hb.close_last()
+        c = self.db()                                                             # сборка по шагам: журнал переноса
+        self.assertIn((R4577,), c.execute('select folder from moved_roots where disk=?', (SRC,)).fetchall())
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+        self.assertIn('ИТОГ: совпала', self.printed)                             # сборка по шагам = с нуля
+
+    def test_conflict_and_have_on_clean_path(self):
+        self.first_pass()
+        base = f'{DEST}\\{SRC}\\Поход 2010\\'
+        self.put_scan('HDD77', [(base + 'Фото\\2.jpg', 200, H[41]),             # другой SHA - конфликт
+                                (base + 'Монтаж\\clip.mp4', 600, H[20]),         # тот же SHA - «уже есть»
+                                (f'{DEST}\\{SRC}\\{R45}\\Поход 2010\\описание.doc', 10, H[42])])  # старая раскладка
+        self.mark((R45 + '\\Поход 2010', self.n77))
+        P = self.plan(detail=True)
+        self.assertIn((R45 + '\\Поход 2010\\Фото\\2.jpg', 'HDD77', rz.B_CONFLICT, 200), P.blocked)
+        self.assertEqual(self.a(P, rz.O_HAVE, self.n77), (3, 1300))              # 1.jpg и оба клипа - по SHA-256
+        g = next(k for k in P.groups if k[1] == R45 + '\\Поход 2010')
+        # запись по старой раскладке (…\HDD60\Скопировано на …\…) путь назначения больше не занимает
+        self.assertEqual({r[1] for r in P.rows[(g, 'HDD77')]}, {R45 + '\\Поход 2010\\описание.doc'})
+        self.assertTrue(any('другое подтверждённое содержимое' in x for x in rz.attention_lines(P)))
+        # на диске (в обход базы) по очищенному пути другой файл - шаблон: «КОНФЛИКТ», ничего не перезаписано
+        s = sv.razbor_tasks(SRC, dry=False, only=[self.n77])['specs'][0]
+        t77 = self.tmp / 'диск HDD77'
+        busy = t77 / DEST / SRC / 'Поход 2010' / 'описание.doc'
+        busy.parent.mkdir(parents=True)
+        busy.write_bytes(b'abc')
+        code, got, _log = self.run_copy(s['name'], t77)
+        self.assertEqual(code, 1)
+        self.assertTrue(got['описание.doc'][2].startswith('КОНФЛИКТ'))
+        self.assertEqual(busy.read_bytes(), b'abc')
+        busy.write_bytes(b'z' * 10)                                               # тот же размер - «уже есть»
+        code, got, _log = self.run_copy(s['name'], t77)
+        self.assertEqual((code, got['описание.doc'][2]), (0, 'уже есть'))
+
+    def test_duplicate_outside_copied_folder(self):
+        """Проверка кода, п. 3: дубль (тот же SHA-256) файла из R в обычной папке носителя - другая группа, в
+        «зависимые» задания R не попадает; оба задания составляются (дубли - только внутри группы)."""
+        self.first_pass()
+        self.put_scan(SRC, [('Новое\\clip.mp4', 600, H[20])])
+        self.mark((R45 + '\\Поход 2010', self.n77), ('Новое', self.n77))
+        specs = {s['folder']: s for s in sv.razbor_tasks(SRC, dry=False, only=[self.n77])['specs']}
+        r, n = specs[R45 + '\\Поход 2010'], specs['Новое']
+        self.assertEqual((r['sub'], n['sub']), (R45, ''))
+        self.assertEqual([x[1] for x in n['rows']], ['Новое\\clip.mp4'])
+        self.assertIn('Поход 2010\\Монтаж\\clip копия.mp4', {x[1] for x in r['rows']})
+        self.assertEqual([d[0] for d in r['deps']['HDD77']], ['Поход 2010\\Монтаж\\clip.mp4'])
+        self.assertEqual(n['deps']['HDD77'], [])
+
+    def test_owner_folder_not_cleaned(self):
+        """Папка владельца «Скопировано на …» (журнала перемещения нет) - обычная: путь на диске - с ней."""
+        own = R45 + '\\q.jpg'
+        make_disk(self.scans, 'HDD61', 'AAAA0061', [(own, 10, H[30])])
+        hb.close_last()
+        self.quiet(hb.cmd_rebuild, NS())
+        self.mark(('', self.n77), disk='HDD61')
+        s = sv.razbor_tasks('HDD61', dry=False)['specs'][0]
+        self.assertEqual(([r[1] for r in s['rows']], s['sub']), ([own], ''))
+        self.assertEqual((hb.TASKS / s['name'] / 'тома.tsv').read_text(encoding='utf-8').splitlines()[0], 'HDD61\tAAAA0061')
+        self.assertEqual(json.loads((hb.TASKS / s['name'] / 'разбор.json').read_text(encoding='utf-8'))['подпапка источника'], '')
+
+    def test_twins_blocked(self):
+        """Двойники пути: «корень.jpg» в корне носителя и в корне «Скопировано на …» с разным SHA-256 - оба не
+        копируются; файл «фото.jpg» против папки «Скопировано на …\\фото.jpg»; одинаковый SHA-256 - не двойники."""
+        self.first_pass()
+        self.put_scan(SRC, [(R45 + '\\корень.jpg', 80, H[44]), ('фото.jpg', 60, H[46]), (R45 + '\\фото.jpg\\x.jpg', 70, H[47]),
+                            (R45 + '\\Друзья\\a.jpg', 90, H[22])])               # тот же SHA, что у «Друзья\a.jpg»
+        self.mark((R45, self.n77), ('корень.jpg', self.n77), ('фото.jpg', self.n77), ('Друзья', self.n77))
+        P = self.plan(detail=True)
+        blocked = {(p, w) for p, d, w, _s in P.blocked if d == 'HDD77'}
+        self.assertIn((R45 + '\\корень.jpg', rz.B_TWIN), blocked)
+        self.assertIn(('корень.jpg', rz.B_TWIN), blocked)
+        self.assertIn(('фото.jpg', rz.B_TWIN), blocked)                         # файл против папки - файл
+        self.assertNotIn((R45 + '\\фото.jpg\\x.jpg', rz.B_TWIN), blocked)
+        self.assertNotIn((R45 + '\\Друзья\\a.jpg', rz.B_TWIN), blocked)
+        self.assertTrue(any('один путь назначения' in x for x in rz.attention_lines(P)))
+        rows = {r[1] for k, v in P.rows.items() for r in v}
+        self.assertIn('Друзья\\a.jpg', rows)
+        self.assertNotIn(R45 + '\\корень.jpg', rows)
+        # проверка кода, п. 4: файл без хеша против папки - тоже двойник (блок обязателен)
+        self.put_scan(SRC, [(R45 + '\\корень.txt\\y.jpg', 5, H[48]), (R45 + '\\без хеша.jpg', 7, None),
+                            ('без хеша.jpg', 7, None)])
+        c = self.db()
+        tw = rz._twins(c, SRC, sorted(r[0] for r in c.execute('select folder from folders where disk=?', (SRC,))),
+                       rz_children(c, SRC), {R45, R4577} & {r[0] for r in c.execute('select folder from moved_roots')})
+        self.assertIn('корень.txt', tw)                                          # без хеша против папки
+        self.assertNotIn(R45 + '\\корень.txt\\y.jpg', tw)
+        self.assertTrue({'без хеша.jpg', R45 + '\\без хеша.jpg'} <= tw)          # оба без хеша - двойники
+        # на обычном носителе (без «Скопировано на …») проверка ничего не находит
+        self.assertEqual(rz._twins(None, SRC, ['', 'A'], {'': ['A']}, set()), set())
 
 
 class TemplateSecondPassTest(unittest.TestCase):

@@ -3,21 +3,29 @@
 Предпросмотр по оглавлению диска (файлы не читаются) → подтверждение владельца → сканер отдельным процессом без
 консоли (scanner\\portable.py start --folder …) → ход по файлу хода, «Остановить» - файл остановки → по окончании
 окно применяет новые модули базы и показывает итог приёма. Сканирование начинается ТОЛЬКО по кнопке с подтверждением.
+16.11.2026 (сканер 1.6.0): галочки типов файлов для хеша - те же, что «Что копировать» у направлений; правило - одно
+(hash_types.py -> derived.copy_kind); под галочками - оценка по предпросмотру, сколько прочитать и что останется без хеша.
 """
 import html
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
-                               QTextBrowser, QVBoxLayout)
+from PySide6.QtWidgets import (QCheckBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QProgressBar,
+                               QPushButton, QTextBrowser, QVBoxLayout)
 
+import hash_types
 import service as sv
+from directions_page import CAT_LABELS      # подписи типов - те же, что в «Что копировать»
 
 TITLE = 'Архив дисков'
 
 
 def gb(x):
     return f'{(x or 0) / 1e9:,.1f}'.replace(',', ' ').replace('.', ',')
+
+
+def num(n):
+    return f'{n or 0:,}'.replace(',', ' ')
 
 
 class RescanDialog(QDialog):
@@ -35,16 +43,27 @@ class RescanDialog(QDialog):
         self.rehash = QCheckBox('Перечитать всё (прежние хеши не брать; дольше - для проверки сохранности)')
         self.rehash.toggled.connect(self.preview)
         lay.addWidget(self.rehash)
-        # Сканер с 1.4.0 при пересканировании папок всегда считает хеш у всех обычных файлов; режима «только фото и
-        # видео» нет намеренно: приём такого скана стёр бы подтверждённые хеши документов в этих папках (Дискуссия
-        # 15.11.2026). Галочка показывает это владельцу и передаёт сканеру явный --hash-all-types.
-        self.all_types = QCheckBox('Посчитать хеш у всех файлов (документы, проекты, архивы — для точного ответа '
-                                   '«можно ли удалять»)')
+        # Типы файлов для хеша (сканер 1.6.0). По умолчанию - все (как раньше: хеш у всех файлов, и у программ, и у
+        # служебных). Невыбранный тип не читается: прежний годный хеш сканера берётся, иначе файл остаётся без хеша.
+        lay.addWidget(QLabel('Считать хеш у файлов:'))
+        grid = QGridLayout()
+        self.all_types = QCheckBox('Все типы')
         self.all_types.setChecked(True)
-        self.all_types.setEnabled(False)
-        self.all_types.setToolTip('Всегда включено: при пересканировании папок хеш считается у всех файлов. '
-                                  'Сколько из этого — не фото и не видео, видно в предпросмотре.')
-        lay.addWidget(self.all_types)
+        self.all_types.setToolTip('Хеш у всех файлов папок, как раньше (в том числе у программ, системных и временных) '
+                                  '— для точного ответа «можно ли удалять».')
+        self.all_types.toggled.connect(self.toggle_all)
+        grid.addWidget(self.all_types, 0, 0)
+        self.type_box = {}
+        for i, (cat, text) in enumerate(CAT_LABELS, start=1):
+            b = QCheckBox(text)
+            b.setChecked(True)
+            b.toggled.connect(self.types_changed)
+            self.type_box[cat] = b
+            grid.addWidget(b, i // 4, i % 4)
+        lay.addLayout(grid)
+        self.types_line = QLabel('')
+        self.types_line.setWordWrap(True)
+        lay.addWidget(self.types_line)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.hide()
@@ -79,9 +98,14 @@ class RescanDialog(QDialog):
 
         def plan(disk, folders, rehash):
             try:
-                return 'ok', sv.rescan_plan(disk, folders, rehash)
+                p = sv.rescan_plan(disk, folders, rehash)
             except sv.Refused as e:
                 return 'no', str(e)
+            try:                                  # подтверждённые хеши в базе - для предупреждения о потере
+                p['confirmed'] = sv.rescan_confirmed(disk, p['folders'])
+            except Exception:                     # noqa: BLE001 - база недоступна: без предупреждения, но честно
+                p['confirmed'] = None
+            return 'ok', p
         self.win.bg.run(plan, self.disk, self.folders, self.rehash.isChecked(), ok=self.show_plan)
 
     def show_plan(self, res):
@@ -94,6 +118,49 @@ class RescanDialog(QDialog):
         self.plan_html = '<p><b>Предпросмотр</b></p>' + ''.join(f'<p>{html.escape(x)}</p>' for x in val['lines'])
         self.text.setHtml(self.plan_html)
         self.go.setEnabled(not val['errors'])
+        self.types_changed()
+
+    # --- типы файлов ---
+    def cats(self):
+        return [c for c, b in self.type_box.items() if b.isChecked()]
+
+    def toggle_all(self, on):
+        for b in self.type_box.values():
+            b.blockSignals(True)
+            b.setChecked(on)
+            b.blockSignals(False)
+        self.types_changed()
+
+    def types_changed(self, *_):
+        cats = self.cats()
+        self.all_types.blockSignals(True)
+        self.all_types.setChecked(hash_types.is_all(cats))
+        self.all_types.blockSignals(False)
+        self.est = None
+        if not cats:
+            self.types_line.setText('<span style="color:#c62828">Отметьте хотя бы один тип файлов.</span>')
+            self.go.setEnabled(False)
+            return
+        p = self.plan
+        if not self.running and p is not None:
+            self.go.setEnabled(not p['errors'])
+        if p is None or 'items' not in p:
+            self.types_line.setText('')
+            return
+        rescan = sv._scanner()[0]
+        e = self.est = rescan.by_types(p, hash_types.scanner_rule(cats))
+        text = f'Будет прочитано примерно {num(e["read"][0])} файлов, {gb(e["read"][1])} ГБ.'
+        if e['skip'][0]:
+            text += (f' Без хеша останется {num(e["skip"][0])} файлов ({gb(e["skip"][1])} ГБ) невыбранных типов'
+                     ' — у них нет годного прежнего хеша.')
+            conf = p.get('confirmed')
+            lost = sum(1 for x in e['skip_paths'] if x in conf) if conf else 0
+            if lost:
+                text += (f' <span style="color:#c62828">У {num(lost)} из них в базе сейчас подтверждённый хеш — '
+                         'после приёма скана подтверждение пропадёт.</span>')
+            elif conf is None:
+                text += ' Есть ли у них подтверждённый хеш в базе — проверить не удалось.'
+        self.types_line.setText(text)
 
     # --- запуск, ход, остановка ---
     def start(self, resume=False):
@@ -103,18 +170,41 @@ class RescanDialog(QDialog):
         if resume:
             q = f'Продолжить сканирование {self.disk}? Готовые хеши сохранены, дочитаются остальные файлы.'
         else:
-            nm = p.get('read_nonmedia') or [0, 0]
-            q = (f'Начать сканирование {self.disk} ({p["letter"]})?\n\nПрочитать с диска: {p["read"][0]} файлов, '
-                 f'{gb(p["read"][1])} ГБ (из них не фото и не видео: {nm[0]} файлов, {gb(nm[1])} ГБ). '
-                 f'Хеш из прежней описи: {p["reuse"][0]} файлов.\n\nСканер только читает диск. '
-                 'Остановить можно в любой момент - готовые хеши сохранятся.')
+            cats = self.cats()
+            if not cats:
+                return
+            e = getattr(self, 'est', None)
+            if e:
+                q = (f'Начать сканирование {self.disk} ({p["letter"]})?\n\nХеш считать у: {hash_types.label(cats)}.\n'
+                     f'Прочитать с диска: {num(e["read"][0])} файлов, {gb(e["read"][1])} ГБ. '
+                     f'Хеш из прежней описи: {num(e["reuse"][0])} файлов.'
+                     + (f' Без хеша останется: {num(e["skip"][0])} файлов.' if e['skip'][0] else ''))
+            else:
+                nm = p.get('read_nonmedia') or [0, 0]
+                q = (f'Начать сканирование {self.disk} ({p["letter"]})?\n\nХеш считать у: {hash_types.label(cats)}.\n'
+                     f'Прочитать с диска: {p["read"][0]} файлов, '
+                     f'{gb(p["read"][1])} ГБ (из них не фото и не видео: {nm[0]} файлов, {gb(nm[1])} ГБ). '
+                     f'Хеш из прежней описи: {p["reuse"][0]} файлов.')
+            if not hash_types.is_all(cats):
+                conf = p.get('confirmed')
+                if not e or (e['skip'][0] and conf is None):
+                    q += ('\n\nВНИМАНИЕ: не удалось проверить, сколько подтверждённых хешей пропадёт у файлов '
+                          'невыбранных типов. Продолжить?')
+                elif e['skip'][0]:
+                    lost = sum(1 for x in e['skip_paths'] if x in conf)
+                    if lost:
+                        q += f'\n\nУ {num(lost)} файлов невыбранных типов подтверждение хеша в базе пропадёт.'
+            q +='\n\nСканер только читает диск. Остановить можно в любой момент - готовые хеши сохранятся.'
         if QMessageBox.question(self, TITLE, q) != QMessageBox.Yes:
             return
         letter = p['letter'] if p else ''
         folders = p['folders'] if p else self.folders
-        self.proc = sv.rescan_start(self.disk, letter, folders, self.rehash.isChecked(), job=self.job if resume else None)
+        cats = None if hash_types.is_all(self.cats()) else self.cats()
+        self.proc = sv.rescan_start(self.disk, letter, folders, self.rehash.isChecked(), job=self.job if resume else None,
+                                    cats=cats)
         self.running = True
-        for b in (self.go, self.rehash, self.close_btn):     # all_types всегда неактивна
+        # Типы и «перечитать» после запуска не меняются: продолжение задания идёт по правилу, записанному в задании.
+        for b in (self.go, self.rehash, self.close_btn, self.all_types, *self.type_box.values()):
             b.setEnabled(False)
         self.halt.setEnabled(True)
         self.bar.show()

@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import re
 import sqlite3
 import stat
 import time
@@ -42,6 +43,55 @@ REASONS = {'new': 'новые', 'changed': 'изменились (размер, 
            'nohash': 'в прежней описи без хеша (не фото и не видео, или .m2t/.dv)'}
 BASIS = ('путь, размер, mtime, номер файла NTFS и время создания совпали с прежней описью; запись файла (ChangeTime) '
          'не менялась с момента до прежнего чтения')
+
+
+# ---------- выбор типов файлов для хеша (сканер 1.6.0) ----------
+# Сканер категорий файлов не знает: окно каталога собирает правило из своего «что копировать» (derived.copy_kind) и
+# передаёт его ключами. Правило в job.json (hash_types): 'all' - хеш у всех обычных файлов (как до 1.6.0), или
+# {'mode': 'only'|'skip', 'ext': [...], 'junk_names': [...], 'junk_path_re': '...'}:
+#   only - хеш только у этих расширений; skip - у всех, кроме этих («Другие» - остаток, перечислить его нельзя);
+#   junk_names / junk_path_re - служебные и временные файлы по имени (thumbs.db, «~$*» - начало имени) и по пути (кэш
+#   монтажа): хеш не считается при любом расширении - они не входят ни в один выбираемый тип.
+# Расширение - последнее, нижний регистр, с точкой; без расширения - ''. Пустой файл (0 байт) - «Другие» (как в
+# copy_kind; базе хеш пустого файла не нужен).
+
+def parse_list(text):
+    """'a, b,,c' -> ['a', 'b', 'c'] (нижний регистр, без пробелов по краям)."""
+    return [x.strip().lower() for x in str(text or '').replace(';', ',').split(',') if x.strip()]
+
+
+def parse_ext(text):
+    """'.JPG, jpeg,.Mp4' -> frozenset({'.jpg', '.jpeg', '.mp4'}). Пусто - пустое множество."""
+    return frozenset(x if x.startswith('.') else '.' + x for x in parse_list(text))
+
+
+def ext_of(path):
+    """Последнее расширение имени файла в нижнем регистре ('' - без расширения) - как в derived.copy_kind."""
+    return os.path.splitext(PureWindowsPath(str(path)).name.lower())[1]
+
+
+def hash_rule(manifest):
+    """Правило из job.json: None (все файлы) или dict(mode, ext, names, prefixes, path_re)."""
+    t = (manifest or {}).get('hash_types')
+    if not isinstance(t, dict) or t.get('mode') not in ('only', 'skip'):
+        return None
+    names = [str(n).lower() for n in t.get('junk_names') or []]
+    return dict(mode=t['mode'], ext=frozenset(str(e).lower() for e in t.get('ext') or []),
+                names=frozenset(n for n in names if not n.endswith('*')),
+                prefixes=tuple(n[:-1] for n in names if n.endswith('*') and len(n) > 1),
+                path_re=re.compile(t['junk_path_re'], re.I) if t.get('junk_path_re') else None)
+
+
+def wants_hash(path, rule, size=None):
+    """Считать ли хеш этого файла по выбранным типам (size=None - размер неизвестен, считается ненулевым)."""
+    if not rule:
+        return True
+    if size == 0:
+        return rule['mode'] == 'skip'            # пустой файл - «Другие»: выбраны ли они
+    name = PureWindowsPath(str(path)).name.lower()
+    if name in rule['names'] or (rule['prefixes'] and name.startswith(rule['prefixes'])) or             (rule['path_re'] and rule['path_re'].search(str(path).lower())):
+        return False
+    return (ext_of(name) in rule['ext']) == (rule['mode'] == 'only')
 
 
 def utc_ns(text):
@@ -347,8 +397,11 @@ def plan(root, disk_id, folders, roots, rehash_all=False, filesystem='NTFS', fil
     nonmedia = [0, 0]                    # прочитать придётся и не фото/видео: хеш считается у всех файлов папки
     per_folder = {f: dict(files=0, bytes=0, reuse=0, reuse_bytes=0, read=0, read_bytes=0, gone=0) for f in folders}
     examples = {}
+    items = []                           # (путь, байт, расширение, прежний хеш годится) - для выбора типов в окне
     for p, cur in files.items():
         how, why = decide(cur, prior.get(p), rehash_all, filesystem == 'NTFS', now)
+        items.append((p, cur['size'], ext_of(p),
+                      how == 'reuse' or (rehash_all and decide(cur, prior.get(p), False, filesystem == 'NTFS', now)[0] == 'reuse')))
         if how == 'read' and why == 'new' and len(by_id.get((cur['file_id'], cur['size'], str(cur['mtime_ns'])), [])) == 1:
             why = 'renamed'
         key = 'reuse' if how == 'reuse' else why
@@ -370,9 +423,27 @@ def plan(root, disk_id, folders, roots, rehash_all=False, filesystem='NTFS', fil
     return dict(disk=disk_id, folders=folders, files=len(files), bytes=sum(x['size'] for x in files.values()),
                 reuse=count['reuse'], read=read, read_nonmedia=nonmedia, reasons={k: v for k, v in count.items() if k != 'reuse'},
                 gone=len(gone), gone_examples=sorted(gone)[:5], errors=errors, reparse=reparse, per_folder=per_folder,
-                examples={k: sorted(v)[:5] for k, v in examples.items()}, rehash_all=rehash_all,
+                examples={k: sorted(v)[:5] for k, v in examples.items()}, rehash_all=rehash_all, items=items,
                 sources=[dict(job=s['dir'].name, kind=s['kind'], created=ns_utc(s['created_ns'])) for s in sources],
                 full_record=full['record'], damaged_before=_damaged(full['dir']))
+
+
+def by_types(p, rule):
+    """Оценка по выбранным типам (по предпросмотру plan, файлы не читаются): read - прочитать [файлов, байт];
+    reuse - взять прежний хеш; skip - останутся без хеша (тип не выбран, прежнего годного хеша нет), skip_paths - их пути.
+    То же решение, что у сканера: выбранный тип читается, если прежний хеш не годится (или «перечитать всё»);
+    невыбранный берёт прежний годный хеш даже при «перечитать всё», иначе остаётся без хеша."""
+    res = dict(read=[0, 0], reuse=[0, 0], skip=[0, 0], skip_paths=[])
+    for path, size, ext, ok in p.get('items') or []:
+        if wants_hash(path, rule, size):
+            key = 'read' if p.get('rehash_all') or not ok else 'reuse'
+        else:
+            key = 'reuse' if ok else 'skip'
+            if key == 'skip':
+                res['skip_paths'].append(path)
+        res[key][0] += 1
+        res[key][1] += size
+    return res
 
 
 def _damaged(job):
@@ -432,7 +503,7 @@ def plan_text(p):
         lines.append(f'  - {REASONS.get(k, k)}: {num(n)} ({gb(b)} ГБ)' + (f', например: {ex}' if ex else ''))
     nm = p.get('read_nonmedia') or [0, 0]
     lines.append(f'  из них не фото и не видео (документы, проекты, архивы, прочее): {num(nm[0])} ({gb(nm[1])} ГБ) - '
-                 'хеш считается у всех файлов папки, чтобы ответ «можно ли удалять» был точным.')
+                 'это при хеше у всех типов файлов; хеш у всех файлов папки нужен для точного ответа «можно ли удалять».')
     lines.append(f'Взять хеш из прежней описи (без чтения): {num(p["reuse"][0])} файлов, {gb(p["reuse"][1])} ГБ.')
     lines.append(f'Исчезли с диска (были в прежней описи): {num(p["gone"])}'
                  + (f', например: {"; ".join(p["gone_examples"][:2])}' if p['gone'] else '') + '.')

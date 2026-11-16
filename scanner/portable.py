@@ -28,7 +28,7 @@ VERSION = '1.0.0'
 # Partial (selected folders) jobs have their own format version, so that a program
 # before 1.4.0 refuses to continue them as a full scan of the whole disk.
 VERSION_PARTIAL = '1.1.0'
-APP_VERSION = '1.5.0'
+APP_VERSION = '1.6.0'
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
@@ -704,6 +704,7 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
     was certainly not yet measured (hash_info.bound_ns), also along a chain of reuse."""
     disk_id, folders = manifest['disk_id'], manifest['folders']
     rehash_all = bool(manifest.get('rehash_all'))
+    rule = rescan.hash_rule(manifest)    # 1.6.0: хеш только у выбранных типов (None - у всех, как раньше)
     run_start_ns = time.time_ns()
     inv = job / 'inventory.sqlite'
     if inv.exists():
@@ -723,8 +724,9 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
     with closing(sqlite3.connect(inv)) as db:
         summary = inventory(root, db, check, inventory_progress, folders=folders)
     write_json(job / 'inventory_summary.json', summary)
-    report = {'disk_id': disk_id, 'scan_scope': 'partial', 'folders': folders, 'hash_scope': 'all_regular_files',
-              'hash_types': 'all', 'rehash_all': rehash_all, 'status': 'running', 'inventory_errors': summary['errors'], 'physical': physical,
+    report = {'disk_id': disk_id, 'scan_scope': 'partial', 'folders': folders,
+              'hash_scope': 'selected_types' if rule else 'all_regular_files',
+              'hash_types': manifest.get('hash_types') if rule else 'all', 'rehash_all': rehash_all, 'status': 'running', 'inventory_errors': summary['errors'], 'physical': physical,
               'app_version': APP_VERSION}
     if summary['status'] == 'interrupted':
         report['status'] = 'interrupted' if STOP_FILE and STOP_FILE.exists() else 'error'
@@ -747,7 +749,8 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
     say(f'Опись завершена: {summary["files"]:,} файлов, {summary["bytes"] / 1e9:,.1f} ГБ')
     ntfs = volume(root)[2].upper() == 'NTFS'
     sources = prior_sources(manifest)
-    prior = {} if rehash_all else rescan.prior_map(sources, folders)
+    # При «перечитать всё» с выбором типов прежние хеши нужны невыбранным типам (их не читаем, но и не теряем).
+    prior = {} if rehash_all and not rule else rescan.prior_map(sources, folders)
     with closing(sqlite3.connect(inv.as_uri() + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(job / 'hashes.sqlite')) as target:
         target.execute('create table if not exists hashes(disk_id text,path text,size integer,mtime_ns text,file_id text,sha256 text,status text,error text,primary key(disk_id,path))')
         # How each hash was obtained: read in this job, or reused (from_job, its basis). bound_ns: before this moment
@@ -777,8 +780,12 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                 return dict(size=size, mtime_ns=str(mtime), file_id=o[2], ctime_ns=str(ctime or '0'), sha=o[4],
                             status='verified', job=fj, bound_ns=b, own=True)
             return prior.get(rel)
-        to_read = total - sum(r[1] for r in rows if (lambda c: c and c['sha'] and c['size'] == r[1] and c['mtime_ns'] == str(r[2]))(usable(*r)))
+        def same(r):
+            c = usable(*r)
+            return c and c['sha'] and c['size'] == r[1] and c['mtime_ns'] == str(r[2])
+        to_read = sum(r[1] for r in rows if rescan.wants_hash(r[0], rule, r[1]) and (not same(r) or (rehash_all and not usable(*r).get('own'))))
         cached = reused = hashed = unread = damaged = 0
+        skipped = skipped_bytes = 0      # тип не выбран и прежнего годного хеша нет: файл не читается, строки хеша нет
         reused_bytes = finished = read = unread_bytes = damaged_bytes = device_in_row = 0
         reasons = {}
         bounds = []                      # bound_ns of reused hashes: «measured not earlier than» dates
@@ -796,8 +803,9 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
             remaining = max(0, to_read - newly)
             return {**base_state, 'phase': phase, 'phase_title': title,
                     'percent': round(100 * (finished + count) / total, 2) if total else 100.0,
-                    'bytes_done': finished + count, 'bytes_total': total, 'files_done': cached + reused + hashed + unread,
+                    'bytes_done': finished + count, 'bytes_total': total, 'files_done': cached + reused + hashed + unread + skipped,
                     'files_total': len(rows), 'reused_files': cached + reused, 'new_files': hashed, 'unread_files': unread,
+                    'skipped_files': skipped,
                     'damaged_files': damaged, 'read_bytes': newly, 'to_read_bytes': to_read, 'rate_bytes_per_second': speed,
                     'eta_seconds': round(remaining / speed) if speed else (0 if not remaining else None),
                     'elapsed_seconds': round(now - started), 'errors': summary['errors']}
@@ -822,9 +830,13 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                 check()
                 cand = usable(rel, size, mtime, ctime, file_id)
                 change_ns = None
+                wanted = rescan.wants_hash(rel, rule, size)
+                # «перечитать всё» - только выбранные типы; прочитанное уже в ЭТОМ задании (own) при продолжении
+                # не перечитывается - проверяется тем же правилом доверия
+                again = rehash_all and wanted and not (cand and cand.get('own'))
                 try:
-                    if rehash_all or not cand or not cand['sha'] or not ntfs:
-                        how, why = rescan.decide(None, cand, rehash_all, ntfs)
+                    if again or not cand or not cand['sha'] or not ntfs:
+                        how, why = rescan.decide(None, cand, again, ntfs)
                     else:
                         try:
                             cur = rescan.file_info(path, exclusive=True)   # nobody writes while it is checked
@@ -850,6 +862,13 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                             b = int(cand['bound_ns'])
                             bounds[:] = [min(bounds[0], b), max(bounds[1], b)] if bounds else [b, b]
                         finished += size
+                        progress()
+                        continue
+                    if not wanted:       # тип не выбран: не читаем; строки в hashes нет (это не ошибка чтения)
+                        target.execute('delete from hashes where disk_id=? and path=?', (disk_id, rel))
+                        target.execute('delete from hash_info where path=?', (rel,))
+                        target.commit()
+                        skipped += 1; skipped_bytes += size; finished += size
                         progress()
                         continue
                     if why == 'new' and len(by_id.get((str(file_id), size, str(mtime)), [])) == 1:
@@ -893,9 +912,12 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
             report.update(hashed_files=hashed, cached_files=cached, reused_files=reused, reused_bytes=reused_bytes,
                           newly_read_bytes=read, read_reasons=reasons, gone_files=len(gone), gone_examples=sorted(gone)[:20],
                           unread_files=unread, unread_bytes=unread_bytes, damaged_files=damaged, damaged_bytes=damaged_bytes,
-                          reuse_basis=rescan.BASIS if not rehash_all else 'перечитать всё: прежние хеши не использовались',
+                          skipped_files=skipped, skipped_bytes=skipped_bytes,
+                          reuse_basis=rescan.BASIS if not rehash_all else (
+                              'перечитать всё: у выбранных типов прежние хеши не использовались; у невыбранных - '
+                              + rescan.BASIS if rule else 'перечитать всё: прежние хеши не использовались'),
                           reuse_sources=[{'job': s['dir'].name, 'kind': s['kind'], 'created_utc': rescan.ns_utc(s['created_ns'])}
-                                         for s in sources] if not rehash_all else [],
+                                         for s in sources] if not rehash_all or rule else [],
                           reused_measured_utc=[rescan.ns_utc(b) for b in bounds],
                           filesystem_ntfs=ntfs, seconds=round(time.monotonic() - started, 2), app_version=APP_VERSION)
             write_json(job / 'result.json', report)
@@ -912,7 +934,8 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
             append_run(job, {'event': 'finish', 'run_id': run_id, 'utc': utc(), 'status': report['status'],
                              'hashed_files': hashed, 'cached_files': cached, 'reused_files': reused, 'reused_bytes': reused_bytes,
                              'read_reasons': reasons, 'gone_files': len(gone), 'newly_read_bytes': read,
-                             'unread_files': unread, 'damaged_files': damaged, 'reuse_basis': report['reuse_basis'],
+                             'unread_files': unread, 'damaged_files': damaged, 'skipped_files': skipped,
+                             'reuse_basis': report['reuse_basis'],
                              'reuse_sources': report['reuse_sources'], 'seconds': report['seconds'], 'error': report.get('error', '')})
             why = ', '.join(f'{rescan.REASONS.get(k, k)} {v[0]:,}' for k, v in reasons.items())
             say(rescan.summary_text(report))
@@ -920,6 +943,7 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                 + (f', из прошлого запуска {cached:,}' if cached else '')
                 + f', прочитано {hashed:,} ({read / 1e9:,.2f} ГБ' + (f'; {why}' if why else '') + ')'
                 + f', исчезли {len(gone):,}' + (f', не прочитано {unread:,}' if unread else '')
+                + (f', без хеша (тип не выбран) {skipped:,}' if skipped else '')
                 + (f', из них повреждения носителя {damaged:,}' if damaged else '')
                 + f' · за {duration(time.monotonic() - started)}' + (f' · {report["error"]}' if report.get('error') else ''))
             print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -1043,6 +1067,20 @@ def import_result(folder, destination, refresh=True):
 def source_root(letter):
     return check_letter(letter) + ':\\'
 
+def hash_types_of(args):
+    """'all' (хеш у всех обычных файлов, как до 1.6.0) или {'mode': 'only'|'skip', 'ext': [...]} по ключам
+    --hash-ext / --hash-skip-ext. Список расширений собирает окно каталога из правила «что копировать»."""
+    only, skip = getattr(args, 'hash_ext', None), getattr(args, 'hash_skip_ext', None)
+    if only is None and skip is None:
+        return 'all'
+    mode, text = ('only', only) if only is not None else ('skip', skip)
+    ext = rescan.parse_ext(text)
+    names = rescan.parse_list(getattr(args, 'hash_skip_names', None))
+    path_re = getattr(args, 'hash_skip_path_re', None) or ''
+    if mode == 'skip' and not ext and not names and not path_re:
+        return 'all'                     # пропускать нечего - это все типы
+    return {'mode': mode, 'ext': sorted(ext), 'junk_names': names, 'junk_path_re': path_re}
+
 def start_partial(args, record, output):
     """New job of selected folders: identity checked against the previous full inventory of this disk ID."""
     roots = [p.resolve() for p in args.prior_root] if args.prior_root else \
@@ -1057,7 +1095,8 @@ def start_partial(args, record, output):
         raise RuntimeError(f'Подключён не тот носитель: серийные номера не совпадают с полной описью {args.disk}. '
                            'Ничего не сканировалось.')
     folders = rescan.normalize_folders(source_root(args.letter), args.folder)
-    print(json.dumps({'disk_id': args.disk, 'folders': folders, 'rehash_all': args.rehash_all, **record},
+    types = hash_types_of(args)
+    print(json.dumps({'disk_id': args.disk, 'folders': folders, 'rehash_all': args.rehash_all, 'hash_types': types, **record},
                      ensure_ascii=False, indent=2))
     if not args.yes and input('Check disk ID, device and folders. Type YES to scan: ').strip() != 'YES':
         return 1
@@ -1066,8 +1105,9 @@ def start_partial(args, record, output):
     write_json(job / 'job.json', {'version': VERSION_PARTIAL, 'job_id': job.name, 'disk_id': args.disk,
                 'record': record, 'policy': POLICY, 'created_utc': utc(), 'app_version': APP_VERSION,
                 'identity_at_registration': describe(args.letter),
-                'scan_scope': 'partial', 'hash_scope': 'all_regular_files', 'folders': folders,
-                'rehash_all': bool(args.rehash_all), 'hash_types': 'all', 'hash_all_types_flag': bool(getattr(args, 'hash_all_types', False)),
+                'scan_scope': 'partial', 'hash_scope': 'all_regular_files' if types == 'all' else 'selected_types',
+                'folders': folders, 'rehash_all': bool(args.rehash_all), 'hash_types': types,
+                'hash_all_types_flag': bool(getattr(args, 'hash_all_types', False)),
                 'prior_sources': [{'dir': str(s['dir']), 'kind': s['kind'], 'folders': s['folders'],
                                    'created_ns': s['created_ns']} for s in sources]})
     print('JOB (save this path for resume):', job, flush=True)
@@ -1090,6 +1130,17 @@ def main():
     start.add_argument('--hash-all-types', action='store_true',
                        help='With --folder: SHA-256 of every regular file (documents, projects, archives), not only photo '
                             'and video. This is the rule of folder rescans since 1.4.0; the flag records it explicitly')
+    start.add_argument('--hash-ext', metavar='LIST',
+                       help='With --folder (1.6.0): SHA-256 only of files with these extensions (comma separated, '
+                            'e.g. ".jpg,.mp4"). Others keep a still valid previous hash or stay without hash')
+    start.add_argument('--hash-skip-ext', metavar='LIST',
+                       help='With --folder (1.6.0): SHA-256 of every regular file except these extensions')
+    start.add_argument('--hash-skip-names', metavar='LIST',
+                       help='With --hash-ext/--hash-skip-ext: no SHA-256 for these file names (service and temporary '
+                            'files, e.g. "thumbs.db,~$*"; * at the end - name start)')
+    start.add_argument('--hash-skip-path-re', metavar='REGEX',
+                       help='With --hash-ext/--hash-skip-ext: no SHA-256 for paths matching this regular expression '
+                            '(editing cache), case insensitive')
     start.add_argument('--prior-root', type=Path, action='append',
                        help='Where previous jobs of the disk are (default: the parent of «Повторное сканирование»)')
     resume = sub.add_parser('resume'); resume.add_argument('job', type=Path)
@@ -1128,6 +1179,21 @@ def main():
             parser.error('--rehash-all only with --folder')
         if args.hash_all_types and not args.folder:
             parser.error('--hash-all-types only with --folder (a full scan hashes photo and video only)')
+        chosen = [n for n, v in (('--hash-all-types', args.hash_all_types), ('--hash-ext', args.hash_ext is not None),
+                                 ('--hash-skip-ext', args.hash_skip_ext is not None)) if v]
+        if len(chosen) > 1:
+            parser.error(' and '.join(chosen) + ': choose one')
+        if (args.hash_ext is not None or args.hash_skip_ext is not None) and not args.folder:
+            parser.error('--hash-ext / --hash-skip-ext only with --folder')
+        if args.hash_ext is not None and not rescan.parse_ext(args.hash_ext):
+            parser.error('--hash-ext: empty list of extensions')
+        if (args.hash_skip_names or args.hash_skip_path_re) and args.hash_ext is None and args.hash_skip_ext is None:
+            parser.error('--hash-skip-names / --hash-skip-path-re only with --hash-ext or --hash-skip-ext')
+        if args.hash_skip_path_re:
+            try:
+                re.compile(args.hash_skip_path_re)
+            except re.error as exc:
+                parser.error(f'--hash-skip-path-re: {exc}')
         record = inspect(args.letter, media_kind(args.disk))
         output = args.output.resolve()
         if output.drive.upper() == args.letter.rstrip(':\\').upper() + ':':

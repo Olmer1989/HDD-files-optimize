@@ -786,6 +786,21 @@ def rescan_plan(disk, folders, rehash_all=False):
     return plan
 
 
+def rescan_confirmed(disk, folders):
+    """{путь: степень} файлов носителя в этих папках с подтверждённым хешем в базе (S или C) - для предупреждения
+    окна: у невыбранного типа без годного прежнего хеша сканера подтверждение после приёма скана пропадёт."""
+    c = ro()
+    try:
+        res = {}
+        for f in folders:
+            cond, args = hb.prefix_cond('path', f)
+            res.update(c.execute(f"select path, ev from files where disk=? and ev in (?, ?) and {cond}",
+                                 [disk, hb.EV_SCAN, hb.EV_COPY] + args).fetchall())
+        return res
+    finally:
+        c.close()
+
+
 def rescan_files(disk):
     """Файлы хода и остановки сканирования - в «_БАЗА\\пересканирование»."""
     d = hb.BASE_DIR / 'пересканирование'
@@ -798,8 +813,9 @@ def scanner_python():
     return str(exe.with_name('python.exe')) if exe.name.lower() == 'pythonw.exe' and exe.with_name('python.exe').exists() else str(exe)
 
 
-def rescan_argv(disk, letter, folders, rehash_all=False, job=None):
-    """Командная строка сканера (то же можно запустить вручную в консоли). job - продолжить это задание."""
+def rescan_argv(disk, letter, folders, rehash_all=False, job=None, cats=None):
+    """Командная строка сканера (то же можно запустить вручную в консоли). job - продолжить это задание (выбор типов
+    берётся из задания). cats - типы файлов для хеша (hb.COPY_CATS); None или все - хеш у всех файлов, как раньше."""
     progress, stop, _ = rescan_files(disk)
     argv = [scanner_python(), '-X', 'utf8', '-u', str(SCANNER / 'portable.py'), '--progress-file', str(progress),
             '--stop-file', str(stop)]
@@ -811,10 +827,12 @@ def rescan_argv(disk, letter, folders, rehash_all=False, job=None):
     argv += ['--output', str(Path(bp.SCAN_ROOTS[0]) / hb.PARTIAL_DIR), '--yes']
     for r in bp.SCAN_ROOTS:
         argv += ['--prior-root', str(r)]
-    return argv + ['--hash-all-types'] + (['--rehash-all'] if rehash_all else [])     # хеш у всех файлов - явно
+    import hash_types
+    types = hash_types.scanner_args(hash_types.ALL if cats is None else cats)   # одно правило с «что копировать»
+    return argv + (types or ['--hash-all-types']) + (['--rehash-all'] if rehash_all else [])   # все типы - явно
 
 
-def rescan_start(disk, letter, folders, rehash_all=False, job=None):
+def rescan_start(disk, letter, folders, rehash_all=False, job=None, cats=None):
     """Запуск сканера отдельным процессом без консоли - ТОЛЬКО по кнопке владельца после подтверждения."""
     progress, stop, log = rescan_files(disk)
     for p in (progress, stop):
@@ -823,7 +841,7 @@ def rescan_start(disk, letter, folders, rehash_all=False, job=None):
     out = open(log, 'a' if job else 'w', encoding='utf-8')
     env = os.environ.copy()
     env.update(PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1')
-    proc = subprocess.Popen(rescan_argv(disk, letter, folders, rehash_all, job), cwd=str(SCANNER), env=env,
+    proc = subprocess.Popen(rescan_argv(disk, letter, folders, rehash_all, job, cats), cwd=str(SCANNER), env=env,
                             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     out.close()
@@ -1332,9 +1350,11 @@ def _write_json(path, data):
 def same_task(meta, disk, s):
     """Задание разбора meta уже покрывает spec s: тот же носитель, ключ группы, направление и набор «что копировать»
     (смена набора - новое задание, Дискуссия этапа 5, п. 11), и диск s среди его целей (старое общее задание на 45 и
-    77 покрывает оба)."""
+    77 покрывает оба). Этап 14: и та же подпапка источника - задание второго прохода, составленное до этапа 14 (путь на
+    диске назначения со «Скопировано на …»), подготовленным не считается."""
     return (meta.get('носитель') == disk and meta.get('ключ') == s['key'] and meta.get('направление') == s['num']
-            and meta.get('что копировать') == s['kind'] and set(s['targets']) <= set(meta.get('цели') or []))
+            and meta.get('что копировать') == s['kind'] and set(s['targets']) <= set(meta.get('цели') or [])
+            and (meta.get('подпапка источника') or '') == (s.get('sub') or ''))
 
 
 def _new_have_groups(disk, states):
@@ -1420,7 +1440,9 @@ def razbor_tasks(disk, dry=True, only=None):
                 for r in s['rows']:
                     f.write('\t'.join(map(str, r)) + '\n')
             with io.open(t / 'тома.tsv', 'w', encoding='utf-8', newline='\n') as f:
-                f.write(f'{disk}\t{s["serials"][disk]}\n')
+                # этап 14: группа в «Скопировано на …» - третья колонка источника (подпапка, шаблон 2.2+): на диске
+                # назначения файл ляжет без служебной папки, как при первом проходе
+                f.write(f'{disk}\t{s["serials"][disk]}' + (f'\t{s["sub"]}' if s.get('sub') else '') + '\n')
                 for d in s['targets']:
                     f.write(f'{d}\t{s["serials"][d]}\n')
             for name in ('Копировать.ps1', 'Запустить.cmd'):
@@ -1428,7 +1450,7 @@ def razbor_tasks(disk, dry=True, only=None):
             _write_json(t / 'разбор.json', {
                 'носитель': disk, 'ключ': s['key'], 'папка': s['folder'], 'направление': s['num'],
                 'имя направления': s['direction'], 'обязательные диски': s['disks'], 'цели': s['targets'],
-                'группа': s['group'],
+                'группа': s['group'], 'подпапка источника': s.get('sub') or '',
                 'что копировать': s['kind'], 'отметка': s['mark'], 'строка отметки': s['mark_row'],
                 'подпись входов': P.info['signature'], 'дата': man['дата'], 'манифест': manifest.name,
                 'перемещать на носителе': not P.info.get('is_target'),

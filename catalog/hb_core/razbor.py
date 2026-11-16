@@ -37,6 +37,7 @@ NONE_ROUTE = Route(R_NONE, None, None, False)
 O_COPY, O_HAVE, O_TYPE, O_NODISK = 'копировать', 'уже есть', 'не подходит по типу', 'диск не назначен'
 O_SKIP, O_UNSET, O_NONE, O_MOVED, O_JUNK = 'не копировать', 'не задано', 'не отмечено', 'перенесено', 'мусор'
 B_LONG, B_CONFLICT, B_CHECK = 'длинный путь', 'конфликт', 'нужна проверка'
+B_TWIN = 'двойник пути'                # этап 14: у двух файлов носителя один путь назначения
 G_COPY, G_HAVE, G_TYPE, G_NODISK, G_BLOCKED = ('есть что копировать', 'все подходящие уже есть на всех дисках',
                                                'нет подходящих файлов', 'у направления нет диска',
                                                'есть заблокированные')
@@ -120,6 +121,21 @@ def original_of(path, roots):
 def copied_roots(roots):
     """Служебные папки логики v3 («Скопировано на …» из журнала перемещения) - в отличие от старых «ПЕРЕНЕСЕНО → …»."""
     return {r for r in roots if r.startswith(COPIED_PREFIX)}
+
+
+def dest_rel(path, copied):
+    """Путь файла (папки) в месте назначения копирования, от «ПЕРЕНОС с других дисков\\<носитель>» (этап 14): внутри
+    служебной «Скопировано на …» ЭТОГО носителя (copied - только из журнала перемещения, moved_roots) - без неё, как
+    до переноса (раскладка на втором диске та же, что на первом); иначе - сам путь. Сама служебная папка -> ''.
+    «ПЕРЕНЕСЕНО → …» и папка владельца с таким же именем не очищаются."""
+    head, _, tail = (path or '').partition(SEP)
+    return tail if head in copied else path
+
+
+def copied_sub(folder, copied):
+    """Служебная «Скопировано на …», в которой лежит папка группы (подпапка источника задания), или ''."""
+    head = (folder or '').split(SEP, 1)[0]
+    return head if head in copied else ''
 
 
 def mark_path(path, roots):
@@ -304,11 +320,26 @@ def planner(c, disk, dirs, marks, detail=False):
     real_n, real_b, longs = c.execute("select count(*), coalesce(sum(size), 0), group_concat(case when length(path) > ? "
                                       "then path end, char(1)) from files where disk=?", (thr, disk)).fetchone()
     longs = longs.split('\x01') if longs else []
-    long_copy = {p for p in longs if len(p) > copy_thr}
+    # этап 14: путь назначения - без служебной «Скопировано на …» (dest_rel); длина - по нему
+    long_copy = {p for p in longs if len(dest_rel(p, copied)) > copy_thr}
     long_move = {p for p in longs if move_thr is not None and len(p) > move_thr}
     special |= long_copy | long_move
+    twins = _twins(c, disk, folders, children, copied) if copied else set()
+    special |= twins
     occ = collections.defaultdict(dict)                          # путь носителя -> {диск D: (sha, ev) на D}
     blocked_pref = collections.defaultdict(list)                 # диск D -> папки носителя, где на D файл вместо папки
+
+    def sources_of(rel):
+        """Пути носителя, чей путь назначения - rel (этап 14): сам rel (если он не в служебной папке) и rel внутри
+        каждой служебной «Скопировано на …» (только где есть такая папка верхнего уровня - для скорости)."""
+        top = rel.split(SEP, 1)[0]
+        res = [] if top in copied else [rel]
+        for r in copied:
+            # файл прямо в корне R (rel без папок) - если R есть; иначе - если есть R\<первая папка rel>
+            if (SEP not in rel and r.lower() in folder_lc) or (r + SEP + top).lower() in folder_lc:
+                res.append(r + SEP + rel)
+        return res
+
     for d in used:
         if d == disk:
             continue
@@ -321,13 +352,15 @@ def planner(c, disk, dirs, marks, detail=False):
         P.dest_exists[d] = len(on_d)
         if not on_d:
             continue
-        hit = _probe_all(c, disk, list(on_d))
+        srcs = {rel: sources_of(rel) for rel in on_d} if copied else {rel: [rel] for rel in on_d}
+        hit = _probe_all(c, disk, [s_ for v in srcs.values() for s_ in v])
         for rel, v in on_d.items():
-            if rel in hit:
-                occ[rel][d] = v
-                special.add(rel)
-            elif rel.lower() in folder_lc:
-                blocked_pref[d].append(rel.lower())
+            files_ = [s_ for s_ in srcs[rel] if s_ in hit]
+            for s_ in files_:
+                occ[s_][d] = v
+                special.add(s_)
+            if not files_:
+                blocked_pref[d] += [s_.lower() for s_ in srcs[rel] if s_.lower() in folder_lc]
 
     # ---------- файлы с хешем (поштучно) ----------
     hashed = []                                                  # (путь, размер, sha, тип, маска)
@@ -432,6 +465,8 @@ def planner(c, disk, dirs, marks, detail=False):
     def block_reason(path, d, sha):
         if path in long_copy:
             return B_LONG
+        if path in twins:
+            return B_TWIN
         o = occ.get(path, {}).get(d)
         if o:
             dsha, dev = o
@@ -639,10 +674,47 @@ def planner(c, disk, dirs, marks, detail=False):
         P.errors.append(f'сумма итога ({a_n} файлов, {a_b} байт) / folders ({tot[0]}, {tot[1]}) / files '
                         f'({real[0]}, {real[1]}) не сходятся')
     st = c.execute('select status, scanned, label from disks where disk=?', (disk,)).fetchone() or ('?', None, '')
-    P.info.update(status=st[0], scanned=st[1], label=st[2], roots=sorted(roots),
+    P.info.update(status=st[0], scanned=st[1], label=st[2], roots=sorted(roots), copied=sorted(copied),
                   issues=c.execute('select count(*) from issues where disk=?', (disk,)).fetchone()[0],
                   is_target=[n for n, d in dirs.items() if disk in d.disks])
     return P
+
+
+def _twins(c, disk, folders, children, copied):
+    """Двойники пути (этап 14): файлы носителя, у которых путь назначения (dest_rel) совпадает с путём назначения
+    другого файла или папки носителя: «Поход 2010\\x» и «Скопировано на A\\Поход 2010\\x», один остаток в двух служебных
+    папках, файл против папки. Ищутся только среди прямых детей папок с одинаковым путём назначения (корень носителя
+    и сами служебные папки - одна такая группа). Два файла с одним известным SHA-256 - не двойники (на цели будет «уже
+    есть»); иначе - оба (файл против папки - файл) не копируются. -> {путь файла}."""
+    by_dest = collections.defaultdict(list)
+    for f in folders:
+        by_dest[dest_rel(f, copied).lower()].append(f)
+    res = set()
+    for group in by_dest.values():
+        if len(group) < 2:
+            continue
+        names = collections.defaultdict(list)                    # имя -> [(путь, sha, папка?)]
+        for f in group:
+            for ch in children.get(f, ()):
+                if ch not in copied:
+                    names[ch.rsplit(SEP, 1)[-1].lower()].append((ch, None, True))
+            if f:
+                cond, args = inside_cond('path', f)
+                q, cut = f'select path, sha from files where disk=? and {cond} and instr(substr(path, ?), ?) = 0', len(f) + 2
+                rows = c.execute(q, [disk] + args + [cut, SEP])
+            else:
+                rows = c.execute('select path, sha from files where disk=? and instr(path, ?) = 0', (disk, SEP))
+            for p, sha in rows:
+                names[p.rsplit(SEP, 1)[-1].lower()].append((p, sha, False))
+        for lst in names.values():
+            files_ = [x for x in lst if not x[2]]
+            if len(lst) < 2 or not files_:
+                continue
+            shas = {x[1] for x in files_}
+            if len(files_) == len(lst) and len(shas) == 1 and None not in shas:
+                continue
+            res |= {x[0] for x in files_}
+    return res
 
 
 def _probe_all(c, disk, paths_):
@@ -733,7 +805,9 @@ def attention_lines(P):
         hint = {B_LONG: f'путь назначения длиннее {MAX_PATH} символов - не копируются',
                 B_CONFLICT: 'на месте назначения другое подтверждённое содержимое (или файл вместо папки) - не '
                             'копируются; решите вручную на диске',
-                B_CHECK: 'путь назначения занят неподтверждённой записью - пересканируйте эту папку на диске'}[w]
+                B_CHECK: 'путь назначения занят неподтверждённой записью - пересканируйте эту папку на диске',
+                B_TWIN: 'у двух файлов носителя один путь назначения (тот же путь в «Скопировано на …» и вне её, '
+                        'содержимое разное или без хеша) - не копируются; решите вручную на носителе'}[w]
         L.append(f'{d}: {_n(n)} файлов - {hint}.')
     if P.move_long[0]:
         L.append(f'После переноса на носителе путь станет длиннее {MAX_PATH} у {_n(P.move_long[0])} файлов: '
@@ -767,13 +841,17 @@ def task_specs(P, serials):
     """Задания по группам: одна группа (решающая отметка + папка) и её направление, и ОДИН диск назначения (этап 5:
     у «Семейного архива» - отдельное задание на 45 и на 77; что недостающее - своё для каждого диска). Имя у
     направления с несколькими дисками - «… — на 45». Обязательные диски задания - все диски направления (перемещение
-    требует копий на всех). -> [dict], по группе, затем по диску."""
+    требует копий на всех). Этап 14: группа внутри служебной «Скопировано на …» (только из журнала перемещения) -
+    sub = эта папка (подпапка источника в тома.tsv), пути строк и дублей - от неё: на диске назначения файл ляжет
+    без «Скопировано на …», как при первом проходе. -> [dict], по группе, затем по диску."""
     specs, used = [], set()
+    copied = set(P.info.get('copied') or ())
     for gk, g in sorted(P.groups.items(), key=lambda kv: (kv[1]['num'] or '', str(kv[1]['folder']))):
         targets = [d for d in g['disks'] if d != P.disk and P.rows.get((gk, d))]
         if not targets:
             continue
         group = safe_name(f'{P.disk} — {group_title(g)[:60]} — {g["direction"]}')
+        sub = copied_sub(g['folder'], copied)
         for d in targets:
             base = group + (f' — на {disk_word(d)}' if len(g['disks']) > 1 else '')
             name, i = base, 2
@@ -781,12 +859,24 @@ def task_specs(P, serials):
                 name, i = f'{base} ({i})', i + 1
             used.add(name.lower())
             rows = sorted(set(P.rows[(gk, d)]), key=lambda r: (r[0], r[1]))
+            deps = P.deps.get((gk, d), [])
+            if sub:                                      # этап 14: пути - от подпапки источника (служебной папки)
+                rows = [(r[0], _cut(r[1], sub)) + tuple(r[2:]) for r in rows]
+                deps = [(_cut(x[0], sub), x[1], _cut(x[2], sub)) for x in deps]
             specs.append(dict(name=name, group=group, key=[g['row'], g['folder']], folder=g['folder'], num=g['num'],
                               direction=g['direction'], disks=list(g['disks']), targets=[d], kind=g['kind'],
-                              mark=g['mark'], mark_row=g['row'], rows=rows, deps={d: P.deps.get((gk, d), [])},
+                              mark=g['mark'], mark_row=g['row'], rows=rows, deps={d: deps}, sub=sub,
                               files=len(rows), bytes=sum(r[2] for r in rows),
                               serials={x: serials.get(x, 'НЕТ_СЕРИЙНОГО_НОМЕРА') for x in (P.disk, d)}))
     return specs
+
+
+def _cut(path, sub):
+    """Путь носителя внутри подпапки источника sub -> путь от неё. Группа второго прохода целиком лежит в своей
+    служебной папке (отметки внутри неё действуют только там); иначе задание составлять нельзя."""
+    if not path.startswith(sub + SEP):
+        raise ValueError(f'«{path}» не внутри «{sub}»: задание второго прохода не составляется')
+    return path[len(sub) + 1:]
 
 
 def group_states(P):
