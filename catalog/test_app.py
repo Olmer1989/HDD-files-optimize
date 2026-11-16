@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication                 # noqa: E402
 
 import app                                                 # noqa: E402
 import commands_page as cpg                                # noqa: E402
+import disk_ui                                             # noqa: E402
 import hashbase as hb                                      # noqa: E402
 from test_hashbase import Base                             # noqa: E402
 
@@ -176,6 +177,43 @@ def put(f, **values):
             fld.edit.setPlainText(v)
         else:
             fld.line.setText(v)
+
+
+class StepsTest(WindowTest):
+    """Этап 11: шаги работы вверху «Обзора», «Разбора носителя» и «Заданий на копирование»; щелчок - своя вкладка."""
+
+    def test_steps_on_three_pages(self):
+        from PySide6.QtTest import QTest
+        import ui_common
+        names = ['Обзор', 'Разбор носителя', disk_ui.TASKS_PAGE]
+        for i, name in enumerate(names):
+            bar = self.w.page(name).steps
+            self.assertIsInstance(bar, ui_common.StepsBar)
+            self.assertEqual(bar.current, i)
+            self.assertEqual([p.current for p in bar.plates], [j == i for j in range(3)])
+        texts = [p.label.text() for p in self.w.page('Обзор').steps.plates]
+        self.assertIn('1. Куда копируем', texts[0])
+        self.assertIn('выберите диск', texts[0])
+        self.assertIn('2. Что копируем', texts[1])
+        self.assertIn('папки на носителе', texts[1])
+        self.assertIn('3. Копирование', texts[2])
+        self.assertIn('запуск заданий', texts[2])
+        for name in ('Диски и папки', 'Я сделал в Проводнике', 'Команды'):        # на других вкладках шагов нет
+            self.assertEqual(self.w.page(name).findChildren(ui_common.StepsBar), [])
+        names_all = [n for n, _ in self.w.pages]
+        self.w.resize(1400, 900)
+        self.w.show()
+        QAPP.processEvents()
+        ov = self.w.page('Обзор')
+        QTest.mouseClick(ov.steps.plates[1].label, Qt.LeftButton)               # щелчок мышью по тексту плашки
+        self.assertEqual(self.w.nav.currentRow(), names_all.index('Разбор носителя'))
+        QTest.mouseClick(self.w.page('Разбор носителя').steps.plates[2], Qt.LeftButton)   # по самой плашке
+        self.assertEqual(self.w.nav.currentRow(), names_all.index(disk_ui.TASKS_PAGE))
+        self.w.page(disk_ui.TASKS_PAGE).steps.open(2)                            # текущий шаг - ничего
+        self.assertEqual(self.w.nav.currentRow(), names_all.index(disk_ui.TASKS_PAGE))
+        self.w.page(disk_ui.TASKS_PAGE).steps.open(0)
+        self.assertEqual(self.w.nav.currentRow(), 0)
+        QThreadPool.globalInstance().waitForDone(10000)
 
 
 class CommandsTest(WindowTest):

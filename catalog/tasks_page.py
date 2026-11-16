@@ -26,6 +26,7 @@ from pathlib import Path
 
 import build_pilot as bp
 import commands_page as cpg
+from ui_common import StepsBar
 import service as sv
 from hb_core import api as hb
 
@@ -792,6 +793,8 @@ class TasksPage(QWidget):
         self.refresh_btn.clicked.connect(self.refresh)
         top.addWidget(self.refresh_btn)
         lay.addLayout(top)
+        self.steps = StepsBar(win, 2)                     # шаги работы: «3. Копирование» (этап 11)
+        lay.addWidget(self.steps)
         self.chips_lay = QHBoxLayout()
         self.chips = []
         lay.addLayout(self.chips_lay)

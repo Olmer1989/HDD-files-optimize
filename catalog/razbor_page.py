@@ -62,6 +62,7 @@ from hb_core.consts import CAT_OF_TYPE, N_TYPES
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
 import directions_page
 import disk_ui
+from ui_common import StepsBar
 import service as sv
 
 TITLE = 'Архив дисков'
@@ -1159,6 +1160,8 @@ class RazborPage(QWidget):
         b.clicked.connect(self.refresh)
         head.addWidget(b, 0, Qt.AlignTop)
         lay.addLayout(head)
+        self.steps = StepsBar(win, 1)                     # шаги работы: «2. Что копируем» (этап 11)
+        lay.addWidget(self.steps)
         self.choice_line = self.where                     # прежнее имя (этап 5)
         # 2. форма: подписи слева столбиком, под полями - строки сведений
         form = QGridLayout()

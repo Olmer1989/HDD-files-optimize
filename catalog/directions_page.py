@@ -13,7 +13,10 @@
 Второй круг замечаний (16.11.2026): «Изменить…» - только карточка (имя, «что собирается», «что копировать»), диски не
 показываются и не меняются; смены диска в окне нет - диск выбирается при создании направления или один раз
 («Назначить диск…») у направления без диска; в таблице диски зелёные, оранжевые - только у отмеченных галочкой.
-Документ - «Логика_v3_разбор_носителя.md», разделы «Этап 4», «Этап 5», «Этап 7».
+Этап 11 (16.11.2026): секция - карточка «Выберите диск, на который будем копировать»; строка направления отмечается
+щелчком целиком; легенда под списком; внизу «Копируем на: …» и «Дальше: выбрать папки на носителе →» (прежняя кнопка
+«Перейти к написанию команды…»).
+Документ - «Логика_v3_разбор_носителя.md», разделы «Этап 4», «Этап 5», «Этап 7», «Этап 11».
 """
 import json
 import os
@@ -42,7 +45,7 @@ NEAR_TIP = ('«Рядом» — в той же папке или в её под�
             'направление (подпапки с другой отметкой и корень носителя не считаются).')
 NEVER_TEXT = ('Программы, системные и временные файлы (exe, dll, msi, ini, tmp, Thumbs.db и т. п.) не копируются никогда. '
               '«Все файлы» — все, кроме них.')
-GO_TEXT = 'Перейти к написанию команды на копирование →'
+GO_TEXT = 'Дальше: выбрать папки на носителе →'
 HEADERS = ('Пишем команды', 'Направление', 'Что собирается на дисках', 'Диски', 'Свободно', 'Что копировать',
            'Папка на носителе после переноса')
 ON, OFF = '#1b5e20', '#8a8a8a'
@@ -242,6 +245,11 @@ class DirectionCard(QFrame):
         self.box.setToolTip('Отметить: для этого направления пишем команды копирования' if d.disks else
                             'Сначала назначьте направлению диск («Назначить диск»)')
         lay.addWidget(self.box, 0, Qt.AlignTop)
+        if d.disks:
+            self.setCursor(Qt.PointingHandCursor)
+            self.setToolTip('Щелчок по строке — отметить или снять направление.')
+        else:
+            self.setToolTip('Сначала назначьте направлению диск («Назначить диск»).')
         mid = QVBoxLayout()
         mid.setSpacing(4)
         self.name = QLabel(f'<b>{html_esc(d.num)} {html_esc(d.name)}</b>')
@@ -294,6 +302,14 @@ class DirectionCard(QFrame):
         self.btn.clicked.connect(lambda: section.edit(self.num) if self.d.disks else section.assign(self.num))
         lay.addWidget(self.btn, 0, Qt.AlignTop)
 
+    def mousePressEvent(self, e):                              # noqa: N802
+        """Щелчок по строке целиком (надписи без ссылок пропускают щелчок сюда; кнопка забирает его себе) - галочка."""
+        if e.button() == Qt.LeftButton and self.box.isEnabled():
+            self.box.toggle()
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
     def paint(self, writing):
         """Отмеченная - светло-зелёный фон; диски - оранжевым у отмеченной, зелёным у остальных."""
         self.writing = writing
@@ -307,43 +323,92 @@ class DirectionCard(QFrame):
             self.disks.setText('<br>'.join(disk_row_html(x, data['by'], data['free'], writing) for x in self.d.disks))
 
 
-class DirectionsSection(QWidget):
+TITLE_TEXT = 'Выберите диск, на который будем копировать'
+SUB_TEXT = ('Отметьте галочкой одно или несколько направлений. У каждого направления свой диск: туда попадут файлы '
+            'с носителя.')
+NONE_TEXT = 'Диск не выбран'
+SECTION_CSS = 'QFrame#dirsection { background:#fbfcfd; border:1px solid #c5ced8; border-radius:8px; }'
+
+
+def legend_html():
+    """Легенда цветов одной строкой под списком направлений."""
+    bg, fg, _ = OFF_BADGE
+    return (f'<b style="color:{disk_ui.ASSIGNED_ON}">оранжевый</b> — выбран для копирования &nbsp;·&nbsp; '
+            f'<b style="color:{disk_ui.DIR_ON}">зелёный</b> — не выбран &nbsp;·&nbsp; '
+            f'<span style="background:{bg}; color:{fg}">&nbsp;не подключён&nbsp;</span> — подключите перед копированием')
+
+
+class DirectionsSection(QFrame):
+    """Карточка «Выберите диск, на который будем копировать» (этап 11, 16.11.2026): заголовок и пояснение, справа
+    мелкая «+ Добавить направление…»; строки-карточки направлений (щелчок по строке - галочка); легенда цветов под
+    списком; внизу «Копируем на: …» / «Диск не выбран» и «Дальше: выбрать папки на носителе →»."""
+
     def __init__(self, win):
         super().__init__()
         self.win, self.data, self.filling, self.note = win, None, False, ''
         self.cards = {}                    # номер направления -> DirectionCard
         self.on_choice = None              # «Обзор»: перерисовать нижнюю таблицу дисков (щелчок галочки, перечитывание)
         self.on_saved = None               # «Обзор»: после сохранения в диалоге перечитать всё
+        self.setObjectName('dirsection')
+        self.setStyleSheet(SECTION_CSS)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        head = QLabel('<b>Направления</b> — куда собираются файлы с носителей: у каждого направления свои диски. '
-                      'Галочкой отметьте направления, для которых сейчас пишем команды копирования.')
-        head.setWordWrap(True)
-        lay.addWidget(head)
-        legend = QLabel(f'Диски: <b style="color:{disk_ui.ASSIGNED_ON}">оранжевый</b> — у отмеченного направления '
-                        f'(для него пишем команды), <b style="color:{disk_ui.DIR_ON}">зелёный</b> — у остальных; '
-                        f'<span style="color:{disk_ui.DIR_OFF}">бледный</span> — не подключён.')
-        legend.setStyleSheet('color:#555')
-        legend.setWordWrap(True)
-        lay.addWidget(legend)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(6)
+        top = QHBoxLayout()
+        self.title = QLabel(TITLE_TEXT)
+        f = self.title.font()
+        f.setPointSizeF(f.pointSizeF() + 5)
+        f.setBold(True)
+        self.title.setFont(f)
+        self.title.setWordWrap(True)
+        self.title.setStyleSheet('color:#1f2933; background:transparent; border:none')
+        top.addWidget(self.title, 1)
+        self.b_add = QPushButton('+ Добавить направление…')
+        self.b_add.setToolTip('Новое направление: имя, что собирается, что копировать и диск.')
+        self.b_add.setStyleSheet('QPushButton { font-size:8pt; color:#37474f; padding:2px 8px; }')
+        self.b_add.clicked.connect(self.add)
+        top.addWidget(self.b_add, 0, Qt.AlignTop)
+        lay.addLayout(top)
+        self.sub = QLabel(SUB_TEXT)
+        self.sub.setWordWrap(True)
+        self.sub.setStyleSheet('color:#455a64; background:transparent; border:none')
+        lay.addWidget(self.sub)
+        lay.addSpacing(4)
         self.list = QVBoxLayout()
         self.list.setSpacing(6)
         lay.addLayout(self.list)
-        bar = QHBoxLayout()
-        self.b_add = QPushButton('Добавить направление…')
-        self.b_add.clicked.connect(self.add)
-        bar.addWidget(self.b_add, 0, Qt.AlignTop)
-        bar.addSpacing(16)
-        self.hint = QLabel('')
+        self.legend = QLabel(legend_html())
+        self.legend.setTextFormat(Qt.RichText)
+        self.legend.setWordWrap(True)
+        self.legend.setStyleSheet('color:#555; font-size:9pt; background:transparent; border:none')
+        lay.addWidget(self.legend)
+        self.hint = QLabel('')                 # «Сохранено: …» после диалога; пусто - скрыта
         self.hint.setWordWrap(True)
-        self.hint.setStyleSheet('color:#555')
-        bar.addWidget(self.hint, 1)
+        self.hint.setStyleSheet('color:#555; background:transparent; border:none')
+        self.hint.setVisible(False)
+        lay.addWidget(self.hint)
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet('color:#d0d7de; background:#d0d7de; border:none; max-height:1px')
+        lay.addWidget(line)
+        bar = QHBoxLayout()
+        self.target = QLabel('')
+        self.target.setTextFormat(Qt.RichText)
+        self.target.setWordWrap(True)
+        self.target.setStyleSheet('background:transparent; border:none')
+        f = self.target.font()
+        f.setPointSizeF(f.pointSizeF() + 1)
+        self.target.setFont(f)
+        bar.addWidget(self.target, 1)
         self.b_go = QPushButton(GO_TEXT)
         f = self.b_go.font()
         f.setBold(True)
+        f.setPointSizeF(f.pointSizeF() + 1)
         self.b_go.setFont(f)
+        self.b_go.setMinimumHeight(32)
+        self.b_go.setStyleSheet('QPushButton { padding:4px 14px; }')
         self.b_go.clicked.connect(self.go)
-        bar.addWidget(self.b_go, 0, Qt.AlignTop)
+        bar.addWidget(self.b_go, 0, Qt.AlignVCenter)
         lay.addLayout(bar)
         self.update_buttons()
 
@@ -411,21 +476,18 @@ class DirectionsSection(QWidget):
             self.b_go.setToolTip('Экран «Разбор носителя» ещё не готов.')
         elif not nums:
             self.b_go.setEnabled(False)
-            self.b_go.setToolTip('Отметьте галочкой хотя бы одно направление.')
+            self.b_go.setToolTip('Сначала отметьте галочкой хотя бы одно направление.')
         else:
             self.b_go.setEnabled(True)
-            self.b_go.setToolTip('Откроется экран «Разбор носителя» для отмеченных направлений.')
-        if self.data:
-            dirs = self.data['dirs']
-            if nums:
-                text = 'Пишем команды для: <b>' + html_esc('; '.join(dirs[n].label() for n in nums if n in dirs)) + '</b>'
-            else:
-                text = 'Галочки не стоят: отметьте направления, для которых пишем команды копирования.'
-            if not self.has_razbor():
-                text += ' Экран «Разбор носителя» ещё не готов — кнопка перехода неактивна.'
-            if self.note:
-                text = html_esc(self.note) + '<br>' + text
-            self.hint.setText(text)
+            self.b_go.setToolTip('Откроется «Разбор носителя»: там отмечают папки, которые копировать.')
+        dirs = self.data['dirs'] if self.data else {}
+        names = [dirs[n].name for n in nums if n in dirs]
+        if names:
+            self.target.setText(f'<b style="color:{ON}">Копируем на: {html_esc(", ".join(names))}</b>')
+        else:
+            self.target.setText(f'<span style="color:{OFF}">{NONE_TEXT}</span>')
+        self.hint.setText(html_esc(self.note) if self.note else '')
+        self.hint.setVisible(bool(self.note))
 
     def go(self):
         nums = self.checked()

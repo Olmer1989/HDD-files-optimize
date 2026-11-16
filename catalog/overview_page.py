@@ -246,6 +246,8 @@ class OverviewPage(QWidget):
         top.addStretch()
         top.addWidget(self.btn)
         lay.addLayout(top)
+        self.steps = StepsBar(win, 0)                     # шаги работы: «1. Куда копируем» (этап 11)
+        lay.addWidget(self.steps)
         self.dirs = __import__('directions_page').DirectionsSection(win)     # «Направления» (логика v3, этап 4)
         self.dirs.on_choice = self.paint_disks
         self.dirs.on_saved = self.load

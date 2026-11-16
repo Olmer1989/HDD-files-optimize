@@ -224,6 +224,73 @@ class SectionTest(DirBase):
         dp.choice_path().write_text('не json', encoding='utf-8')
         self.assertEqual(dp.load_choice(), [])
 
+    def test_card_head_row_click_target_and_next(self):
+        """Этап 11: карточка «Выберите диск…»; щелчок по строке целиком ставит галочку; «Копируем на» / «Диск не
+        выбран»; «Дальше» неактивна без выбора и открывает «Разбор носителя»."""
+        from PySide6.QtTest import QTest
+        s = self.section()
+        self.assertEqual(s.title.text(), 'Выберите диск, на который будем копировать')
+        self.assertIn('Отметьте галочкой одно или несколько направлений', s.sub.text())
+        self.assertIn('свой диск: туда попадут файлы с носителя', s.sub.text())
+        self.assertIn('выбран для копирования', s.legend.text())
+        self.assertIn('подключите перед копированием', s.legend.text())
+        self.assertEqual(s.b_go.text(), 'Дальше: выбрать папки на носителе →')
+        self.assertIn('Диск не выбран', s.target.text())
+        self.assertNotIn('Копируем на', s.target.text())
+        self.win.pages.append((dp.RAZBOR_PAGE, None))
+        s.update_buttons()
+        self.assertFalse(s.b_go.isEnabled())                                         # ничего не выбрано
+        s.resize(1200, 900)
+        s.show()
+        QAPP.processEvents()
+        c2 = s.cards['Н2']
+        QTest.mouseClick(c2.name, Qt.LeftButton)                                     # щелчок по имени в строке
+        self.assertTrue(c2.box.isChecked())
+        self.assertEqual(dp.load_choice(), ['Н2'])
+        self.assertIn('Копируем на', s.target.text())
+        self.assertIn('Работа', s.target.text())
+        self.assertTrue(s.b_go.isEnabled())
+        QTest.mouseClick(s.cards['Н1'], Qt.LeftButton, pos=s.cards['Н1'].rect().center())   # по пустому месту строки
+        self.assertIn('Семейный архив, Работа', s.target.text())
+        c3 = s.cards['Н3']
+        QTest.mouseClick(c3.name, Qt.LeftButton)                                     # без диска - не отмечается
+        self.assertFalse(c3.box.isChecked())
+        QTest.mouseClick(c2.desc if c2.desc.isVisible() else c2.name, Qt.LeftButton) # повторный щелчок - снять
+        self.assertFalse(c2.box.isChecked())
+        self.assertEqual(dp.load_choice(), ['Н1'])
+        s.b_go.click()
+        self.assertEqual(self.win.opened, [dp.RAZBOR_PAGE])
+        s.set_checked('Н1', False)
+        self.assertIn('Диск не выбран', s.target.text())
+        self.assertFalse(s.b_go.isEnabled())
+
+    def test_row_click_on_child_labels(self):
+        """Настоящий щелчок мышью по дочерним меткам строки (имя, строка дисков с RichText, тег, описание, плашка
+        «На носителе») доходит до строки и переключает галочку."""
+        from PySide6.QtTest import QTest
+        s = self.section()
+        s.resize(1200, 900)
+        s.show()
+        QAPP.processEvents()
+        c1 = s.cards['Н1']
+        tag = next(x for x in c1.findChildren(dp.QLabel) if x.objectName() == 'tag')
+        for w in (c1.name, c1.disks, tag, c1.desc, c1.folder):
+            before = c1.box.isChecked()
+            QTest.mouseClick(w, Qt.LeftButton)
+            self.assertEqual(c1.box.isChecked(), not before, w.text())
+
+    def test_row_click_skips_button(self):
+        """Щелчок по кнопке «Изменить» в строке галочку не ставит (кнопка забирает щелчок себе)."""
+        from PySide6.QtTest import QTest
+        s = self.section()
+        s.resize(1200, 900)
+        s.show()
+        QAPP.processEvents()
+        c2 = s.cards['Н2']
+        c2.btn.clicked.disconnect()                                                  # без модального диалога
+        QTest.mouseClick(c2.btn, Qt.LeftButton)
+        self.assertFalse(c2.box.isChecked())
+
     def test_dialog_saves_at_once(self):
         """Этап 5, п. 2: «Проверить» нет, «Сохранить» активна сразу; новое направление - без переспроса."""
         s = self.section()

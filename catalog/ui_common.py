@@ -96,6 +96,79 @@ def table(headers, stretch=0):
     return t
 
 
+# ---------- шаги работы: «1. Куда копируем · 2. Что копируем · 3. Копирование» (этап 11, 16.11.2026) ----------
+
+# (вкладка окна, жирная часть, пояснение)
+STEPS = (('Обзор', '1. Куда копируем', 'выберите диск'),
+         ('Разбор носителя', '2. Что копируем', 'папки на носителе'),
+         (disk_ui.TASKS_PAGE, '3. Копирование', 'запуск заданий'))
+STEP_NOW = ('#e3f2fd', '#1e88e5', '#0d47a1')       # фон, рамка, текст текущего шага
+STEP_OTHER = ('#f1f3f5', '#d0d7de', '#5f6b76')
+
+
+class StepPlate(QFrame):
+    """Одна плашка шага; щелчок по нетекущей - открыть вкладку шага (win.open_page)."""
+
+    def __init__(self, bar, i):
+        super().__init__()
+        self.bar, self.i = bar, i
+        self.page_name, bold, small = STEPS[i]
+        self.current = i == bar.current
+        self.setObjectName('step')
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 6, 12, 6)
+        self.label = QLabel(f'<b>{bold}</b> — {small}')
+        self.label.setWordWrap(True)
+        self.label.setTextFormat(Qt.RichText)
+        lay.addWidget(self.label)
+        bg, border, fg = STEP_NOW if self.current else STEP_OTHER
+        width = 2 if self.current else 1
+        self.setStyleSheet(f'QFrame#step {{ background:{bg}; border:{width}px solid {border}; border-radius:6px; }}'
+                           f'QFrame#step QLabel {{ color:{fg}; background:transparent; border:none; }}')
+        if self.current:
+            self.setToolTip('Вы здесь')
+        elif self.can_open():
+            self.setCursor(Qt.PointingHandCursor)
+            self.setToolTip(f'Открыть вкладку «{self.page_name}»')
+
+    def can_open(self):
+        return self.page_name in [n for n, _ in getattr(self.bar.win, 'pages', [])]
+
+    def mouseReleaseEvent(self, e):                            # noqa: N802
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.bar.open(self.i)
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def mousePressEvent(self, e):                              # noqa: N802
+        if e.button() == Qt.LeftButton:
+            e.accept()                                         # плашка забирает щелчок - отпускание придёт сюда же
+            return
+        super().mousePressEvent(e)
+
+
+class StepsBar(QWidget):
+    """Шаги работы вверху вкладок «Обзор» (0), «Разбор носителя» (1), «Задания на копирование» (2): три плашки
+    равной ширины; текущая - голубая с рамкой, остальные серые и открывают свою вкладку."""
+
+    def __init__(self, win, current):
+        super().__init__()
+        self.win, self.current = win, current
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 2, 0, 6)
+        lay.setSpacing(8)
+        self.plates = [StepPlate(self, i) for i in range(len(STEPS))]
+        for p in self.plates:
+            lay.addWidget(p, 1)
+
+    def open(self, i):
+        """Щелчок по плашке i (тесты зовут напрямую)."""
+        p = self.plates[i]
+        if i != self.current and p.can_open():
+            self.win.open_page(p.page_name)
+
+
 def cell(text, right=False, color=None):
     it = QTableWidgetItem(str(text))
     if right:
