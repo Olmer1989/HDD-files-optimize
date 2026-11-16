@@ -261,7 +261,7 @@ class LayoutTest(PageBase):
         self.assertEqual(rp.carrier_text(rows[2]), 'Путешествия (не подключён) — HDD77 (по журналу '
                                                    'сканирования дисков)')
         self.assertEqual(rp.carrier_text(dict(disk='HDD61', label='ACASIS EC-7352 - 750 ГБ', letter='')),
-                         'HDD61 (не подключён) (по журналу сканирования дисков)')      # метки нет - номер один раз
+                         'Накопитель (не подключён) — HDD61 (по журналу сканирования дисков)')   # метки нет - «Накопитель»
         d1 = sv.directions()['Н1']
         self.assertEqual(rp.dest_text(d1, rows), 'H: Бэкап фото и видео и Путешествия (не подключён) — '
                                                  'Н1 Семейный архив — HDD45 и HDD77 (по журналу сканирования дисков)')

@@ -97,7 +97,7 @@ class DiskUiTest(unittest.TestCase):
         self.assertEqual(disk_ui.disk_place(r), 'I: My Book')
         self.assertEqual(disk_ui.disk_text(r), '● HDD55 — I: — My Book')
         self.assertEqual(disk_ui.disk_text({'disk': 'HDD61', 'label': 'ACASIS EC-7352 - 750 ГБ', 'letter': ''}),
-                         'HDD61 — не подключён')
+                         'HDD61 — Накопитель — не подключён')
         for x in (disk_ui.disk_place(r), disk_ui.disk_text(r)):
             self.assertNotIn('WD', x)
             self.assertNotIn('ТБ', x)
@@ -128,8 +128,8 @@ class DisksPageTest(unittest.TestCase):
     def test_order_and_columns(self):
         self.assertEqual([self.page.t.horizontalHeaderItem(j).text() for j in range(self.page.t.columnCount())],
                          ['Диск', 'Подключён', 'Свободно', 'Файлов', 'ГБ', 'Сканирование'])
-        self.assertEqual(self.col(0), ['F: — Работа - SN850 — HDD09', 'K: — HDD18', 'G: — Flash02', 'HDD01', 'HDD100',
-                                       'Flash01'])                                # буква — метка — HDD, без модели
+        self.assertEqual(self.col(0), ['F: — Работа - SN850 — HDD09', 'K: — Накопитель — HDD18', 'G: — Флешка — Flash02',
+                                       'Накопитель — HDD01', 'Накопитель — HDD100', 'Флешка — Flash01'])                                # буква — метка — HDD, без модели
         self.assertEqual(self.col(1), ['да', 'да', 'да', 'нет', 'нет', 'нет'])
         self.assertEqual(self.col(2)[:4], ['421,0 ГБ', '421,0 ГБ', '421,0 ГБ', '—'])
         self.assertTrue(self.page.t.item(0, 0).font().bold())

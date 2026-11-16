@@ -41,11 +41,17 @@ def disk_name(r):
     parts = [x.strip() for x in (r.get('label') or '').split(' - ') if x.strip()]
     if parts and r.get('disk') and parts[0] == r.get('disk'):
         parts = parts[1:]
-    if len(parts) < 2:
+    name = ''
+    if len(parts) >= 2:
+        name = ' - '.join(parts[2:] if SIZE_RE.match(parts[1]) else parts[1:])
+    return name or kind_word(r.get('disk', ''))
+
+
+def kind_word(disk):
+    """Метки тома нет (16.11.2026, решение владельца): «Флешка» у Flash…, «Накопитель» у остальных (HDD…)."""
+    if not disk:
         return ''
-    if SIZE_RE.match(parts[1]):
-        return ' - '.join(parts[2:])
-    return ' - '.join(parts[1:])
+    return 'Флешка' if str(disk).lower().startswith('flash') else 'Накопитель'
 
 
 disk_title = disk_name          # прежнее имя: все места окна получают подпись без модели

@@ -356,7 +356,7 @@ class CommandsUiTest(CommandsTest):
         self.assertEqual(texts[1], '● HDD91 — E: — Исходники')
         self.assertEqual(texts[2], '')                                        # разделитель
         self.assertEqual(texts[3], 'HDD45 — Бэкап — не подключён')            # модели и объёма нет (16.11)
-        self.assertIn('HDD90 — не подключён', texts)                          # метки тома нет - только номер
+        self.assertIn('HDD90 — Накопитель — не подключён', texts)             # метки тома нет - «Накопитель» и номер
         self.assertTrue(combo.itemData(1, Qt.FontRole).bold())
         self.assertEqual(combo.currentIndex(), -1)
         self.assertEqual(combo.placeholderText(), cpg.CHOOSE_DISK)
