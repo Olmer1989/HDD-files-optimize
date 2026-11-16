@@ -200,6 +200,28 @@ class SectionTest(DirBase):
         ov.dirs.refresh()
         self.assertTrue(wait(lambda: len(ov.dirs.cards) == 3))
 
+    def test_copy_numbers_of_two_disks(self):
+        """Этап 12 (вариант А): у направления на двух дисках - две строки дисков «… — HDD45 (копия 1)» и «… — HDD77
+        (копия 2)» по порядку дисков, у каждой - своё «свободно …» или плашка «не подключён»; у одного диска - без
+        «(копия …)»."""
+        by = {'HDD45': dict(disk='HDD45', label='WD20 - 2 ТБ - Бэкап фото и видео', letter='H:'),
+              'HDD77': dict(disk='HDD77', label='WD40 - 4 ТБ - Путешествия 2018–2025', letter='')}
+        h1 = dp.disk_row_html('HDD45', by, {'HDD45': 421.4}, True, 1)
+        self.assertIn('H: Бэкап фото и видео — HDD45 (копия 1)</span>', h1)
+        self.assertIn('· свободно 421 ГБ', h1)
+        self.assertNotIn('не подключён', h1)
+        h2 = dp.disk_row_html('HDD77', by, {}, True, 2)
+        self.assertIn('Путешествия 2018–2025 — HDD77 (копия 2)</span>', h2)
+        self.assertIn('не подключён', h2)
+        self.assertNotIn('копия', dp.disk_row_html('HDD45', by, {'HDD45': 1.0}, True))
+        s = self.section()
+        lines = s.cards['Н1'].disks.text().split('<br>')
+        self.assertEqual(len(lines), 2)                                              # две отдельные строки
+        self.assertIn('HDD45 (копия 1)', lines[0])
+        self.assertIn('HDD77 (копия 2)', lines[1])
+        self.assertTrue(all('не подключён' in x for x in lines))                     # плашка - у каждого диска своя
+        self.assertNotIn('копия', s.cards['Н2'].disks.text())                        # один диск - без «(копия …)»
+
     def test_checkboxes_choice_and_go(self):
         s = self.section()
         self.assertFalse(s.b_go.isEnabled())

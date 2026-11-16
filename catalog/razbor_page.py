@@ -41,6 +41,13 @@ I: My Book (WD 2 ТБ)»); «Выберите носитель»; «Диск н�
 верх - форма (подписи слева, сведения под полями); режимы - три кнопки, режим выбран всегда; Shift/Ctrl-выделение сразу
 ставит галочки (DragTree.multi -> check_selected); «выбрать все» у строки носителя; в «Все, кроме» - красный; надпись
 «Идёт пересчёт…» внизу слева; ячейки «Остаётся на носителе» нет. Модель и объём диска не показываются (disk_ui.disk_name).
+
+Этап 12 (16.11.2026, раздел «Этап 12»): шаги - в самом верху; под заголовком ячейки - имя направления оранжевым жирным;
+галочка любой выделенной папки (при нескольких выделенных) - у всей группы одним шагом отмены (выделение берётся на
+нажатии мыши, DragTree.press_sel). Направление на нескольких дисках (45 и 77, вариант А владельца: отметка одна) - на
+экране раздельно: заголовок «Диск: Семейный архив — две копии» и строка на каждый диск, короткий пункт «Диска
+назначения», в ячейке - блок с рамкой на каждый диск (Cell.set_blocks, disk_block_html: часть Б ядра для этого диска и
+«уже есть» на нём - Model.have_on_disk). Ядро, отметки и задания не менялись.
 """
 import collections
 import html
@@ -89,7 +96,11 @@ PALETTE = [('#90caf9', '#e3f2fd', '#1e88e5'), ('#a5d6a7', '#e8f5e9', '#43a047'),
            ('#e6ee9c', '#f9fbe7', '#9e9d24'), ('#b39ddb', '#ede7f6', '#5e35b1')]
 SKIP_OWN, SKIP_INH, UNSET_BG = '#bdbdbd', '#eeeeee', '#ffe0b2'
 SHORT_BG, UNKNOWN_BG = '#ffebee', '#fffde7'
+# блок диска в ячейке «Копировать на…» (этап 12): (рамка, фон) по состоянию места на этом диске
+BLOCK_LOOK = {'short': ('#c62828', '#ffebee'), 'unknown': ('#ffb74d', '#fffde7'), 'ok': ('#43a047', '#f1f8e9'),
+              'none': ('#b0bec5', '#fafafa')}
 COUNT_WORDS = {2: 'два задания', 3: 'три задания', 4: 'четыре задания'}
+DISKS_WORDS = {2: 'два диска', 3: 'три диска', 4: 'четыре диска'}
 EXC_BG, EXC_FG = '#ffcdd2', '#b71c1c'                      # «Все, кроме выбранных»: выбранные (не копируются) - красным
 MODE_CSS = ('QPushButton { border:1px solid #b0bec5; border-radius:5px; background:#f5f7fa; padding:4px 10px; } '
             'QPushButton:checked { background:#c8e6c9; border:2px solid #43a047; font-weight:bold; color:#1b5e20; } '
@@ -175,14 +186,33 @@ def dest_places(d, rows):
     return ' и '.join(place(by.get(x), x) for x in d.disks)
 
 
+COPIES_WORDS = {2: 'две копии', 3: 'три копии', 4: 'четыре копии'}
+
+
+def copies_word(n):
+    return COPIES_WORDS.get(n, f'{n} копий')
+
+
+def letters(d, rows):
+    """«H: и S:» - буквы дисков направления; неподключённый - номером («H: и HDD77»)."""
+    by = {r['disk']: r for r in rows}
+    return ' и '.join((by.get(x) or {}).get('letter') or x for x in d.disks)
+
+
 def dest_text(d, rows):
-    """Строка списка «Диск назначения»: «I: My Book — Н3 Фильмы — HDD55 (по журналу сканирования дисков)»."""
+    """Строка списка «Диск назначения»: «I: My Book — Н3 Фильмы — HDD55 (по журналу сканирования дисков)»; у
+    направления с несколькими дисками - коротко «Н1 Семейный архив — H: и S: (две копии)» (этап 12)."""
+    if len(d.disks) > 1:
+        return f'{d.num} {d.name} — {letters(d, rows)} ({copies_word(len(d.disks))})'
     return f'{dest_places(d, rows)} — {d.num} {d.name} — {hdds(d)} ({JOURNAL})'
 
 
 def dest_html(d, rows):
     """То же с именем направления оранжевым (как отмеченные в «Обзоре»)."""
-    return (f'{esc(dest_places(d, rows))} — <span style="color:{ORANGE}"><b>{esc(d.num)} {esc(d.name)}</b></span> — '
+    name = f'<span style="color:{ORANGE}"><b>{esc(d.num)} {esc(d.name)}</b></span>'
+    if len(d.disks) > 1:
+        return f'{name} — {esc(letters(d, rows))} <span style="color:{GRAY}">({copies_word(len(d.disks))})</span>'
+    return (f'{esc(dest_places(d, rows))} — {name} — '
             f'{esc(hdds(d))} <span style="color:{GRAY}">({JOURNAL})</span>')
 
 
@@ -205,6 +235,25 @@ def head_html(d, rows, space=None):
         return (f'<span style="color:{ORANGE}">Диска назначения нет: ни у одного направления не назначен диск.</span> '
                 '<span style="font-size:10pt; font-weight:normal">Назначьте диск в «Обзоре» → «Направления».</span>')
     by = {r['disk']: r for r in rows}
+    if len(d.disks) > 1:
+        # этап 12 (вариант А владельца): диски не сливаются в одну строку - заголовок «Диск: Семейный архив — две
+        # копии», под ним направление и по строке на каждый диск
+        lines = []
+        for x in d.disks:
+            r = by.get(x) or {'disk': x, 'label': '', 'letter': ''}
+            line = f'{esc(disk_ui.disk_place(r))} — {esc(x)}'
+            b = free_of(x, rows, space)
+            if b is not None:
+                line += f' <span style="color:#33691e">· свободно {gb(b)} ГБ</span>'
+            if not r.get('letter'):
+                line += ' ' + OFF_PILL.replace('11pt', '9pt')
+            lines.append(line)
+        sub = (f'<span style="color:{ORANGE}"><b>{esc(d.num)} {esc(d.name)}</b></span> · '
+               f'{COUNT_WORDS.get(len(d.disks), f"{len(d.disks)} заданий")} — по одному на каждый диск '
+               f'<span style="color:{GRAY}">(номера HDD {JOURNAL})</span>')
+        return (f'Диск: {esc(d.name)} — {copies_word(len(d.disks))}<br>'
+                f'<span style="font-size:10pt; font-weight:normal; color:#33691e">{sub}</span><br>'
+                '<span style="font-size:11pt; font-weight:normal; color:#1b5e20">' + '<br>'.join(lines) + '</span>')
     parts = []
     for x in d.disks:
         r = by.get(x) or {'disk': x, 'label': '', 'letter': ''}
@@ -237,6 +286,19 @@ def dest_info_html(d, rows, space=None):
     """Строка под «Диском назначения»: «Свободно 421 ГБ» или «Подключите диск, чтобы проверить свободное место…»."""
     if d is None:
         return ''
+    if len(d.disks) > 1:                                  # этап 12: по строке на каждый диск
+        by = {r['disk']: r for r in rows}
+        out = []
+        for i, x in enumerate(d.disks, 1):
+            b = free_of(x, rows, space)
+            head = f'Копия {i} — {esc(disk_ui.disk_place(by.get(x) or x))} ({esc(x)}): '
+            if b is None:
+                out.append(f'<span style="color:{ORANGE}">{head}подключите диск, чтобы проверить свободное место.</span>')
+            else:
+                out.append(f'<span style="color:{GREEN}">{head}свободно {gb(b)} ГБ</span>')
+        if any(free_of(x, rows, space) is None for x in d.disks):
+            out.append('Отмечать папки можно и без них.')
+        return '<br>'.join(out)
     free, off = [], []
     for x in d.disks:
         b = free_of(x, rows, space)
@@ -479,6 +541,7 @@ class Model:
         self.full_ms = self.ms()
         self.route = self.routes(self.full_ms)
         self.route_saved = self.routes(self.saved_ms)
+        self.have_disk_cache = {}
         self.have_sub = self.have_counts()
 
     def push_undo(self):
@@ -823,6 +886,7 @@ class Model:
     # --- «Уже есть» ---
     def set_have(self, have, disks_):
         self.have, self.have_disks = have, list(disks_)
+        self.have_disk_cache = {}
         self.have_sub = self.have_counts()
 
     def have_counts(self):
@@ -860,6 +924,48 @@ class Model:
                 p[0] += sub[f][0]
                 p[1] += sub[f][1]
         return dict(sub)
+
+    def have_on_disk(self, num_):
+        """«Уже есть на диске» по КАЖДОМУ диску направления num_ (этап 12, 45 и 77 раздельно): файлы с хешем, которые
+        направление копирует (те же папки, типы и «документы рядом», что у колонки «Уже есть» и в ядре), и у которых
+        на этом диске уже есть подтверждённая копия с тем же SHA-256 (razbor_have: маска по дискам). Ядро не менялось:
+        у него «уже есть» - только на всех дисках сразу. -> {диск: (файлов, байт)} или None (ещё не посчитано).
+        Ответ запоминается до правки отметок или нового «Уже есть» (recalc / set_have): ячейка перерисовывается часто.
+        Замер на настоящей базе без кэша: HDD45 (25 тыс. папок) - 0,06 с, HDD09 - 0,03 с."""
+        cache = getattr(self, 'have_disk_cache', None)
+        if cache is None:
+            cache = self.have_disk_cache = {}
+        if num_ not in cache:
+            cache[num_] = self._have_on_disk(num_)
+        return cache[num_]
+
+    def _have_on_disk(self, num_):
+        d = self.dirs.get(num_)
+        if self.have is None or d is None or not d.disks or any(x not in self.have_disks for x in d.disks):
+            return None
+        near = self.docs_near_map()
+        types_all = [k for k, cat in CAT_OF_TYPE.items() if cat in d.cats]
+        types_far = [k for k in types_all if not (CAT_OF_TYPE[k] == hb.CAT_DOC and d.docs_near)]
+        res = {x: [0, 0] for x in d.disks}
+        bits = {x: 1 << self.have_disks.index(x) for x in d.disks}
+        for f, masks in self.have.items():
+            r = self.route.get(f)
+            if r is None or r.state != R_DIR or r.num != num_:
+                continue
+            types = types_all if near.get(f) else types_far
+            full = sum(bits.values())
+            for mask, c in masks.items():
+                if r.moved and mask & full == full:
+                    continue                              # перенесено и есть везде - в «отмечено» не входит (ядро)
+                n = sum(c[k] for k in types)
+                if not n:
+                    continue
+                b = sum(c[N_TYPES + k] for k in types)
+                for x, bit in bits.items():
+                    if mask & bit:
+                        res[x][0] += n
+                        res[x][1] += b
+        return {x: tuple(v) for x, v in res.items()}
 
     # --- предпросмотр записи ---
     def batch(self):
@@ -906,19 +1012,28 @@ class DragTree(QTreeWidget):
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragOnly)
         self.setDefaultDropAction(Qt.CopyAction)
+        self.press_sel = None                             # выделенные папки в момент нажатия мыши (до смены выделения)
 
     def mousePressEvent(self, e):                             # noqa: N802
+        """Выделение запоминается ДО того, как Qt его поменяет: щелчок по галочке невыделенной папки выделяет её на
+        нажатии, а галочка меняется на отпускании - групповое действие решается по выделению до щелчка (этап 12)."""
+        self.press_sel = self.page.selected_folders()
         super().mousePressEvent(e)
         self.multi(e)
 
     def mouseReleaseEvent(self, e):                           # noqa: N802
         """Qt у уже выделенной строки меняет выделение при отпускании - проверяем и здесь."""
-        super().mouseReleaseEvent(e)
-        self.multi(e)
+        try:
+            super().mouseReleaseEvent(e)
+            self.multi(e)
+        finally:
+            self.press_sel = None
 
     def multi(self, e):
-        """Решение владельца 16.11: выделение нескольких папок (Shift/Ctrl-щелчок) СРАЗУ ставит им галочки; лишнюю потом
-        снимают щелчком по её галочке (щелчок по галочке меняет только эту папку)."""
+        """Решение владельца 16.11: выделение нескольких папок (Shift/Ctrl-щелчок) СРАЗУ ставит им галочки; щелчок по
+        галочке любой выделенной ставит и снимает галочки у всей группы (этап 12), невыделенной - только у неё."""
+        if self.indexAt(e.position().toPoint()).column() == C_CHECK:
+            return                                    # щелчок по галочке: группу меняет item_changed (этап 12)
         if e.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier) and len(self.selectedItems()) > 1:
             QTimer.singleShot(0, self.page.check_selected)
 
@@ -951,14 +1066,26 @@ class Cell(QFrame):
         self.title.setFont(f)
         self.title.setWordWrap(True)
         lay.addWidget(self.title)
-        self.sub = QLabel('')
-        self.sub.setStyleSheet(f'color:{GRAY}')
+        self.sub = QLabel('')                             # «Фильмы, HDD55»: имя направления оранжевым жирным (этап 12)
+        self.sub.setTextFormat(Qt.RichText)
+        f2 = QFont()
+        f2.setPointSize(11)
+        self.sub.setFont(f2)
         self.sub.setWordWrap(True)
         lay.addWidget(self.sub)
         self.body = QLabel('')
         self.body.setWordWrap(True)
         self.body.setTextFormat(Qt.RichText)
-        lay.addWidget(self.body, 1)
+        lay.addWidget(self.body)
+        # направление на нескольких дисках: по блоку с рамкой на каждый диск («Копия 1 — H: …», этап 12)
+        self.blocks_box = QWidget()
+        self.blocks_lay = QVBoxLayout(self.blocks_box)
+        self.blocks_lay.setContentsMargins(0, 4, 0, 0)
+        self.blocks_lay.setSpacing(8)
+        self.blocks = []                                  # [[диск, QFrame, QLabel, состояние]]
+        self.blocks_box.hide()
+        lay.addWidget(self.blocks_box)
+        lay.addStretch(1)
         self.btn = None
         if drop:
             self.btn = QPushButton('Подготовить задания…')
@@ -969,6 +1096,39 @@ class Cell(QFrame):
     def paint(self, border, bg, state='normal'):
         self.state = state
         self.setStyleSheet(f'Cell {{ border: 2px solid {border}; border-radius: 6px; background: {bg}; }}')
+
+    def set_blocks(self, items):
+        """Блоки дисков: items = [(диск, html, состояние)]; пусто - блоков нет (направление на один диск)."""
+        if [x for x, _, _ in items] != [b[0] for b in self.blocks]:
+            for b in self.blocks:
+                b[1].setParent(None)
+                b[1].deleteLater()
+            self.blocks = []
+            for x, _, _ in items:
+                fr = QFrame()
+                fr.setObjectName('diskblock')
+                fl = QVBoxLayout(fr)
+                fl.setContentsMargins(10, 8, 10, 8)
+                lab = QLabel('')
+                lab.setTextFormat(Qt.RichText)
+                lab.setWordWrap(True)
+                fl.addWidget(lab)
+                self.blocks_lay.addWidget(fr)
+                self.blocks.append([x, fr, lab, None])
+        for blk, (x, html_, state) in zip(self.blocks, items):
+            blk[2].setText(html_)
+            blk[3] = state
+            border, bg = BLOCK_LOOK.get(state, BLOCK_LOOK['none'])
+            blk[1].setStyleSheet(f'QFrame#diskblock {{ border:1px solid {border}; border-radius:5px; background:{bg}; }}'
+                                 'QFrame#diskblock QLabel { border:none; background:transparent; }')
+        self.blocks_box.setVisible(bool(items))
+
+    def block_texts(self):
+        """Тексты блоков дисков (для тестов): {диск: html}."""
+        return {b[0]: b[2].text() for b in self.blocks}
+
+    def block_states(self):
+        return {b[0]: b[3] for b in self.blocks}
 
     def dragEnterEvent(self, e):                              # noqa: N802
         if self.drop_ok and e.mimeData().hasFormat(MIME):
@@ -1148,7 +1308,10 @@ class RazborPage(QWidget):
         self.mode_pref = {}                               # (носитель, направление) -> выбранный владельцем EVERY/EXCEPT
         self.painting = False                             # окно само ставит галочки - itemChanged не обрабатывать
         lay = QVBoxLayout(self)
-        # 1. выбранный диск назначения - крупно, первым; «Обновить» - справа вверху (макет владельца, 16.11.2026)
+        # 0. шаги работы «2. Что копируем» - в самом верху страницы, над заголовком (этап 11; решение владельца 16.11)
+        self.steps = StepsBar(win, 1)
+        lay.addWidget(self.steps)
+        # 1. выбранный диск назначения - крупно; «Обновить» - справа (макет владельца, 16.11.2026)
         head = QHBoxLayout()
         self.where = QLabel('')
         self.where.setWordWrap(True)
@@ -1160,8 +1323,6 @@ class RazborPage(QWidget):
         b.clicked.connect(self.refresh)
         head.addWidget(b, 0, Qt.AlignTop)
         lay.addLayout(head)
-        self.steps = StepsBar(win, 1)                     # шаги работы: «2. Что копируем» (этап 11)
-        lay.addWidget(self.steps)
         self.choice_line = self.where                     # прежнее имя (этап 5)
         # 2. форма: подписи слева столбиком, под полями - строки сведений
         form = QGridLayout()
@@ -1246,7 +1407,8 @@ class RazborPage(QWidget):
         l2 = QVBoxLayout(g2)
         l2.setContentsMargins(0, 0, 0, 0)
         self.tree_hint = QLabel('Поставьте галочки у нужных папок или перетащите папки в ячейку справа. Shift/Ctrl — '
-                                'несколько папок сразу: выделенным галочки ставятся сами.')
+                                'несколько папок сразу: выделенным галочки ставятся сами; галочка у любой выделенной '
+                                'меняется у всех выделенных.')
         self.tree_hint.setWordWrap(True)
         l2.addWidget(self.tree_hint)
         self.tree = DragTree(self)
@@ -1768,7 +1930,18 @@ class RazborPage(QWidget):
         if not f:
             self.select_all(on)
             return
-        self.toggle([f], on)                              # щелчок по галочке - только эта папка (решение 16.11)
+        # этап 12 (решение владельца 16.11): галочка выделенной папки при нескольких выделенных - у всей выделенной
+        # группы (одним шагом отмены); невыделенной - только у неё. Выделение - каким оно было до щелчка мышью.
+        tree = self.tree
+        sel = tree.press_sel if tree.press_sel is not None else self.selected_folders()
+        if f in sel and len(sel) > 1:
+            group = list(sel)
+            if self.toggle(group, on):
+                QTimer.singleShot(0, lambda fs=group: self.reselect(fs))
+            else:
+                self.update_items()
+            return
+        self.toggle([f], on)
 
     def check_selected(self):
         """Выделено несколько папок (Shift/Ctrl-щелчок) - всем выделенным сразу ставится галочка одним шагом отмены."""
@@ -1858,17 +2031,34 @@ class RazborPage(QWidget):
         if d is None:
             c.title.setText('Копировать на диск')
             c.sub.setText('')
+            c.set_blocks([])
             c.body.setText(f'<span style="color:{ORANGE}">Диска назначения нет: назначьте диск направлению в «Обзоре».'
                            '</span>')
             c.paint('#9e9e9e', '#fafafa')
             state = 'none'
         else:
-            word = 'диски' if len(d.disks) > 1 else 'диск'
             by = {r['disk']: r for r in self.disk_rows}
-            c.title.setText(f'Копировать на {word} ' + ' и '.join(short_place(by.get(x), x) for x in d.disks))
-            c.sub.setText(f'{d.name}, {hdds(d)}')
-            html_, state = dest_cell_html(d, plan, cap, self.mode(), sel, exc, lambda x: place(by.get(x), x))
+            many = len(d.disks) > 1
+            if many:                                      # этап 12: по блоку на каждый диск
+                c.title.setText(f'Копировать на {DISKS_WORDS.get(len(d.disks), f"{len(d.disks)} дисков")} — '
+                                f'{copies_word(len(d.disks))}')
+            else:
+                c.title.setText('Копировать на диск ' + short_place(by.get(d.disks[0]), d.disks[0]))
+            c.sub.setText(f'<span style="color:{ORANGE}"><b>{esc(d.name)}</b></span>, {esc(hdds(d))}')
+            html_, state = dest_cell_html(d, plan, cap, self.mode(), sel, exc, lambda x: place(by.get(x), x),
+                                          split=many)
             c.body.setText(html_)
+            blocks = []
+            if many and plan is not None:
+                cp = plan.part_a.get((rz.O_COPY, d.num), (0, 0))
+                hv = plan.part_a.get((rz.O_HAVE, d.num), (0, 0))
+                total = (cp[0] + hv[0], cp[1] + hv[1])
+                have = m.have_on_disk(d.num)
+                for i, x in enumerate(d.disks, 1):
+                    cx = cap.get(x) or dict(state='none', files=0, bytes=0, free=None, queued=[0, 0, 0])
+                    blocks.append((x,) + disk_block_html(i, x, cx, plan, total, have and have.get(x),
+                                                         disk_ui.disk_place(by.get(x) or x)))
+            c.set_blocks(blocks)
             if state == 'short':
                 c.paint(RED, SHORT_BG, state)
             elif state == 'unknown':
@@ -2435,22 +2625,17 @@ def disk_line(x, c, P, place_fn):
     if c['state'] == 'none':
         return f'{head}: копировать нечего'
     amount = f'<b>{gb(c["bytes"])} ГБ</b> <span style="color:{GRAY}">({files_word(c["files"])})</span>'
-    if c['state'] == 'short':
-        where = (f'<b style="color:{RED}">не помещается: нужно {gb(c["need"] + c["reserve"])} ГБ (с запасом '
-                 f'{gb(c["reserve"])} ГБ), свободно {gb(c["free"])} ГБ</b>')
-    elif c['state'] == 'unknown':
-        where = f'<span style="color:{ORANGE}">место не проверено (диск не подключён)</span>'
-    else:
-        where = f'<span style="color:{GREEN}">помещается: свободно {gb(c["free"])} ГБ</span>'
+    where = where_html(c)
     q = (f'<br><span style="color:{GRAY}">&nbsp;&nbsp;в очереди на этот диск ещё {num(c["queued"][0])} незапущенных '
          f'заданий других носителей, {gb(c["queued"][1])} ГБ (учтено)</span>' if c['queued'][0] else '')
     return f'{head}: {amount} — {where}{q}'
 
 
-def dest_cell_html(d, P, cap, mode, sel, exc, place_fn):
+def dest_cell_html(d, P, cap, mode, sel, exc, place_fn, split=False):
     """Ячейка «Копировать на диск …»: «Отмечено N папок · M файлов · X ГБ» (N - верхние выбранные папки; файлы и ГБ -
     «копировать» + «уже есть» направления из плана ядра, то есть с наследованием, режимом и «что копировать»), «Уже есть
-    на диске», строка места по каждому диску. -> (html, состояние 'short' / 'unknown' / 'ok')."""
+    на диске», строка места по каждому диску. split=True (направление на нескольких дисках, этап 12) - только общая
+    часть: «уже есть» и место - в блоках дисков (disk_block_html). -> (html, состояние 'short' / 'unknown' / 'ok')."""
     if P is None:
         return f'<span style="color:{GRAY}">Считаю…</span>', 'normal'
     cp = P.part_a.get((rz.O_COPY, d.num), (0, 0))
@@ -2468,7 +2653,7 @@ def dest_cell_html(d, P, cap, mode, sel, exc, place_fn):
              f'<span style="color:{GRAY}">или перетащите папки сюда.</span>']
     else:
         h = [f'<span style="font-size:12pt"><b>{what} · {files_word(files)} · {gb(size)} ГБ</b></span>']
-    if size:
+    if size and not split:
         where = 'на диске' if len(d.disks) < 2 else 'на обоих дисках' if len(d.disks) == 2 else 'на всех дисках'
         h.append(f'<br>Уже есть {where}: <b>{gb(hv[1])} ГБ ({round(100 * hv[1] / size)} %)</b> '
                  f'<span style="color:{GRAY}; font-size:8pt">{files_word(hv[0])}</span>')
@@ -2478,12 +2663,53 @@ def dest_cell_html(d, P, cap, mode, sel, exc, place_fn):
     state = 'ok'
     for x in d.disks:
         c = cap.get(x) or dict(state='none', files=0, bytes=0, free=None, queued=[0, 0, 0])
-        h.append('<br>' + disk_line(x, c, P, place_fn))
+        if not split:
+            h.append('<br>' + disk_line(x, c, P, place_fn))
         if c['state'] == 'short':
             state = 'short'
         elif c['state'] == 'unknown' and state != 'short':
             state = 'unknown'
     return ''.join(h), state
+
+
+def where_html(c):
+    """Строка места на диске по service.capacity: помещается / не помещается / место не проверено."""
+    if c['state'] == 'short':
+        return (f'<b style="color:{RED}">не помещается: нужно {gb(c["need"] + c["reserve"])} ГБ (с запасом '
+                f'{gb(c["reserve"])} ГБ), свободно {gb(c["free"])} ГБ</b>')
+    if c['state'] == 'unknown':
+        return f'<span style="color:{ORANGE}">место не проверено (диск не подключён)</span>'
+    return f'<span style="color:{GREEN}">помещается: свободно {gb(c["free"])} ГБ</span>'
+
+
+def disk_block_html(i, x, c, P, total, have, name):
+    """Блок одного диска направления на нескольких дисках (этап 12, вариант А владельца): «Копия 1 — H: Бэкап фото и
+    видео (HDD45)»; «Копировать K ГБ (M файлов)» - часть Б ядра для этого диска (service.capacity); «Уже есть на диске
+    X ГБ (Y %)» - Model.have_on_disk от «отмечено» (total = копировать + уже есть направления); строка места.
+    -> (html, состояние блока 'short' / 'unknown' / 'ok' / 'none')."""
+    h = [f'<span style="font-size:11pt"><b>Копия {i} — {esc(name)} ({esc(x)})</b></span>']
+    if P is not None and x == P.disk:
+        h.append(f'<br><span style="color:{GRAY}">Это сам носитель — на него не копируется.</span>')
+        return ''.join(h), 'none'
+    if c['state'] == 'none':
+        h.append('<br>Копировать нечего' + (' — всё отмеченное уже есть на этом диске' if total[0] else '') +
+                 (f' <span style="color:{GREEN}">· свободно {gb(c["free"])} ГБ</span>' if c.get('free') is not None
+                  else f' <span style="color:{ORANGE}">· диск не подключён</span>'))
+    else:
+        h.append(f'<br>Копировать <b>{gb(c["bytes"])} ГБ</b> ({files_word(c["files"])})')
+    if total[1]:
+        if have is None:
+            h.append(f'<br><span style="color:{GRAY}">Уже есть на диске: считаю…</span>')
+        else:
+            h.append(f'<br>Уже есть на диске: <b>{gb(have[1])} ГБ ({round(100 * have[1] / total[1])} %)</b> '
+                     f'<span style="color:{GRAY}; font-size:8pt">{files_word(have[0])}</span>')
+    if c['state'] == 'none':
+        return ''.join(h), 'none'
+    h.append('<br>' + where_html(c))
+    if c['queued'][0]:
+        h.append(f'<br><span style="color:{GRAY}">в очереди на этот диск ещё {num(c["queued"][0])} незапущенных '
+                 f'заданий других носителей, {gb(c["queued"][1])} ГБ (учтено)</span>')
+    return ''.join(h), c['state']
 
 
 STAY_NONE = (rz.O_SKIP, rz.O_UNSET, rz.O_NONE, rz.O_JUNK)     # не копируется никуда (общие категории плана)

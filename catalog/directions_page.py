@@ -211,14 +211,16 @@ def tag_label(text, look):
     return lab
 
 
-def disk_row_html(disk, by, free, writing):
+def disk_row_html(disk, by, free, writing, copy_no=0):
     """Строка диска в карточке: «I: My Book — HDD55 · свободно 421 ГБ» (подключён) или «My Book — HDD55» и плашка
-    «не подключён». Цвет: оранжевый - направление отмечено галочкой; зелёный - нет; неподключённый - бледнее."""
+    «не подключён». Цвет: оранжевый - направление отмечено галочкой; зелёный - нет; неподключённый - бледнее.
+    copy_no - номер копии у направления с несколькими дисками (этап 12): «… — HDD45 (копия 1) · свободно …»."""
     r = by.get(disk) or {'disk': disk, 'label': '', 'letter': ''}
     on = bool(r.get('letter'))
     color, bold = disk_ui.dir_disk_color(on, writing)
     label = disk_ui.disk_name(r)
-    text = html_esc(' — '.join(x for x in (disk_ui.disk_place(r) if label else r.get('letter'), disk) if x))
+    text = html_esc(' — '.join(x for x in (disk_ui.disk_place(r) if label else r.get('letter'), disk) if x)
+                    + (f' (копия {copy_no})' if copy_no else ''))
     w = 'bold' if bold else 'normal'
     out = f'<span style="color:{color}; font-weight:{w}">{text}</span>'
     if on:
@@ -320,7 +322,9 @@ class DirectionCard(QFrame):
         if not self.d.disks:
             self.disks.setText('<span style="color:#c62828">диск не назначен</span>')
         else:
-            self.disks.setText('<br>'.join(disk_row_html(x, data['by'], data['free'], writing) for x in self.d.disks))
+            many = len(self.d.disks) > 1                    # «(копия 1/2)» - только у направления на нескольких дисках
+            self.disks.setText('<br>'.join(disk_row_html(x, data['by'], data['free'], writing, i if many else 0)
+                                           for i, x in enumerate(self.d.disks, 1)))
 
 
 TITLE_TEXT = 'Выберите диск, на который будем копировать'

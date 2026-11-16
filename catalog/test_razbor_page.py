@@ -11,7 +11,7 @@ from pathlib import Path
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from PySide6.QtCore import QThreadPool                     # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, QThreadPool    # noqa: E402
 from PySide6.QtWidgets import QDialog                      # noqa: E402
 
 import app                                                 # noqa: E402
@@ -21,7 +21,7 @@ import service as sv                                       # noqa: E402
 from hb_core import razbor as rz                           # noqa: E402
 from test_app import put, wait                             # noqa: E402
 from test_hashbase import make_disk, S                     # noqa: E402
-from test_logic_v3 import SRC, FILES, V3Base               # noqa: E402
+from test_logic_v3 import SRC, FILES, H, V3Base            # noqa: E402
 
 N1 = 'направление: Н1 Семейный архив'
 N2 = 'направление: Н2 Работа'
@@ -263,13 +263,20 @@ class LayoutTest(PageBase):
         self.assertEqual(rp.carrier_text(dict(disk='HDD61', label='ACASIS EC-7352 - 750 ГБ', letter='')),
                          'Накопитель (не подключён) — HDD61 (по журналу сканирования дисков)')   # метки нет - «Накопитель»
         d1 = sv.directions()['Н1']
-        self.assertEqual(rp.dest_text(d1, rows), 'H: Бэкап фото и видео и Путешествия (не подключён) — '
-                                                 'Н1 Семейный архив — HDD45 и HDD77 (по журналу сканирования дисков)')
+        # этап 12: направление на двух дисках - коротко, диски не сливаются в одну строку
+        self.assertEqual(rp.dest_text(d1, rows), 'Н1 Семейный архив — H: и HDD77 (две копии)')
         self.assertIn(f'<span style="color:{rp.ORANGE}"><b>Н1 Семейный архив</b></span>', rp.dest_html(d1, rows))
         h = rp.head_html(d1, rows, {'HDD45': ('H:', 421 * 1024 ** 3, 2000 * 1024 ** 3, 4096)})
-        self.assertIn('Диски: H: Бэкап фото и видео и Путешествия ' + rp.OFF_PILL, h)   # «не подключён» - плашкой
-        self.assertIn(f'<span style="color:{rp.ORANGE}"><b>Н1 Семейный архив</b></span> · HDD45 и HDD77 по журналу '
-                      'сканирования дисков · свободно HDD45 — 421,0 ГБ · два задания', h)
+        self.assertTrue(h.startswith('Диск: Семейный архив — две копии<br>'), h)
+        self.assertIn(f'<span style="color:{rp.ORANGE}"><b>Н1 Семейный архив</b></span> · два задания — по одному на '
+                      'каждый диск', h)
+        lines = h.split('<br>')
+        self.assertEqual(len(lines), 4)                                        # заголовок, направление, два диска
+        self.assertTrue(lines[2].endswith('H: Бэкап фото и видео — HDD45 <span style="color:#33691e">· свободно '
+                                          '421,0 ГБ</span>'), lines[2])
+        self.assertIn('Путешествия — HDD77 <span', lines[3])
+        self.assertIn('не подключён', lines[3])                                 # плашка - у своего диска
+        self.assertNotIn('не подключён', lines[2])
         d3 = types.SimpleNamespace(num='Н3', name='Фильмы', disks=('HDD55',))
         h = rp.head_html(d3, [dict(disk='HDD55', label='WD20 - 2 ТБ - My Book', letter='I:')],
                          {'HDD55': ('I:', 421 * 1024 ** 3, 2000 * 1024 ** 3, 4096)})
@@ -288,16 +295,21 @@ class LayoutTest(PageBase):
         self.assertTrue(pl('HDD60').endswith('(не подключён)'))
         self.assertIn(rp.carrier_text(by['HDD60']), texts)
         dest = [self.p.dest_box.itemText(i) for i in range(self.p.dest_box.count())]
-        self.assertEqual(dest, [f'{pl("HDD45")} и {pl("HDD77")} — Н1 Семейный архив — HDD45 и HDD77 '
-                                '(по журналу сканирования дисков)',
+        self.assertEqual(dest, ['Н1 Семейный архив — HDD45 и HDD77 (две копии)',
                                 f'{pl("HDD91")} — Н2 Работа — HDD91 (по журналу сканирования дисков)'])  # Н3 без диска
         self.assertIn(rp.ORANGE, self.p.dest_box.current_html())
         self.assertEqual([w.text() for w in (self.p.mode_only, self.p.mode_every, self.p.mode_except)],
                          ['Только выбранные папки', 'Все папки', 'Все, кроме выбранных'])
-        self.assertEqual(self.p.copy_cell.title.text(), 'Копировать на диски ' + ' и '.join(
-            rp.short_place(by[d], d) for d in ('HDD45', 'HDD77')))
-        self.assertTrue(self.p.copy_cell.title.text().endswith('(не подключён)'))
-        self.assertEqual(self.p.copy_cell.sub.text(), 'Семейный архив, HDD45 и HDD77')
+        self.assertEqual(self.p.copy_cell.title.text(), 'Копировать на два диска — две копии')
+        # п. 3 этапа 12: имя направления под заголовком - оранжевым и жирным, номера HDD - обычным текстом
+        self.assertEqual(self.p.copy_cell.sub.text(), f'<span style="color:{rp.ORANGE}"><b>Семейный архив</b></span>, '
+                                                      'HDD45 и HDD77')
+        self.assertNotIn('color', self.p.copy_cell.sub.styleSheet())           # не серая строка
+        self.p.set_dest('Н2')
+        self.assertEqual(self.p.copy_cell.title.text(), 'Копировать на диск ' + rp.short_place(by['HDD91'], 'HDD91'))
+        self.assertEqual(self.p.copy_cell.sub.text(), f'<span style="color:{rp.ORANGE}"><b>Работа</b></span>, HDD91')
+        self.assertEqual(self.p.copy_cell.blocks, [])                          # один диск - блоков нет
+        self.p.set_dest('Н1')
         self.assertFalse(hasattr(self.p, 'stay_cell'))                         # ячейку «Остаётся» владелец убрал
         self.assertTrue(self.p.copy_cell.acceptDrops())
         self.assertIn('Shift/Ctrl — несколько папок сразу', self.p.tree_hint.text())
@@ -397,6 +409,9 @@ class ModesTest(PageBase):
 
             def modifiers(self):
                 return self.mods
+
+            def position(self):
+                return QPointF(-5, -5)                                        # не по колонке галочек
         self.p.tree.multi(Ev(rp.Qt.NoModifier))                                  # без Shift/Ctrl - ничего
         wait(lambda: False, 0.5)
         self.assertEqual(m.drafts, {})
@@ -405,8 +420,9 @@ class ModesTest(PageBase):
         self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'друзья': N1, 'работа': N1, 'документы': N1})
         self.assertEqual(len(m.undo_stack), 1)                                   # один шаг отмены
         self.assertTrue(wait(lambda: len(self.p.selected_folders()) == 3))       # выделение осталось
-        self.item('Документы').setCheckState(rp.C_CHECK, rp.Qt.Unchecked)       # лишнюю - её галочкой
-        self.assertEqual(set(m.drafts), {'друзья', 'работа'})
+        self.item('Документы').setCheckState(rp.C_CHECK, rp.Qt.Unchecked)       # этап 12: у всей выделенной группы
+        self.assertEqual(set(m.drafts), set())
+        self.assertEqual(len(m.undo_stack), 2)
         self.p.check_selected()                                                  # повтор: уже отмеченные не трогаются
         self.assertEqual(set(m.drafts), {'друзья', 'работа', 'документы'})
         self.settle()
@@ -462,11 +478,35 @@ class ModesTest(PageBase):
         cp, hv = P.part_a[(rz.O_COPY, 'Н1')], P.part_a.get((rz.O_HAVE, 'Н1'), (0, 0))
         body = self.p.copy_cell.body.text()
         self.assertIn(f'Отмечено 2 папки · {rp.files_word(cp[0] + hv[0])} · {rp.gb(cp[1] + hv[1])} ГБ', body)
-        self.assertIn(f'Уже есть на обоих дисках: <b>{rp.gb(hv[1])} ГБ', body)
+        # этап 12: два диска - два блока «Копия 1 / Копия 2», числа каждого - по плану ядра для этого диска
+        texts = self.p.copy_cell.block_texts()
+        self.assertEqual(list(texts), ['HDD45', 'HDD77'])
         by = {r['disk']: r for r in self.p.disk_rows}
-        self.assertIn(f'Копировать на диск {rp.place(by["HDD45"], "HDD45")} (HDD45): ', body)
-        self.assertIn('место не проверено (диск не подключён)', body)
-        self.assertNotIn('на 45', body)                                         # никаких голых «на 45»
+        total = (cp[0] + hv[0], cp[1] + hv[1])
+        self.assertEqual(total, (5, 400))            # 1.jpg, 2.jpg, описание.doc, схема.jpg, отчёт.doc
+        have = self.p.model.have_on_disk('Н1')
+        self.assertEqual(have, {'HDD45': (2, 300), 'HDD77': (1, 100)})          # 1.jpg - на обоих, 2.jpg - только на 45
+        self.assertEqual(min(have.values()), tuple(hv))                          # «на всех дисках» = часть А ядра
+        for i, x in enumerate(('HDD45', 'HDD77'), 1):
+            t = texts[x]
+            pb = P.part_b[x]
+            self.assertEqual(pb[0], total[0] - have[x][0])                       # недостающее на диске = часть Б ядра
+            self.assertIn(f'Копия {i} — {rp.esc(rp.disk_ui.disk_place(by[x]))} ({x})', t)
+            self.assertIn(f'Копировать <b>{rp.gb(pb[1])} ГБ</b> ({rp.files_word(pb[0])})', t)
+            self.assertIn(f'Уже есть на диске: <b>{rp.gb(have[x][1])} ГБ ({round(100 * have[x][1] / total[1])} %)</b>', t)
+            self.assertIn(rp.files_word(have[x][0]), t)
+            self.assertIn('место не проверено (диск не подключён)', t)
+        self.assertIn('(75 %)', texts['HDD45'])
+        self.assertIn('(25 %)', texts['HDD77'])
+        self.assertNotIn('Уже есть на обоих', body)                              # общая часть - одна строка «Отмечено»
+        self.assertNotIn('место не проверено', body)
+        self.assertNotIn('на 45', body + ''.join(texts.values()))                # никаких голых «на 45»
+        self.assertEqual(self.p.copy_cell.block_states(), {'HDD45': 'unknown', 'HDD77': 'unknown'})
+        blocks = [b[1] for b in self.p.copy_cell.blocks]
+        lay = self.p.copy_cell.layout()
+        self.assertLess(lay.indexOf(self.p.copy_cell.body), lay.indexOf(self.p.copy_cell.blocks_box))
+        self.assertLess(lay.indexOf(self.p.copy_cell.blocks_box), lay.indexOf(self.p.tasks_btn))   # кнопка - под блоками
+        self.assertTrue(all('border:1px solid' in b.styleSheet() for b in blocks))   # у каждого блока - рамка
         n, b = rp.stay_numbers(P)
         moved = P.part_a.get((rz.O_MOVED, None), (0, 0))[0]
         self.assertEqual(cp[0] + hv[0] + n + moved, P.total[0])                  # отмечено + остаётся + перенесено = опись
@@ -722,7 +762,9 @@ class CapacityTest(PageBase):
             c = self.p.copy_cell
             self.assertEqual(self.p.dest, 'Н1')
             self.assertEqual(c.state, 'short')
-            self.assertIn('не помещается', c.body.text())
+            self.assertIn('не помещается', c.block_texts()['HDD45'])           # в блоке своего диска (этап 12)
+            self.assertEqual(c.block_states(), {'HDD45': 'short', 'HDD77': 'unknown'})
+            self.assertIn('место не проверено (диск не подключён)', c.block_texts()['HDD77'])
             self.assertFalse(c.btn.isEnabled())
             self.assertIn('снимите галочки', c.btn.toolTip())
             self.p.prepare(['Н1', 'Н2'])                                         # Н1 исключается целиком
@@ -966,7 +1008,11 @@ class Round3Test(PageBase):
         self.assertNotIn('Сначала выберите режим', page_text)
         self.assertIn('не подключён', self.p.info.text())                        # плашка под полем носителя
         self.assertIn('опись от', self.p.info.text())
-        self.assertIn(rp.NO_SPACE, self.p.dest_info.text())                      # диски теста не подключены
+        info = self.p.dest_info.text().split('<br>')                           # диски теста не подключены
+        self.assertEqual(len(info), 3)                                           # по строке на каждый диск
+        self.assertIn('Копия 1 — ', info[0])
+        self.assertIn('(HDD45): подключите диск, чтобы проверить свободное место.', info[0])
+        self.assertIn('(HDD77): подключите диск', info[1])
         self.assertGreaterEqual(self.p.dest_box.minimumHeight(),
                                 rp.QFontMetrics(self.p.dest_box.font()).height() + 16)   # поле выше - низ не обрезан
         self.p.mode_except.setChecked(True)
@@ -1026,6 +1072,245 @@ class Round3Test(PageBase):
         self.settle()
         self.assertTrue(wait(lambda: not self.p.busy_lab.isVisibleTo(self.p)))
         self.assertFalse(self.p.blink.isActive())
+
+
+class Stage12Test(PageBase):
+    """Этап 12 (решения владельца 16.11): шаги - в самом верху, групповые галочки мышью, 45 и 77 раздельно."""
+
+    def show(self, w=1600, h=1000):
+        from test_app import QAPP
+        self.w.resize(w, h)
+        self.w.show()
+        QAPP.processEvents()
+
+    def test_steps_above_head(self):
+        lay = self.p.layout()
+        self.assertEqual(lay.indexOf(self.p.steps), 0)                          # первым в странице
+        self.open()
+        self.show()
+        self.assertLess(self.p.steps.mapTo(self.p, QPoint(0, 0)).y(), self.p.where.mapTo(self.p, QPoint(0, 0)).y())
+        self.assertLess(self.p.steps.geometry().bottom(), self.p.where.mapTo(self.p, QPoint(0, 0)).y())
+
+    def click_check(self, path, mods=None, double=False):
+        """Настоящий щелчок мышью по индикатору галочки строки (как владелец)."""
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        from test_app import QAPP
+        it = self.item(path)
+        tree = self.p.tree
+        tree.scrollToItem(it)
+        QAPP.processEvents()
+        idx = tree.indexFromItem(it, rp.C_CHECK)
+        opt = QStyleOptionViewItem()
+        tree.itemDelegate().initStyleOption(opt, idx)
+        opt.rect = tree.visualRect(idx)
+        r = tree.style().subElementRect(rp.QStyle.SE_ItemViewItemCheckIndicator, opt, tree)
+        self.assertTrue(r.isValid() and r.width() > 0, path)
+        mods = rp.Qt.NoModifier if mods is None else mods
+        if double:                                    # как настоящий двойной щелчок: щелчок, затем «двойное» нажатие
+            QTest.mouseClick(tree.viewport(), rp.Qt.LeftButton, mods, r.center())
+            QTest.mouseDClick(tree.viewport(), rp.Qt.LeftButton, mods, r.center())
+        else:
+            QTest.mouseClick(tree.viewport(), rp.Qt.LeftButton, mods, r.center())
+        QAPP.processEvents()
+
+    def test_group_checks_by_mouse(self):
+        self.open()
+        self.show()
+        m = self.p.model
+        group = ('Друзья', 'Работа', 'Документы')
+        self.p.tree.clearSelection()
+        for f in group:
+            self.item(f).setSelected(True)
+        self.assertEqual(m.drafts, {})
+        self.click_check('Работа')                                               # галочка одной из выделенных
+        self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'друзья': N1, 'работа': N1, 'документы': N1})
+        self.assertEqual(len(m.undo_stack), 1)                                   # одним шагом отмены
+        self.assertTrue(wait(lambda: sorted(self.p.selected_folders()) == sorted(group)))   # выделение осталось
+        self.assertTrue(all(self.item(f).checkState(rp.C_CHECK) == rp.Qt.Checked for f in group))
+        self.click_check('Друзья')                                               # снять - тоже у всей группы
+        self.assertEqual(m.drafts, {})
+        self.assertEqual(len(m.undo_stack), 2)
+        self.assertTrue(all(self.item(f).checkState(rp.C_CHECK) == rp.Qt.Unchecked for f in group))
+        self.assertTrue(wait(lambda: sorted(self.p.selected_folders()) == sorted(group)))
+        self.click_check('Смешанная')                                            # невыделенная - только она
+        self.assertEqual({k: d['verdict'] for k, d in m.drafts.items()}, {'смешанная': N1})
+        self.assertEqual(len(m.undo_stack), 3)
+        self.assertEqual(sorted(self.p.selected_folders()), sorted(group))         # Qt: щелчок по галочке выделение не меняет
+        self.assertTrue(all(self.item(f).checkState(rp.C_CHECK) == rp.Qt.Unchecked for f in group))
+        self.click_check('Смешанная')                                            # снова невыделенная - только она
+        self.assertEqual(m.drafts, {})
+        self.p.undo()                                                            # «Отменить последнее» - шагами
+        self.assertEqual(set(m.drafts), {'смешанная'})
+        self.p.undo()
+        self.p.undo()
+        self.assertEqual(set(m.drafts), {'друзья', 'работа', 'документы'})
+        self.assertIsNone(self.p.tree.press_sel)                                 # после щелчка не осталось
+        self.settle()
+
+    def test_one_disk_direction_has_no_blocks(self):
+        import directions_page as dp
+        dp.save_choice(['Н2'])
+        self.mark(('Работа', 'Н2'))
+        self.open()
+        self.plan()
+        self.assertEqual(self.p.dest, 'Н2')
+        c = self.p.copy_cell
+        self.assertEqual(c.blocks, [])
+        self.assertFalse(c.blocks_box.isVisibleTo(c))
+        self.assertIn('Уже есть на диске', c.body.text())
+        self.assertIn('Копировать на диск ', c.body.text())
+        h = self.p.where.text()
+        self.assertTrue(h.startswith('Диск: '))
+        self.assertNotIn('копии', h)
+        self.assertNotIn('Копия', self.p.dest_info.text())
+
+    def test_disk_block_states(self):
+        import types
+        G = 1024 ** 3
+        P = types.SimpleNamespace(part_a={}, disk=SRC)
+        space = {'HDD45': ('H:', 500 * G, 1000 * G, 4096)}
+        cap = sv.capacity({'HDD45': [3, G], 'HDD77': [2, G]}, space, {}, disks=['HDD45', 'HDD77'])
+        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (2, 3 * G), 'H: Бэкап фото и видео')
+        self.assertEqual(st, 'ok')
+        self.assertIn('Копия 1 — H: Бэкап фото и видео (HDD45)', t)
+        self.assertIn('Копировать <b>1,0 ГБ</b> (3 файла)', t)
+        self.assertIn('Уже есть на диске: <b>3,0 ГБ (75 %)</b>', t)
+        self.assertIn('помещается: свободно 500,0 ГБ', t)
+        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), None, 'Путешествия')
+        self.assertEqual(st, 'unknown')
+        self.assertIn('Уже есть на диске: считаю…', t)
+        self.assertIn('место не проверено (диск не подключён)', t)
+        cap = sv.capacity({'HDD45': [3, 600 * G]}, space, {}, disks=['HDD45', 'HDD77'])
+        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (0, 0), 'H: Бэкап')
+        self.assertEqual(st, 'short')
+        self.assertIn('не помещается: нужно', t)
+        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), (5, 4 * G), 'Путешествия')
+        self.assertEqual(st, 'none')
+        self.assertIn('Копировать нечего — всё отмеченное уже есть на этом диске', t)
+        self.assertIn('(100 %)', t)
+        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (0, 0), None, 'Путешествия')
+        self.assertNotIn('Уже есть', t)                                          # отмечено пусто - процента нет
+        t, st = rp.disk_block_html(1, SRC, cap['HDD77'], P, (5, 4 * G), None, 'Носитель')
+        self.assertIn('Это сам носитель', t)
+        # проверка кода (п. 2): «копировать нечего» - единообразно, с местом или «диск не подключён»
+        cap = sv.capacity({}, space, {}, disks=['HDD45', 'HDD77'])
+        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (5, 4 * G), 'H: Бэкап')
+        self.assertIn('Копировать нечего — всё отмеченное уже есть на этом диске <span style="color:#2e7d32">'
+                      '· свободно 500,0 ГБ</span>', t)
+        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), (5, 4 * G), 'Путешествия')
+        self.assertIn(f'Копировать нечего — всё отмеченное уже есть на этом диске <span style="color:{rp.ORANGE}">'
+                      '· диск не подключён</span>', t)
+        self.assertEqual(st, 'none')
+
+    def test_disk_missing_from_rows(self):
+        """Проверка кода (п. 1): диска направления нет в списке дисков - подписи не падают, диск - номером."""
+        import types
+        d = types.SimpleNamespace(num='Н9', name='Проба', disks=('HDD45', 'HDD99'))
+        rows = [dict(disk='HDD45', label='WD - 2 ТБ - Бэкап фото и видео', letter='H:', free_gib=10.0)]
+        info = rp.dest_info_html(d, rows)
+        self.assertIn('Копия 1 — H: Бэкап фото и видео (HDD45): свободно 10,0 ГБ', info)
+        self.assertIn('Копия 2 — Накопитель (HDD99): подключите диск', info)
+        h = rp.head_html(d, rows)
+        self.assertIn('Накопитель — HDD99', h)
+        self.assertEqual(rp.dest_text(d, rows), 'Н9 Проба — H: и HDD99 (две копии)')
+        self.assertEqual(rp.disk_ui.disk_place('HDD99'), 'Накопитель')            # строка - через as_row
+
+    def test_blocks_follow_state(self):
+        """Проверка кода (п. 6): те же диски - блоки не пересоздаются, но текст и рамка меняются по состоянию."""
+        c = self.p.copy_cell
+        c.set_blocks([('HDD45', 'не помещается', 'short'), ('HDD77', 'место не проверено', 'unknown')])
+        frames = [b[1] for b in c.blocks]
+        self.assertIn(rp.BLOCK_LOOK['short'][0], frames[0].styleSheet())
+        c.set_blocks([('HDD45', 'помещается', 'ok'), ('HDD77', 'место не проверено', 'unknown')])
+        self.assertEqual([b[1] for b in c.blocks], frames)                      # те же рамки
+        self.assertIn(rp.BLOCK_LOOK['ok'][0], frames[0].styleSheet())
+        self.assertNotIn(rp.BLOCK_LOOK['short'][0], frames[0].styleSheet())
+        self.assertEqual(c.block_texts()['HDD45'], 'помещается')
+        self.assertEqual(c.block_states(), {'HDD45': 'ok', 'HDD77': 'unknown'})
+        c.set_blocks([])
+        self.assertEqual(c.blocks, [])
+        self.assertFalse(c.blocks_box.isVisibleTo(c))
+
+    def test_group_applied_once(self):
+        """Проверка кода (п. 4): групповое действие - ровно один раз (один шаг отмены) и при Ctrl-щелчке по галочке,
+        и при двойном щелчке; Ctrl-щелчок по имени - галочки выделенным один раз (нажатие и отпускание)."""
+        from PySide6.QtTest import QTest
+        from test_app import QAPP
+        self.open()
+        self.show()
+        m, tree = self.p.model, self.p.tree
+        group = ('Друзья', 'Работа', 'Документы')
+        tree.clearSelection()
+        for f in group:
+            self.item(f).setSelected(True)
+        steps = len(m.undo_stack)
+        self.click_check('Работа', rp.Qt.ControlModifier)                       # Ctrl-щелчок по галочке выделенной
+        wait(lambda: False, 0.3)
+        self.assertEqual(set(m.drafts), {'друзья', 'работа', 'документы'})
+        self.assertEqual(len(m.undo_stack), steps + 1)
+        self.click_check('Работа', double=True)                                   # двойной щелчок
+        wait(lambda: False, 0.3)
+        states = {self.item(f).checkState(rp.C_CHECK) for f in group}
+        self.assertEqual(len(states), 1)                                         # у всей группы одинаково
+        self.assertEqual(len(m.undo_stack), steps + 2)                           # двойной щелчок - одно переключение
+        self.assertEqual(set(m.drafts), set())                                   # у всей группы - снято
+        self.assertIsNone(tree.press_sel)
+        # Ctrl-щелчок по ИМЕНИ ещё одной папки: выделенным ставятся галочки - одним шагом (нажатие + отпускание)
+        before = len(m.undo_stack)
+        it = self.item('Смешанная')
+        tree.scrollToItem(it)
+        QAPP.processEvents()
+        QTest.mouseClick(tree.viewport(), rp.Qt.LeftButton, rp.Qt.ControlModifier,
+                         tree.visualItemRect(it).center())
+        wait(lambda: len(self.p.selected_folders()) == 4)
+        wait(lambda: False, 0.3)
+        self.assertEqual(set(m.drafts), {'друзья', 'работа', 'документы', 'смешанная'})
+        self.assertEqual(len(m.undo_stack), before + 1)
+        self.settle()
+
+
+class MovedPartialTest(PageBase):
+    """Проверка кода (п. 5): папка перенесена на носителе раньше («ПЕРЕНЕСЕНО → 45 и 77»), её файл есть только на
+    45 - в ядре «копировать» (недостаёт на 77); «уже есть» по дискам: на 45 - да, на 77 - нет; есть на обоих - в ядре
+    «перенесено», в «отмечено» и «уже есть» не входит."""
+
+    def rescan(self, disk, serial, folder, files):
+        """Пересканирование папки диска (частичный скан с хешами) и пересборка временной базы."""
+        from test_hashbase import make_partial
+        make_partial(self.scans, disk, serial, [folder], files, name=f'part_{len(files)}')
+        self.quiet(hb.connect)
+
+    def check(self, want_total, want_have):
+        self.open()
+        P = self.plan()
+        cp = P.part_a.get((rz.O_COPY, 'Н1'), (0, 0))
+        hv = P.part_a.get((rz.O_HAVE, 'Н1'), (0, 0))
+        total = (cp[0] + hv[0], cp[1] + hv[1])
+        self.assertEqual(total, want_total)
+        have = self.p.model.have_on_disk('Н1')
+        self.assertEqual(have, want_have)
+        for x in ('HDD45', 'HDD77'):                                             # недостающее = часть Б ядра
+            self.assertEqual(P.part_b.get(x, [0, 0])[0], total[0] - have[x][0], x)
+        return P
+
+    def test_moved_partial(self):
+        import directions_page as dp
+        dp.save_choice(['Н1'])
+        base45 = [('X\\1.jpg', 100, S[1]), ('X\\2.jpg', 200, S[2])]
+        base77 = [('Y\\1.jpg', 100, S[1])]
+        self.rescan('HDD45', 'AAAA0045', 'X', base45 + [('X\\z.jpg', 300, H[25])])   # z.jpg - только на 45
+        self.mark(('Старое', 'Н1'), ('Работа', 'Н1'))
+        P = self.check((3, 300 + 20 + 70), {'HDD45': (1, 300), 'HDD77': (0, 0)})
+        self.assertEqual(P.part_a.get((rz.O_MOVED, None), (0, 0))[0], 0)
+        self.p.model.drafts.clear()
+        self.p.choose_disk('HDD45')                                              # уйти с носителя, чтобы перечитать
+        self.assertTrue(wait(lambda: self.p.model is not None and self.p.model.disk == 'HDD45'))
+        self.settle()
+        QThreadPool.globalInstance().waitForDone(20000)                          # окно не читает базу во время сборки
+        self.rescan('HDD77', 'AAAA0077', 'Y', base77 + [('Y\\z.jpg', 300, H[25])])   # z.jpg - и на 77
+        P = self.check((2, 20 + 70), {'HDD45': (0, 0), 'HDD77': (0, 0)})
+        self.assertEqual(P.part_a.get((rz.O_MOVED, None), (0, 0)), [1, 300])
 
 
 if __name__ == '__main__':
