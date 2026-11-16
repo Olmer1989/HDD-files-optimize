@@ -65,7 +65,7 @@ import json
 import time
 import traceback
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QObject, QRectF, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPalette, QTextDocument
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox, QDialog, QFrame, QGridLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
@@ -79,7 +79,7 @@ from hb_core.consts import CAT_OF_TYPE, COPIED_PREFIX, N_TYPES
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
 import directions_page
 import disk_ui
-from ui_common import StepsBar
+from ui_common import StepsBar, timed
 import service as sv
 
 TITLE = 'Архив дисков'
@@ -87,7 +87,11 @@ SEP = '\\'
 ROLE = Qt.UserRole
 FILLED = Qt.UserRole + 1                                  # дети узла созданы (дерево ленивое)
 TAG_ROLE = Qt.UserRole + 2                                # «Н2» - папка отмечена для другого направления
-GRAY_ROLE = Qt.UserRole + 3                               # серая (неактивная) галочка
+GRAY_ROLE = Qt.UserRole + 3                               # бледная галочка: выбрана вместе с родителем
+MORE_ROLE = Qt.UserRole + 4                               # строка «ещё N папок — показать»: (папка-родитель, с какой)
+PART_ROLE = Qt.UserRole + 5                               # показана частичная галочка (внутри есть исключения)
+CHUNK = 500                                               # этап 17: дети большой папки - порциями
+FLUSH_WAIT_MS = 5000                                      # перед закрытием: идущую запись ждём не дольше
 C_CHECK, C_NAME, C_FILES, C_GB, C_PHOTO, C_VIDEO, C_OTHER, C_HAVE = range(8)
 HEAD = ['', 'Папка', 'Файлов', 'ГБ', 'Фото', 'Видео', 'Прочее', 'Уже есть']
 ONLY, EVERY, EXCEPT = 'only', 'all', 'except'             # режимы для диска назначения
@@ -482,6 +486,7 @@ class Model:
     # --- загрузка ---
     def load(self, tree):
         self.tree = tree
+        self.inflight = {}                # новое состояние таблицы прочитано - записанный пакет уже в нём
         self.folders, self.roots, self.dirs = tree['folders'], set(tree['roots']), tree['dirs']
         self.built, self.sig = tree.get('built'), tree.get('sig')
         self.order = sorted(self.folders, key=lambda f: (f.count(SEP) + 1 if f else 0, f))
@@ -576,7 +581,30 @@ class Model:
         self.route = self.routes(self.full_ms)
         self.route_saved = self.routes(self.saved_ms)
         self.have_disk_cache = {}
+        self.partial_cache = {}                           # этап 17: папки D с исключениями внутри - по направлению
         self.have_sub = self.have_counts()
+
+    def partial(self, num):
+        """Папки, идущие в num, внутри которых есть папка со своей отметкой, ведущей НЕ в num (исключение или другой
+        диск): у них частичная галочка. Один проход по своим отметкам (предки по пути); кэш - до recalc."""
+        got = self.partial_cache.get(num)
+        if got is None:
+            got = set()
+            for k, mk in self.full_ms.by_key.items():
+                if not k or (mk.kind == R_DIR and mk.num == num):
+                    continue
+                for f in self.aliases.get(k, ()):
+                    if self.is_dir(self.route.get(f), num):
+                        continue
+                    a = f
+                    while a:
+                        a = hb.parent_of(a)
+                        if not a or a in got:
+                            break
+                        if self.is_dir(self.route.get(a), num):
+                            got.add(a)
+            self.partial_cache[num] = got
+        return got
 
     def set_mark(self, folders, verdict):
         """Черновая отметка папок (физические пути; '' - весь носитель). -> сколько записей черновика изменилось."""
@@ -750,12 +778,17 @@ class Model:
         else:
             on = self.is_dir(r, num)
             gray = on and not (own is not None and own.kind == R_DIR and own.num == num)
-            checkable = not gray
+            checkable = True                              # этап 17: и у выбранной с родителем - снять = исключить
             if tag:
                 tip += ' Поставьте галочку — отметка перейдёт на этот диск назначения.'
             elif gray:
-                tip = ('Выбрана вместе с родительской папкой.' if r.mark is not None and r.mark.path
-                       else 'Выбрана вместе со всем носителем.')
+                tip = (('Выбрана вместе с родительской папкой.' if r.mark is not None and r.mark.path
+                        else 'Выбрана вместе со всем носителем.') + ' Снимите галочку — эта папка не будет копироваться.')
+            elif own is not None and own.kind == R_SKIP and self.parent_is(f, num, {}):
+                tip = 'Исключена: не копируется, хотя родительская папка выбрана. Поставьте галочку — исключение снимется.'
+            if on and f in self.partial(num):
+                tip = (tip + ' Внутри есть исключённые папки (частичная галочка). Щелчок — снять всю папку.').strip()
+                return dict(on=on, gray=gray, checkable=checkable, tag=tag, tip=tip, state=Qt.PartiallyChecked)
         return dict(on=on, gray=gray, checkable=checkable, tag=tag, tip=tip.strip())
 
     def own_skips(self):
@@ -1105,6 +1138,13 @@ class Cell(QFrame):
         self.setFrameShape(QFrame.StyledPanel)
         self.setMinimumHeight(180 if drop else 90)
         lay = QVBoxLayout(self)
+        # этап 17: оранжевая мигающая плашка «Идёт пересчёт…» - в ячейке, на месте прежнего «Считаю…»
+        self.busy = QLabel('Идёт пересчёт итога и места на диске…')
+        self.busy.setStyleSheet(BUSY_CSS[0])
+        self.busy.setToolTip('После изменения отметок итог и место на диске пересчитываются (в фоне, окно не замирает). '
+                             'Бледные цифры ниже - прежний итог; обновятся, когда надпись исчезнет.')
+        self.busy.hide()
+        lay.addWidget(self.busy, 0, Qt.AlignLeft)
         self.title = QLabel('')
         f = QFont()
         f.setPointSize(13)
@@ -1140,6 +1180,14 @@ class Cell(QFrame):
             self.btn.clicked.connect(lambda: page.prepare())
             lay.addWidget(self.btn, 0, Qt.AlignRight)
         self.state = 'normal'
+
+    def set_busy(self, on):
+        """Пересчёт: плашка видна, прежний итог бледно (текст ячейки и блоков дисков - серым)."""
+        self.busy.setVisible(on)
+        css = 'color:#9e9e9e' if on else ''
+        self.body.setStyleSheet(css)
+        for b in self.blocks:
+            b[2].setStyleSheet(css)
 
     def paint(self, border, bg, state='normal'):
         self.state = state
@@ -1340,6 +1388,8 @@ class ContestedDialog(QDialog):
 # ---------- страница ----------
 
 class RazborPage(QWidget):
+    marks_changed = Signal(int)                           # этап 17: отметки изменились (ревизия) - окну «Список файлов»
+    saving_changed = Signal(bool)                         # идёт / закончилась запись отметок
     def __init__(self, win):
         super().__init__()
         self.win, self.model, self.disk, self.disk_rows = win, None, None, []
@@ -1483,6 +1533,7 @@ class RazborPage(QWidget):
         self.tree.setExpandsOnDoubleClick(True)
         self.tree.setUniformRowHeights(True)
         self.tree.itemExpanded.connect(self.expand)
+        self.tree.itemClicked.connect(self.more_clicked)       # «ещё N папок — показать» (этап 17)
         self.tree.itemChanged.connect(self.item_changed)
         l2.addWidget(self.tree, 1)
         legend = QLabel(legend_html(ONLY))
@@ -1518,15 +1569,11 @@ class RazborPage(QWidget):
         lay.addWidget(split, 1)
         # кнопки
         bar = QHBoxLayout()
-        self.busy_lab = QLabel('Идёт пересчёт итога и места на диске…')   # левый нижний угол, в стиле кнопки
-        self.busy_lab.setStyleSheet(BUSY_CSS[0])
-        self.busy_lab.setToolTip('После изменения отметок итог и место на диске пересчитываются (в фоне, окно не '
-                                 'замирает). Цифры справа обновятся, когда надпись исчезнет.')
-        self.busy_lab.hide()
+        self.busy_lab = self.copy_cell.busy                # этап 17: плашка - в ячейке «Копировать на диск …»
         self.blink = QTimer(self)
         self.blink.setInterval(500)
         self.blink.timeout.connect(self.blink_busy)
-        bar.addWidget(self.busy_lab)
+        self.views = {}                                    # этап 17: показанный вид строки дерева (путь -> кортеж)
         # этап 16: «Сохранить отметки» и «Отменить все несохранённые» убраны - отметки сохраняются сразу
         self.undo_btn = QPushButton('Отменить последнее')
         self.undo_btn.setToolTip('Вернуть отметки, какими они были до последнего действия (это тоже сохраняется сразу).')
@@ -1555,6 +1602,8 @@ class RazborPage(QWidget):
         lay.addWidget(self.contested_note)
         lay.addLayout(bar)
         self.saving = False                               # идёт автосохранение отметок (этап 16)
+        self.save_failed = False                          # запись упала ошибкой - ждём следующей правки (этап 17)
+        self.save_job = None                              # идущая запись: событие окончания и её ответ (этап 17)
         self.save_then = []                               # что сделать после записи (подготовка заданий)
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
@@ -1702,13 +1751,16 @@ class RazborPage(QWidget):
             self.banner.hide()
 
     # ---------- дерево ----------
+    @timed('Разбор: rebuild_tree')
     def rebuild_tree(self):
-        """Перестроить дерево, сохранив раскрытые узлы, выделение и прокрутку (по путям)."""
+        """Перестроить дерево, сохранив раскрытые узлы, выделение и прокрутку (по путям). Только при смене носителя или
+        состава папок (после записи отметок - обновление на месте, update_items)."""
         expanded = {p for p, it in self.items.items() if it.isExpanded()}
         selected = {it.data(C_NAME, ROLE) for it in self.tree.selectedItems()}
         scroll = self.tree.verticalScrollBar().value()
         self.tree.clear()
         self.items = {}
+        self.views = {}
         m = self.model
         root = QTreeWidgetItem()
         root.setData(C_NAME, ROLE, '')
@@ -1729,39 +1781,104 @@ class RazborPage(QWidget):
                 self.items[p].setSelected(True)
         QTimer.singleShot(0, lambda: self.tree.verticalScrollBar().setValue(scroll))
 
-    def fill(self, item):
-        """Создать детей узла (лениво: внуки - по раскрытию)."""
+    @timed('Разбор: fill')
+    def fill(self, item, start=0):
+        """Создать детей узла (лениво: внуки - по раскрытию). Этап 17: не больше CHUNK за раз, дальше - строка «ещё N
+        папок — показать» (у winsxs HDD37 13 361 подпапка: 13 тыс. строк создавались 1,3 с и обновлялись по 0,8 с)."""
         p = item.data(C_NAME, ROLE)
-        item.takeChildren()
-        item.setData(C_NAME, FILLED, True)               # дети созданы
-        for f in self.model.children.get(p, ()):
-            ch = QTreeWidgetItem()
-            ch.setData(C_NAME, ROLE, f)
-            for c in range(C_FILES, C_HAVE + 1):
-                ch.setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
-            if not self.model.markable(f):
-                ch.setFlags(ch.flags() & ~Qt.ItemIsDragEnabled)
-            self.items[f] = ch
-            self.set_item(ch, f)
-            if self.model.children.get(f):
-                ph = QTreeWidgetItem()
-                ph.setText(C_NAME, '…')
-                ch.addChild(ph)
-            item.addChild(ch)
+        kids = self.model.children.get(p, ())
+        self.tree.blockSignals(True)
+        try:
+            if start == 0:
+                for ch in item.takeChildren():
+                    self.forget(ch)
+            else:
+                for i in reversed(range(item.childCount())):           # прежняя строка «ещё …»
+                    if item.child(i).data(C_NAME, MORE_ROLE) is not None:
+                        item.takeChild(i)
+            item.setData(C_NAME, FILLED, True)           # дети созданы
+            new = []
+            for f in kids[start:start + CHUNK]:
+                ch = QTreeWidgetItem()
+                ch.setData(C_NAME, ROLE, f)
+                for c in range(C_FILES, C_HAVE + 1):
+                    ch.setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
+                if not self.model.markable(f):
+                    ch.setFlags(ch.flags() & ~Qt.ItemIsDragEnabled)
+                self.items[f] = ch
+                self.views.pop(f, None)
+                self.set_item(ch, f)
+                if self.model.children.get(f):
+                    ph = QTreeWidgetItem()
+                    ph.setText(C_NAME, '…')
+                    ch.addChild(ph)
+                new.append(ch)
+            rest = len(kids) - start - CHUNK
+            if rest > 0:
+                more = QTreeWidgetItem()
+                more.setText(C_NAME, f'ещё {num(rest)} {plural(rest, "папка", "папки", "папок")} — показать '
+                                     f'(по {CHUNK})')
+                more.setData(C_NAME, MORE_ROLE, (p, start + CHUNK))
+                more.setForeground(C_NAME, QBrush(QColor(BLUE)))
+                more.setToolTip(C_NAME, 'Большая папка: подпапки показываются порциями, чтобы окно не замирало.')
+                more.setFlags(Qt.ItemIsEnabled)
+                new.append(more)
+            item.addChildren(new)
+        finally:
+            self.tree.blockSignals(False)
+
+    def forget(self, it):
+        """Строка дерева удалена: убрать её и её созданных потомков из словарей строк и видов."""
+        stack = [it]
+        while stack:
+            x = stack.pop()
+            f = x.data(C_NAME, ROLE)
+            if f is not None and self.items.get(f) is x:
+                del self.items[f]
+                self.views.pop(f, None)
+            stack.extend(x.child(i) for i in range(x.childCount()))
+
+    def more_clicked(self, it, _col=0):
+        """Щелчок по «ещё N папок — показать»: следующая порция детей."""
+        more = it.data(C_NAME, MORE_ROLE)
+        if not more or self.model is None:
+            return
+        parent = self.items.get(more[0])
+        if parent is not None:
+            self.fill(parent, more[1])
+
+    def show_more(self, folder):
+        """Для тестов и переходов: показать ещё одну порцию детей папки."""
+        it = self.items.get(folder)
+        if it is not None:
+            for i in range(it.childCount()):
+                if it.child(i).data(C_NAME, MORE_ROLE) is not None:
+                    self.more_clicked(it.child(i))
+                    return True
+        return False
 
     def expand(self, item):
         if not item.data(C_NAME, FILLED) and item.data(C_NAME, ROLE) is not None:
             self.fill(item)
 
-    def set_item(self, it, f):
+    def set_item(self, it, f, mode=None):
+        """Показать папку в строке. Этап 17: сначала - кортеж всего показываемого; совпал с прежним (self.views) -
+        сеттеры Qt не вызываются (их по ~15 на строку, при 13 тыс. строк - секунда)."""
         m = self.model
         files, size, n, b = m.folders.get(f, (0, 0, (0,) * 5, (0,) * 5))
         lk = m.look(f)
-        mode = self.mode() if self.dest else ONLY
+        mode = mode or (self.mode() if self.dest else ONLY)
         ck = m.check(f, self.dest, mode) if self.dest else None
         if not f and self.dest and mode == ONLY:
             ck = self.root_check()                        # «выбрать все» - у строки носителя
         name = f'{self.disk} (весь носитель)' if not f else last(f)
+        hv = None if m.have_sub is None else m.have_sub.get(f)
+        r_ = m.route.get(f)
+        view = (name, mode, tuple(sorted(lk.items())), tuple(sorted(ck.items())) if ck else None, files, size, n, b,
+                m.have_sub is None, tuple(hv) if hv else None, (r_.state, r_.num) if r_ is not None else None)
+        if self.views.get(f) == view and self.items.get(f) is it:
+            return False
+        self.views[f] = view
         self.painting = True
         try:
             it.setText(C_NAME, ('• ' if lk['dirty'] else '') + name)
@@ -1781,8 +1898,10 @@ class RazborPage(QWidget):
                 it.setData(C_NAME, TAG_ROLE, None)
             else:
                 it.setFlags((flags | Qt.ItemIsUserCheckable) if ck['checkable'] else (flags & ~Qt.ItemIsUserCheckable))
-                it.setCheckState(C_CHECK, ck.get('state', Qt.Checked if ck['on'] else Qt.Unchecked))
-                it.setData(C_CHECK, GRAY_ROLE, not ck['checkable'])
+                state = ck.get('state', Qt.Checked if ck['on'] else Qt.Unchecked)
+                it.setCheckState(C_CHECK, state)
+                it.setData(C_CHECK, PART_ROLE, bool(f) and state == Qt.PartiallyChecked)
+                it.setData(C_CHECK, GRAY_ROLE, not ck['checkable'] or bool(ck['gray']))
                 it.setToolTip(C_CHECK, ck['tip'] or ('Снять галочку' if ck['on'] else 'Поставить галочку'))
                 it.setData(C_NAME, TAG_ROLE, ck['tag'] or None)
             on = bool(f and ck and ck['on'])
@@ -1824,11 +1943,21 @@ class RazborPage(QWidget):
                                       '(по хешу)' if v else 'Ничего из этой папки на дисках направления по хешу не найдено.')
         finally:
             self.painting = False
+        return True
 
+    @timed('Разбор: update_items')
     def update_items(self):
-        for f, it in self.items.items():
-            if self.model and f in self.model.folders:
-                self.set_item(it, f)
+        """Обновить созданные строки на месте (этап 17: только изменившиеся, без сигналов itemChanged)."""
+        if self.model is not None:
+            mode = self.mode() if self.dest else ONLY
+            folders = self.model.folders
+            self.tree.blockSignals(True)
+            try:
+                for f, it in self.items.items():
+                    if f in folders:
+                        self.set_item(it, f, mode)
+            finally:
+                self.tree.blockSignals(False)
         self.render_cells()
 
     # ---------- диск назначения и режим (этап 8) ----------
@@ -1992,9 +2121,24 @@ class RazborPage(QWidget):
             self.win.statusBar().showMessage(msg, 10000)
 
     def after_marks(self):
+        self.save_failed = False                          # новая правка владельца - снова пробуем записать
         self.update_items()
         self.sync_mode()
         self.changed()
+        self.marks_changed.emit(self.rev)                 # этап 17: окно «Список файлов» обновляет галочки
+
+    def set_in_dest(self, folders, on):
+        """Окно «Список файлов» (этап 17): папки - в диск назначения (on) или не копировать, независимо от режима
+        страницы; тот же черновик, отмена и автосохранение. -> число изменённых записей черновика."""
+        m = self.model
+        if m is None or self.writing or self.saving or not self.dest:
+            return 0
+        ok = [f for f in folders if f and m.markable(f)]
+        pairs = m.include_pairs(ok, self.dest) if on else m.exclude_pairs(ok, self.dest)
+        n = m.set_marks(pairs) if pairs else 0
+        if n:
+            self.after_marks()
+        return n
 
     # ---------- галочки ----------
     def item_changed(self, it, col):
@@ -2002,6 +2146,8 @@ class RazborPage(QWidget):
             return
         f = it.data(C_NAME, ROLE)
         on = it.checkState(C_CHECK) == Qt.Checked
+        if it.data(C_CHECK, PART_ROLE):
+            on = False                                    # этап 17: частичная галочка - щелчок снимает всю папку
         if not f:
             self.select_all(on)
             return
@@ -2094,6 +2240,7 @@ class RazborPage(QWidget):
         stay = m.tops(lambda r: r.state != R_DIR)
         return sel, exc, stay
 
+    @timed('Разбор: render_cells')
     def render_cells(self):
         m = self.model
         if m is None:
@@ -2207,8 +2354,9 @@ class RazborPage(QWidget):
             self.run_summary()
 
     def show_busy(self, on):
-        """«Идёт пересчёт…» в левом нижнем углу - с правки до принятия итога этой ревизии; мигает."""
-        self.busy_lab.setVisible(on)
+        """«Идёт пересчёт…» в ячейке «Копировать на диск …» (этап 17) - с правки до принятия итога этой ревизии;
+        мигает; прежний итог - бледно."""
+        self.copy_cell.set_busy(on)
         if on and not self.blink.isActive():
             self.blink_on = False
             self.blink.start()
@@ -2365,15 +2513,19 @@ class RazborPage(QWidget):
         self.autosave()
 
     def schedule_save(self):
-        """Правка отметок -> запись сразу (на следующем шаге цикла событий: правки одного щелчка - одним пакетом)."""
-        if self.model is not None and self.model.drafts and not self.saving:
+        """Правка отметок -> запись сразу (на следующем шаге цикла событий: правки одного щелчка - одним пакетом).
+        После ошибки записи (не отказа по правилам) черновик ждёт следующей правки владельца или закрытия окна - без
+        повторов по кругу."""
+        if self.model is not None and self.model.drafts and not self.saving and not self.save_failed:
             self.save_timer.start(AUTOSAVE_MS)
 
     def autosave(self):
         """Автосохранение (этап 16, решение владельца: «Сохранить отметки» убрать): черновик -> service.add_marks_batch
         (те же проверки и одна запись под замком, без окна предпросмотра). Пока пакет пишется, он считается сохранённым
-        (Model.inflight): правки во время записи остаются черновиком и пишутся следующим пакетом. Отказ или ошибка -
-        сообщение, черновик этого пакета забывается (на экране - то, что сохранено)."""
+        (Model.inflight): правки во время записи остаются черновиком и пишутся следующим пакетом. Этап 17 (критики по
+        коду): записан - пакет уходит из черновика (даже если перечитка упала); отказ по правилам - пакет забывается
+        (повторять бесполезно), сообщение; ошибка записи - черновик ОСТАЁТСЯ, сообщение, запись - при следующей правке
+        или закрытии окна. Ответ задачи хранится в save_job: flush_now ждёт только эту запись и принимает её ответ сам."""
         m = self.model
         if m is None or self.saving:
             return
@@ -2384,41 +2536,70 @@ class RazborPage(QWidget):
         disk = self.disk
         m.inflight = dict(sent)
         self.saving = True
+        self.saving_changed.emit(True)
         self.update_buttons()
         self.win.statusBar().showMessage(f'Сохраняю отметки ({len(rows)})…', 4000)
+        import threading
+        job = dict(done=threading.Event(), res=None, handled=False)
 
         def written(res):
+            if job['handled']:
+                return                                    # ответ уже принял flush_now
+            job['handled'] = True
             (kind, val), (tkind, tree) = res
             self.saving = False
-            m.inflight = {}
+            self.save_job = None
+            self.saving_changed.emit(False)
             if self.model is not m or disk != self.disk:
+                m.inflight = {}
                 return
-            if kind != 'ok':
+            if kind == 'ok' or kind == 'refused':         # записан - сохранён; отказ по правилам - забыт
                 for k, v in sent.items():
                     if k in m.drafts and m.drafts[k]['verdict'] == v:
                         del m.drafts[k]
+            else:
+                m.inflight = {}                           # ошибка записи: таблица не менялась, черновик остаётся
+                self.save_failed = True
+            if kind != 'ok':
                 self.save_then = []
             if tkind == 'ok':
+                m.inflight = {}
                 m.reload(tree)
                 self.fill_dest()
             else:
+                # перечитка не удалась: записанный пакет считается сохранённым (inflight - основа сравнения до новой
+                # перечитки, повторной записи нет); дерево перечитывается заново, без записи
+                if kind != 'ok':
+                    m.inflight = {}
+                sv_log(tree)
                 m.recalc()
+                QTimer.singleShot(0, lambda: self.disk == disk and self.load_disk(disk, keep=True))
             if kind == 'ok':
+                self.save_failed = False
                 self.win.statusBar().showMessage(f'Отметки сохранены ({len(val["fields"])}). «Отменить последнее» — '
                                                  'вернуть.', 6000)
+            elif kind == 'refused':
+                QMessageBox.warning(self, TITLE, f'Отметка не сохранена: {val}\n\nНа экране — отметки, какие сохранены.')
             else:
-                if kind == 'error':
-                    sv_log(val)
-                QMessageBox.warning(self, TITLE, 'Отметка не сохранена: ' + (val if kind == 'refused' else
-                                                                           val.strip().splitlines()[-1]) +
-                                    '\n\nНа экране — отметки, какие сохранены.')
+                sv_log(val)
+                QMessageBox.warning(self, TITLE, 'Отметки не записались: ' + val.strip().splitlines()[-1] +
+                                    '\n\nОни остались на экране несохранёнными (с «•») и запишутся при следующей '
+                                    'отметке или при закрытии окна.')
             self.update_items()
             self.sync_mode()
             self.changed(debounce=False)                  # оставшийся черновик (правки во время записи) - следующим пакетом
+            self.marks_changed.emit(self.rev)
             if not m.drafts:
                 self.run_then()
-        self.win.bg.run(lambda: (safe(sv.add_marks_batch, disk, rows), safe(sv.razbor_tree, disk)),
-                        ok=written, quiet=True)
+
+        def work():
+            res = (safe(sv.add_marks_batch, disk, rows), safe(sv.razbor_tree, disk))
+            job['res'] = res
+            job['done'].set()
+            return res
+        job['written'] = written
+        self.save_job = job
+        self.win.bg.run(work, ok=written, quiet=True)
 
     def run_then(self):
         then, self.save_then = self.save_then, []
@@ -2426,11 +2607,17 @@ class RazborPage(QWidget):
             fn()
 
     def flush_now(self, question):
-        """Перед сменой носителя и закрытием окна: идущая запись дожидается конца, черновик пишется сейчас же
-        (в этом потоке: одна строка таблицы, доли секунды). Не записалось - вопрос question. -> можно продолжать."""
-        from PySide6.QtCore import QThreadPool
+        """Перед сменой носителя и закрытием окна: ждём ТОЛЬКО свою идущую запись (save_job) не дольше FLUSH_WAIT_MS,
+        без прокрутки цикла событий; не закончилась - второй записи нет, сообщение, действие отменяется. Закончилась - её
+        ответ принимается здесь же (written; поздний ответ из очереди будет пропущен). Остаток черновика пишется сейчас
+        же; «Записывать нечего» = все строки пакета уже так записаны (отказ - только когда пропущены ВСЕ). Не записалось -
+        вопрос question. -> можно продолжать."""
         if self.saving:
-            QThreadPool.globalInstance().waitForDone(30000)
+            job = self.save_job
+            if job is None or not job['done'].wait(FLUSH_WAIT_MS / 1000):
+                QMessageBox.information(self, TITLE, 'Запись отметок ещё идёт — подождите несколько секунд и повторите.')
+                return False
+            job['written'](job['res'])
         m = self.model
         self.save_timer.stop()
         if m is None or not m.drafts:
@@ -2439,10 +2626,15 @@ class RazborPage(QWidget):
         try:
             sv.add_marks_batch(self.disk, rows)
             m.drafts = {}
+            self.save_failed = False
             return True
-        except Exception as e:                            # noqa: BLE001 - отказ или ошибка записи
-            if not isinstance(e, sv.Refused):
-                sv_log(traceback.format_exc())
+        except sv.Refused as e:
+            if str(e).startswith('Записывать нечего'):       # все строки пакета уже записаны так же
+                m.drafts = {}
+                return True
+            return QMessageBox.question(self, TITLE, f'Отметки не сохранились: {e}\n\n{question}') == QMessageBox.Yes
+        except Exception as e:                            # noqa: BLE001 - ошибка записи
+            sv_log(traceback.format_exc())
             return QMessageBox.question(self, TITLE, f'Отметки не сохранились: {e}\n\n{question}') == QMessageBox.Yes
 
     # ---------- задания ----------
@@ -2551,7 +2743,7 @@ class RazborPage(QWidget):
             if not self.dest:
                 return None
             return filelist_window.open_list(self.win, kind=kind, disk=self.disk, num=self.dest, target=target or None,
-                                             drafts=m.draft_rows())
+                                             drafts=m.draft_rows(), page=self)
         return filelist_window.open_list(self.win, kind=kind, disk=self.disk, folder=self.scope_folder())
 
     def run_contested_count(self):
@@ -2787,7 +2979,7 @@ def dest_cell_html(d, P, cap, mode, sel, exc, place_fn, split=False):
     на диске», строка места по каждому диску. split=True (направление на нескольких дисках, этап 12) - только общая
     часть: «уже есть» и место - в блоках дисков (disk_block_html). -> (html, состояние 'short' / 'unknown' / 'ok')."""
     if P is None:
-        return f'<span style="color:{GRAY}">Считаю…</span>', 'normal'
+        return '', 'normal'                              # до первого итога - только плашка «Идёт пересчёт…»
     cp = P.part_a.get((rz.O_COPY, d.num), (0, 0))
     hv = P.part_a.get((rz.O_HAVE, d.num), (0, 0))
     tp = P.part_a.get((rz.O_TYPE, d.num), (0, 0))

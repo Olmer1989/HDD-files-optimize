@@ -33,6 +33,95 @@ def log_error(text):
         pass
 
 
+HANG_LOG = 'окно - зависания.log'
+HANG_DUMP_S = 5                                   # дольше - стеки всех потоков (faulthandler, C-поток)
+HANG_GAP_S = 1.5                                  # окно не отвечало дольше - строка без стека
+SLOW_S = 1.0                                      # медленная операция дерева - строка с именем и временем
+
+
+def hang_log(text):
+    """Строка в «окно - зависания.log» (рядом с «окно - ошибки.log»)."""
+    try:
+        hb.ANSWERS.mkdir(parents=True, exist_ok=True)
+        with open(hb.ANSWERS / HANG_LOG, 'a', encoding='utf-8') as f:
+            f.write(time.strftime('%d.%m.%Y %H:%M:%S ') + text + '\n')
+    except OSError:
+        pass
+
+
+def timed(name):
+    """Замер операции окна (этап 17): дольше SLOW_S - строка в журнал зависаний (имя, секунды, подробность)."""
+    def deco(fn):
+        def run(*a, **k):
+            t = time.perf_counter()
+            try:
+                return fn(*a, **k)
+            finally:
+                dt = time.perf_counter() - t
+                if dt > SLOW_S:
+                    extra = ''
+                    try:
+                        extra = f', строк дерева {len(a[0].items)}' if hasattr(a[0], 'items') else ''
+                    except Exception:                       # noqa: BLE001
+                        pass
+                    hang_log(f'медленно: {name} {dt:.1f} с{extra}')
+        run.__name__, run.__doc__ = fn.__name__, fn.__doc__
+        return run
+    return deco
+
+
+class Watchdog(QObject):
+    """Сторож зависаний окна (этап 17). faulthandler.dump_traceback_later(HANG_DUMP_S) перевзводится таймером главного
+    потока раз в секунду: если главный поток не вернулся в цикл событий дольше HANG_DUMP_S - C-поток faulthandler пишет
+    стеки всех потоков в журнал зависаний (и при удержанном GIL). Промежуток между тиками дольше HANG_GAP_S - строка
+    «окно не отвечало X с» (короткие зависания - без стека)."""
+
+    def __init__(self, parent=None, interval_ms=1000):
+        super().__init__(parent)
+        self.file, self.last = None, time.monotonic()
+        self.timer = QTimer(self)
+        self.timer.setInterval(interval_ms)
+        self.timer.timeout.connect(self.tick)
+
+    def start(self):
+        import faulthandler
+        try:
+            hb.ANSWERS.mkdir(parents=True, exist_ok=True)
+            self.file = open(hb.ANSWERS / HANG_LOG, 'a', encoding='utf-8')
+        except OSError:
+            return False
+        self.faulthandler = faulthandler
+        self.last = time.monotonic()
+        self.arm()
+        self.timer.start()
+        return True
+
+    def arm(self):
+        self.faulthandler.cancel_dump_traceback_later()
+        self.file.flush()
+        self.faulthandler.dump_traceback_later(HANG_DUMP_S, repeat=False, file=self.file)
+
+    def tick(self):
+        now = time.monotonic()
+        gap = now - self.last
+        self.last = now
+        if gap > HANG_GAP_S:
+            try:
+                self.file.write(time.strftime('%d.%m.%Y %H:%M:%S ') + f'окно не отвечало {gap:.1f} с '
+                                f'(стеки - выше, если дольше {HANG_DUMP_S} с)\n')
+                self.file.flush()
+            except OSError:
+                pass
+        self.arm()
+
+    def stop(self):
+        self.timer.stop()
+        if self.file is not None:
+            self.faulthandler.cancel_dump_traceback_later()
+            self.file.close()
+            self.file = None
+
+
 def gib(x):
     return f'{x:,.1f}'.replace(',', ' ')
 

@@ -22,7 +22,8 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QMessageBox, QPushButton, QTableView, QVBoxLayout, QWidget)
+                               QMessageBox, QPushButton, QSpinBox, QSplitter, QTableView, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 import disk_ui
 import service as sv
@@ -32,6 +33,11 @@ TITLE = 'Архив дисков'
 SEP = '\\'
 XLSX_MAX = 1_048_575                 # строк данных на листе Excel (плюс строка заголовка)
 FILTER_MS = 300
+TREE_CHUNK = 500                     # этап 17: дети папки в дереве окна - порциями
+SMALL_KB = 10                        # «мелкие картинки» - фото до 10 КБ (замечание владельца: 1–10 КБ)
+RELOAD_MS = 400                      # после правки отметок - перечитать список (несколько правок - одно чтение)
+F_ROLE, F_MORE, F_PART = Qt.UserRole + 1, Qt.UserRole + 2, Qt.UserRole + 3   # роли дерева окна
+MARK_KINDS = ('copy', 'have', 'type')
 KIND_TITLE = {'copy': 'к копированию на', 'have': 'уже есть на', 'type': 'не подходит по типу для',
               'nohash': 'без хеша', 'contested': 'спорные файлы', 'unique': 'только на этом носителе'}
 # столбцы: ключ -> заголовок
@@ -160,6 +166,7 @@ class FileModel(QAbstractTableModel):
         self.kind, self.cols, self.rows, self.order, self.idx = kind, columns(kind), [], [], []
         self.sort_col, self.sort_desc = None, False
         self.types, self.folder_sub, self.name_sub = set(range(5)), '', ''
+        self.folder_prefix, self.min_size = '', 0          # этап 17: щелчок по папке дерева; «меньше N КБ - скрыть»
 
     # --- данные ---
     def set_rows(self, kind, rows):
@@ -273,7 +280,11 @@ class FileModel(QAbstractTableModel):
         self.endResetModel()
 
     # --- фильтр ---
-    def set_filter(self, types=None, folder_sub=None, name_sub=None):
+    def set_filter(self, types=None, folder_sub=None, name_sub=None, folder_prefix=None, min_size=None):
+        if folder_prefix is not None:
+            self.folder_prefix = folder_prefix
+        if min_size is not None:
+            self.min_size = int(min_size)
         if types is not None:
             self.types = set(types)
         if folder_sub is not None:
@@ -286,15 +297,22 @@ class FileModel(QAbstractTableModel):
             self.endResetModel()
 
     def filtered(self):
-        return self.types != set(range(5)) or bool(self.folder_sub) or bool(self.name_sub)
+        return (self.types != set(range(5)) or bool(self.folder_sub) or bool(self.name_sub) or bool(self.folder_prefix)
+                or self.min_size > 0)
 
     def _apply(self):
+        """Все фильтры - вместе (И): типы, «папка содержит», «имя содержит», папка дерева (она и вложенные; путь -
+        как есть, без обрезки), «меньше N байт - скрыть» (размер неизвестен - не скрывается)."""
         rows, ts, fs, ns = self.rows, self.types, self.folder_sub, self.name_sub
+        fp, ms = self.folder_prefix, self.min_size
         if not self.filtered():
             self.idx = list(self.order)
             return
+        fpp = fp + SEP
         self.idx = [i for i in self.order if rows[i][R_T5] in ts and (not fs or fs in rows[i][R_FLC])
-                    and (not ns or ns in rows[i][R_NLC])]
+                    and (not ns or ns in rows[i][R_NLC])
+                    and (not fp or rows[i][R_FOLDER] == fp or rows[i][R_FOLDER].startswith(fpp))
+                    and (not ms or rows[i][R_SIZE] is None or rows[i][R_SIZE] >= ms)]
 
     # --- итог ---
     @staticmethod
@@ -359,9 +377,14 @@ def collapse(folders):
 class FileListWindow(QWidget):
     """Отдельное окно (не вкладка). spec - аргументы service.file_list: kind, disk, folder, num, target, drafts."""
 
-    def __init__(self, win, **spec):
+    def __init__(self, win, page=None, **spec):
         super().__init__(win, Qt.Window)
         self.win, self.spec = win, dict(spec)
+        self.page = page if spec.get('kind') in MARK_KINDS else None   # этап 17: галочки дерева = отметки «Разбора»
+        self.keep = set()                     # папки, снятые в этом окне: видны с 0 файлов, галочку можно вернуть
+        self.only = None                      # «показать эти папки»: дерево только из них (и предков)
+        self.f_items, self.f_count, self.f_kids = {}, {}, {}
+        self.painting = False
         self.kind, self.disk = spec['kind'], spec['disk']
         self.closed, self.req, self.data = False, 0, None
         self.disk_rows = []
@@ -413,6 +436,15 @@ class FileListWindow(QWidget):
         self.name_edit.setPlaceholderText('имя содержит…')
         self.name_edit.textChanged.connect(self.filter_later)
         fl.addWidget(self.name_edit, 1)
+        fl.addWidget(QLabel('скрыть меньше'))
+        self.size_box = QSpinBox()                         # этап 17: «меньше N КБ - скрыть», 0 - выключено
+        self.size_box.setRange(0, 10 ** 7)
+        self.size_box.setSuffix(' КБ')
+        self.size_box.setSpecialValueText('—')
+        self.size_box.setToolTip('Скрыть файлы меньше стольких КБ (0 - показать все). Файлы с неизвестным размером не '
+                                 'скрываются.')
+        self.size_box.valueChanged.connect(self.filter_later)
+        fl.addWidget(self.size_box)
         lay.addLayout(fl)
         self.shown = QLabel('')
         self.shown.setTextFormat(Qt.RichText)
@@ -434,7 +466,35 @@ class FileListWindow(QWidget):
         self.view.setAlternatingRowColors(True)
         self.view.setWordWrap(False)
         self.view.setToolTip('Щелчок по заголовку столбца - сортировка по всему списку. Ctrl/Shift - выделить несколько.')
-        lay.addWidget(self.view, 1)
+        # этап 17: слева - дерево папок списка (щелчок - фильтр; галочки - отметки «Разбора»)
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        self.small = QLabel('')                              # «Мелкие картинки до 10 КБ: N файлов в M папках»
+        self.small.setTextFormat(Qt.RichText)
+        self.small.setWordWrap(True)
+        self.small.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.small.linkActivated.connect(self.toggle_small)
+        ll.addWidget(self.small)
+        self.ftree = QTreeWidget()
+        self.ftree.setHeaderLabels(['Папка', 'Файлов'])
+        self.ftree.header().setStretchLastSection(False)
+        self.ftree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.ftree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.ftree.setUniformRowHeights(True)
+        self.ftree.itemExpanded.connect(self.f_expand)
+        self.ftree.itemClicked.connect(self.f_clicked)
+        self.ftree.itemChanged.connect(self.f_changed)
+        ll.addWidget(self.ftree, 1)
+        self.marks_note = QLabel('')
+        self.marks_note.setWordWrap(True)
+        self.marks_note.setStyleSheet('color:#757575; font-size:8pt')
+        ll.addWidget(self.marks_note)
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(left)
+        split.addWidget(self.view)
+        split.setSizes([360, 940])
+        lay.addWidget(split, 1)
         self.set_widths()
         # кнопки
         bl = QHBoxLayout()
@@ -471,6 +531,12 @@ class FileListWindow(QWidget):
         self.sel_timer.timeout.connect(self.count_selected)
         self.view.selectionModel().selectionChanged.connect(lambda *_: self.sel_timer.start(250))
         self.sel_folders = []
+        self.reload_timer = QTimer(self)
+        self.reload_timer.setSingleShot(True)
+        self.reload_timer.timeout.connect(self.load)
+        if self.page is not None:
+            self.page.marks_changed.connect(self.on_marks)
+            self.page.saving_changed.connect(self.on_saving)
         self.update_buttons()
         self.load()
 
@@ -481,6 +547,8 @@ class FileListWindow(QWidget):
         self.busy(True)
         self.total.setText('Загружаю список из базы (диски не читаются)…')
         spec = dict(self.spec)
+        if self.page is not None and self.can_mark():
+            spec['drafts'] = self.page.model.draft_rows()   # тот же черновик, что у «Разбора»
 
         def job():
             data = prepare(sv.file_list(**spec))
@@ -512,8 +580,194 @@ class FileListWindow(QWidget):
         bad = any(x.startswith(('ИТОГ НЕВЕРЕН', 'ВНИМАНИЕ')) for x in notes)
         self.notes.setStyleSheet('color:#c62828; font-weight:bold' if bad else 'color:#5d4037')
         self.notes.setVisible(bool(val.get('notes')))
+        self.build_tree()
         self.show_totals()
         self.update_buttons()
+
+    # --- дерево папок списка (этап 17) ---
+    def build_tree(self):
+        """Папки с файлами списка и их предки (+ снятые в этом окне - с 0 файлов); число - файлов в папке с вложенными.
+        Дети создаются по раскрытию, порциями по TREE_CHUNK. Раскрытые узлы сохраняются по путям."""
+        rows = self.model.rows
+        direct = {}
+        for r in rows:
+            direct[r[R_FOLDER]] = direct.get(r[R_FOLDER], 0) + 1
+        small = {}
+        for r in rows:
+            if r[R_T5] == 0 and r[R_SIZE] is not None and 0 < r[R_SIZE] <= SMALL_KB * 1024:
+                small[r[R_FOLDER]] = small.get(r[R_FOLDER], 0) + 1
+        self.small_folders = set(small)
+        n_small = sum(small.values())
+        if n_small:
+            link = 'все папки' if self.only is not None else 'показать эти папки'
+            self.small.setText(f'Мелкие картинки до {SMALL_KB} КБ: <b>{n_text(n_small)}</b> {files_word(n_small).split()[-1]}'
+                               f' в {n_text(len(small))} папках — <a href="small" style="color:#1565c0">{link}</a>')
+        else:
+            self.small.setText('')
+            self.only = None
+        base = set(direct) if self.only is None else set(self.only) & set(direct)
+        count, kids = {}, {}
+        for f in base | self.keep:
+            n = direct.get(f, 0)
+            a = f
+            while True:
+                count[a] = count.get(a, 0) + n
+                if not a:
+                    break
+                p = a.rsplit(SEP, 1)[0] if SEP in a else ''
+                kids.setdefault(p, set()).add(a)
+                a = p
+        count.setdefault('', 0)
+        self.f_count = count
+        self.f_kids = {p: sorted(v, key=lambda x: x.lower()) for p, v in kids.items()}
+        opened = {f for f, it in self.f_items.items() if it.isExpanded()}
+        self.painting = True
+        self.ftree.blockSignals(True)
+        try:
+            self.ftree.clear()
+            self.f_items = {}
+            root = QTreeWidgetItem([f'весь список ({n_text(count.get("", 0))})', ''])
+            root.setData(0, F_ROLE, '')
+            root.setToolTip(0, 'Щелчок - показать файлы всех папок (сбросить фильтр по папке).')
+            self.ftree.addTopLevelItem(root)
+            self.f_items[''] = root
+            self.f_fill(root)
+            root.setExpanded(True)
+            for f in sorted(opened, key=lambda x: x.count(SEP)):
+                it = self.f_items.get(f)
+                if it is not None and f:
+                    if not it.data(1, F_ROLE):
+                        self.f_fill(it)
+                    it.setExpanded(True)
+        finally:
+            self.ftree.blockSignals(False)
+            self.painting = False
+        self.refresh_checks()
+
+    def f_fill(self, item, start=0):
+        p = item.data(0, F_ROLE)
+        kids = self.f_kids.get(p, [])
+        was = self.ftree.signalsBlocked()
+        self.ftree.blockSignals(True)
+        try:
+            if start == 0:
+                item.takeChildren()
+            else:
+                for i in reversed(range(item.childCount())):
+                    if item.child(i).data(0, F_MORE) is not None:
+                        item.takeChild(i)
+            item.setData(1, F_ROLE, True)                         # дети созданы
+            new = []
+            for f in kids[start:start + TREE_CHUNK]:
+                ch = QTreeWidgetItem([f.rsplit(SEP, 1)[-1], n_text(self.f_count.get(f, 0))])
+                ch.setData(0, F_ROLE, f)
+                ch.setToolTip(0, f'{self.disk}\\{f}')
+                ch.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+                if self.f_kids.get(f):
+                    ch.addChild(QTreeWidgetItem(['…', '']))
+                self.f_items[f] = ch
+                new.append(ch)
+            rest = len(kids) - start - TREE_CHUNK
+            if rest > 0:
+                more = QTreeWidgetItem([f'ещё {n_text(rest)} папок — показать', ''])
+                more.setData(0, F_MORE, (p, start + TREE_CHUNK))
+                more.setForeground(0, QColor('#1565c0'))
+                new.append(more)
+            item.addChildren(new)
+        finally:
+            self.ftree.blockSignals(was)
+        self.refresh_checks()
+
+    def f_expand(self, item):
+        if not item.data(1, F_ROLE) and item.data(0, F_ROLE) is not None:
+            self.f_fill(item)
+
+    def f_clicked(self, item, col=0):
+        if getattr(self, 'check_click', False):     # щелчок по галочке, а не по имени: фильтр не трогаем
+            self.check_click = False
+            return
+        more = item.data(0, F_MORE)
+        if more is not None:
+            parent = self.f_items.get(more[0])
+            if parent is not None:
+                self.f_fill(parent, more[1])
+            return
+        f = item.data(0, F_ROLE)
+        if f is None:
+            return
+        self.model.set_filter(folder_prefix=f)                     # И с остальными фильтрами; корень - сброс
+        self.show_totals()
+        self.update_buttons()
+
+    def toggle_small(self, _href=''):
+        """«показать эти папки» (только папки с мелкими картинками) / «все папки»."""
+        self.only = None if self.only is not None else set(self.small_folders)
+        self.build_tree()
+
+    def can_mark(self):
+        """Галочки дерева = отметки страницы «Разбор»: только для её носителя и диска назначения, не во время записи."""
+        p = self.page
+        return bool(p is not None and p.model is not None and p.disk == self.disk and p.dest == self.spec.get('num')
+                    and not p.writing and not p.saving)
+
+    def refresh_checks(self):
+        """Галочки дерева по маршруту «Разбора»: папка идёт в диск назначения - отмечена (с исключениями внутри -
+        частично), иначе - нет. Пока «Разбор» пишет или выбран другой носитель / диск - неактивны."""
+        p = self.page
+        if p is None or self.closed:
+            return
+        ok = self.can_mark()
+        m = p.model if p.model is not None and p.disk == self.disk else None
+        num = self.spec.get('num')
+        if p.saving or p.writing:
+            self.marks_note.setText('Идёт запись отметок в «Разборе носителя» — галочки ненадолго неактивны.')
+        elif not ok:
+            self.marks_note.setText('Галочки неактивны: в «Разборе носителя» сейчас другой носитель или диск назначения.')
+        else:
+            self.marks_note.setText('Галочка снята — папка не копируется (сохраняется сразу; «Отменить последнее» — в '
+                                    '«Разборе носителя»). Щелчок по имени — показать файлы папки.')
+        part = m.partial(num) if m is not None else set()
+        self.painting = True
+        was = self.ftree.signalsBlocked()
+        self.ftree.blockSignals(True)
+        try:
+            for f, it in self.f_items.items():
+                if not f or m is None or not m.markable(f):
+                    it.setData(0, Qt.CheckStateRole, None)
+                    continue
+                on = m.is_dir(m.route.get(f), num)
+                st = (Qt.PartiallyChecked if f in part else Qt.Checked) if on else Qt.Unchecked
+                fl = it.flags()
+                it.setFlags((fl | Qt.ItemIsUserCheckable) if ok else (fl & ~Qt.ItemIsUserCheckable))
+                it.setCheckState(0, st)
+                it.setData(1, F_PART, st == Qt.PartiallyChecked)
+        finally:
+            self.ftree.blockSignals(was)
+            self.painting = False
+
+    def on_saving(self, _on=False):
+        self.refresh_checks()
+
+    def f_changed(self, item, col):
+        if self.painting or col != 0:
+            return
+        self.check_click = True                     # тот же щелчок придёт и в itemClicked - он не фильтр
+        QTimer.singleShot(0, lambda: setattr(self, 'check_click', False))   # только для этого щелчка
+        f = item.data(0, F_ROLE)
+        if not f or not self.can_mark():
+            self.refresh_checks()
+            return
+        on = item.checkState(0) == Qt.Checked and not item.data(1, F_PART)   # частичная - снять всю
+        self.keep.add(f)
+        if not self.page.set_in_dest([f], on):
+            self.refresh_checks()
+
+    def on_marks(self, _rev=0):
+        """Отметки в «Разборе» изменились: галочки - сразу, список - перечитать (ответ старого запроса отбросится)."""
+        if self.closed:
+            return
+        self.refresh_checks()
+        self.reload_timer.start(RELOAD_MS)
 
     def busy(self, on):
         for w in (self.open_btn, self.excel_btn, self.rescan_btn, self.refresh_btn):
@@ -554,7 +808,8 @@ class FileListWindow(QWidget):
     def apply_filter(self):
         types = {i for i, b in enumerate(self.type_boxes) if b.isChecked()}
         # текст поиска - как набран: пробелы по краям тоже ищутся (имена папок с пробелом, этап 16)
-        self.model.set_filter(types, self.folder_edit.text(), self.name_edit.text())
+        self.model.set_filter(types, self.folder_edit.text(), self.name_edit.text(),
+                              min_size=self.size_box.value() * 1024)
         self.show_totals()
         self.update_buttons()
 
@@ -701,6 +956,13 @@ class FileListWindow(QWidget):
 
     def closeEvent(self, e):                                      # noqa: N802
         self.closed = True
+        self.reload_timer.stop()
+        if self.page is not None:
+            for sig, slot in ((self.page.marks_changed, self.on_marks), (self.page.saving_changed, self.on_saving)):
+                try:
+                    sig.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
         lists = getattr(self.win, 'file_lists', None)
         if lists is not None and self in lists:
             lists.remove(self)
@@ -725,9 +987,9 @@ def open_in_explorer(parent, letter, folder, name):
     return None
 
 
-def open_list(win, **spec):
+def open_list(win, page=None, **spec):
     """Открыть окно «Список файлов» (из «Разбора носителя» и «Дисков и папок»). -> окно."""
-    w = FileListWindow(win, **spec)
+    w = FileListWindow(win, page=page, **spec)
     if not hasattr(win, 'file_lists'):
         win.file_lists = []
     win.file_lists.append(w)

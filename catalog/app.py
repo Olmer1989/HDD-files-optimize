@@ -101,6 +101,8 @@ class Window(QMainWindow):
         self.show_footer()                            # готовая база - сразу, не дожидаясь проверки новых модулей
         self.nav.setCurrentRow(0)
         self.apply_new()
+        self.watchdog = Watchdog(self)                # этап 17: зависания окна - в «окно - зависания.log»
+        self.watchdog.start()
 
     def go(self, i):
         self.stack.setCurrentIndex(i)
@@ -129,6 +131,8 @@ class Window(QMainWindow):
             e.ignore()
             return
         super().closeEvent(e)
+        if e.isAccepted() and getattr(self, 'watchdog', None) is not None:
+            self.watchdog.stop()
 
     def show_error(self, text):
         short = text.strip().splitlines()[-1] if text.strip() else 'ошибка'
