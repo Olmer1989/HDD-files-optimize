@@ -1,4 +1,14 @@
-﻿# ШАБЛОН «ПЕРЕМЕСТИТЬ НА НОСИТЕЛЕ» (версия 1.2 от 16.11.2026; 1.1 - от 15.11.2026; 1.0 - от 14.11.2026)
+﻿# ШАБЛОН «ПЕРЕМЕСТИТЬ НА НОСИТЕЛЕ» (версия 1.3 от 17.11.2026; 1.2 - от 16.11.2026; 1.1 - от 15.11.2026; 1.0 - от 14.11.2026)
+#
+# Новое в 1.3 (проблемные файлы; решение владельца 17.11.2026, ЖУРНАЛ_ДОДЕЛОК.md):
+#   - длинные пути (больше 260 знаков): все обращения к файлам и папкам - через \\?\ (сетевой путь - \\?\UNC\…);
+#     в журнале и на экране пути обычные;
+#   - понятная причина в журнале (строка по-прежнему «ОШИБКА: …»): файл занят другой программой; нет прав (права
+#     программа НЕ меняет - инструкция в итоге); ошибка ввода-вывода диска (код Windows). «Занят» и «нет прав» не
+#     считаются в «5 ошибок подряд» (это не сбой диска). Такие файлы остаются на месте;
+#   - в конце - отдельный список «Проблемные файлы» (на экране и в файле «Проблемные файлы <дата время>.txt» рядом
+#     с журналом): всё, что не перемещено, с причиной и что делать.
+#   Прежняя версия - «Переместить - версия 1.2.ps1.txt».
 #
 # Что делает: после копирования перекладывает файлы ВНУТРИ того же диска-источника в служебные папки
 #   <диск>:\Скопировано на Семейный архив (45 и 77)\<тот же путь>   (логика v3, версия 1.1)
@@ -52,7 +62,6 @@ $VolFile = Join-Path $Here 'тома.tsv'
 $WholeFile = Join-Path $Here 'папки целиком.tsv'
 $RootsFile = Join-Path $Here 'корни.tsv'
 $IntentPath = Join-Path $Here 'Намерение перемещения.tsv'
-$LongPrefix = '\\?\'
 $U8 = [System.Text.Encoding]::UTF8
 $U8NoBom = New-Object System.Text.UTF8Encoding($false)
 $Auto = [bool]$TestRoots
@@ -72,9 +81,32 @@ function Get-InnerMessage($err) {
     while ($e.InnerException) { $e = $e.InnerException }
     return $e.Message
 }
+# 1.3: через \\?\ Windows не убирает пустые части, «.» и «..» - они запрещены целиком
 function Test-Rel([string]$rel) {
-    return ($rel -and -not $rel.StartsWith('\') -and -not $rel.Contains(':') -and -not $rel.Contains('/') -and
-            -not ('\' + $rel + '\').Contains('\..\') -and -not ('\' + $rel + '\').Contains('\.\'))
+    if (-not $rel -or $rel.StartsWith('\') -or $rel.Contains(':') -or $rel.Contains('/')) { return $false }
+    foreach ($c in $rel.Split('\')) { if ($c -eq '' -or $c -eq '.' -or $c -eq '..') { return $false } }
+    return $true
+}
+# 1.3: путь для .NET без предела 260 знаков; в журнал и на экран - обычный путь
+function Get-Long([string]$p) {
+    if ($p.StartsWith('\\?\')) { return $p }
+    if ($p.StartsWith('\\')) { return '\\?\UNC\' + $p.Substring(2) }
+    return '\\?\' + $p
+}
+# 1.3: причина ошибки по коду Windows -> @{ Kind = занят | права | сбой | ошибка; Text }
+$RightsHelp = 'программа права не меняет: правой кнопкой по файлу или папке - Свойства - Безопасность - Дополнительно - Владелец «Изменить» (нужны права администратора), или запустите задание от имени администратора'
+$IoText = @{ 23 = 'данные не читаются (ошибка CRC)'; 27 = 'сектор не найден'; 30 = 'ошибка чтения'; 31 = 'устройство не работает';
+    38 = 'неожиданный конец файла'; 483 = 'аппаратная ошибка устройства'; 1006 = 'том изменён извне'; 1117 = 'ошибка ввода-вывода устройства';
+    1392 = 'файл или папка повреждены' }
+function Get-Problem($err) {
+    $e = $err.Exception
+    while ($e.InnerException) { $e = $e.InnerException }
+    $hr = $e.HResult
+    $code = if (((($hr -shr 16) -band 0xFFFF) -eq 0x8007)) { $hr -band 0xFFFF } else { 0 }
+    if ($code -eq 32 -or $code -eq 33) { return @{ Kind = 'занят'; Text = 'файл занят другой программой - закройте её и запустите перемещение ещё раз' } }
+    if ($code -eq 5) { return @{ Kind = 'права'; Text = 'нет прав на перемещение (файл или его папка) - ' + $RightsHelp } }
+    if ($IoText.ContainsKey($code)) { return @{ Kind = 'сбой'; Text = "ошибка ввода-вывода диска (код Windows ${code}: $($IoText[$code])) - файл не перемещён, диск стоит проверить" } }
+    return @{ Kind = 'ошибка'; Text = $e.Message }
 }
 function Test-DestName([string]$name) {
     if ($name -eq $Trash) { return $true }
@@ -193,7 +225,7 @@ $PendingTo = @{}
 foreach ($op in @($Ops.Keys)) { if ($Ops[$op].Kind -eq 'папка' -and $Ops[$op].State -eq 'намерение') { $PendingTo[$Ops[$op].To] = $true } }
 foreach ($name in @($Items | ForEach-Object Folder | Sort-Object -Unique)) {
     if (-not $name.StartsWith($NewPrefix)) { continue }
-    $exists = [System.IO.Directory]::Exists($LongPrefix + $Root + '\' + $name)
+    $exists = [System.IO.Directory]::Exists((Get-Long ($Root + '\' + $name)))
     if ($exists -and $RootState[$name] -ne 'известен' -and -not $CreatedRoots.ContainsKey($name) -and -not $PendingTo.ContainsKey($name)) {
         Stop-Script "Нужна ручная проверка: на диске уже есть папка «$name», но программа её не создавала (нет в базе и в записи намерений). Ничего не сделано." 1
     }
@@ -258,10 +290,10 @@ function Write-Intent([string]$op, [string]$kind, [string]$state, [string]$from,
 function Confirm-Root([string]$name) {
     if (-not $name.StartsWith($NewPrefix)) { return }
     $full = $Root + '\' + $name
-    if ([System.IO.Directory]::Exists($LongPrefix + $full)) { return }
+    if ([System.IO.Directory]::Exists((Get-Long $full))) { return }
     Write-Intent ("$Stamp-корень") 'корень' 'создан' '' $name ''
     $script:CreatedRoots[$name] = $true
-    [void][System.IO.Directory]::CreateDirectory($LongPrefix + $full)
+    [void][System.IO.Directory]::CreateDirectory((Get-Long $full))
 }
 function Note-Root([string]$name) {
     # 1.2: служебная папка появилась переименованием всей «Скопировано на …» - записать, что её создала программа
@@ -276,7 +308,7 @@ function Test-ReparseChain([string]$dir) {
     if ($RpCache.ContainsKey($dir)) { return $RpCache[$dir] }
     $r = Test-ReparseChain ($dir.Substring(0, $dir.LastIndexOf('\')))
     if (-not $r) {
-        $di = [System.IO.DirectoryInfo]::new($LongPrefix + $dir)
+        $di = [System.IO.DirectoryInfo]::new((Get-Long $dir))
         if ($di.Exists -and ($di.Attributes -band $RP)) { $r = $true }
     }
     $RpCache[$dir] = $r
@@ -287,7 +319,7 @@ function Test-Listing([string]$dir, $items, [string]$listPrefix) {
     $want = @{}
     foreach ($it in $items) { $want[$it.Rel.Substring($listPrefix.Length).ToLowerInvariant()] = $it }
     $seen = 0
-    $di = [System.IO.DirectoryInfo]::new($LongPrefix + $dir)
+    $di = [System.IO.DirectoryInfo]::new((Get-Long $dir))
     $base = $di.FullName.Length + 1
     foreach ($e in $di.EnumerateFileSystemInfos('*', [System.IO.SearchOption]::AllDirectories)) {
         if ($e.Attributes -band $RP) { return 'внутри есть ссылка (reparse point)' }
@@ -307,6 +339,7 @@ $CanKey = $true
 try { [void][Console]::KeyAvailable } catch { $CanKey = $false }
 $Moved = 0; $Already = 0; $Skipped = 0; $Errors = 0; $Stopped = $false; $ErrorsInRow = 0; $Failing = $false; $Manual = 0
 $WholeDone = 0
+$ProblemList = New-Object System.Collections.Generic.List[object]     # 1.3: не перемещённые файлы для списка в конце
 [double]$MovedBytes = 0
 $Start = Get-Date
 
@@ -316,8 +349,10 @@ foreach ($op in @($Ops.Keys)) {
     if ($o.Kind -ne 'папка' -or $o.State -ne 'намерение') { continue }
     $w = $Whole | Where-Object { $_.Rel -eq $o.From -and $_.Dst -eq $o.To } | Select-Object -First 1
     $src = $Root + '\' + $o.From; $dst = $Root + '\' + $o.To
-    $se = [System.IO.Directory]::Exists($LongPrefix + $src); $de = [System.IO.Directory]::Exists($LongPrefix + $dst)
-    if ($w -and -not $se -and $de -and -not (Test-Listing $dst $w.Items ($w.Rel + '\'))) {
+    $se = [System.IO.Directory]::Exists((Get-Long $src)); $de = [System.IO.Directory]::Exists((Get-Long $dst))
+    $sameList = $false                              # 1.3: оглавление не читается (права, сбой) - ручная проверка
+    if ($w -and -not $se -and $de) { try { $sameList = -not (Test-Listing $dst $w.Items ($w.Rel + '\')) } catch { $sameList = $false } }
+    if ($sameList) {
         if ($w.Dst -eq $w.Folder) { Note-Root $w.Folder }
         foreach ($it in $w.Items) {
             Write-LogLine $it 'уже перемещён' ($Root + '\' + $it.Rel) ($Root + '\' + $it.Dst)
@@ -345,21 +380,24 @@ foreach ($w in $Whole) {
     if (@($w.Items | Where-Object { $_.Done -or $_.Blocked }).Count) { continue }
     $src = $Root + '\' + $w.Rel; $dst = $Root + '\' + $w.Dst
     $reason = ''
-    if ($w.Items.Count -ne $w.Count -or $w.Count -eq 0) { $reason = 'список папки не сходится с перемещение.tsv' }
-    elseif (-not [System.IO.Directory]::Exists($LongPrefix + $src)) { $reason = 'папки нет на месте' }
-    elseif ([System.IO.Directory]::Exists($LongPrefix + $dst) -or [System.IO.File]::Exists($LongPrefix + $dst)) { $reason = 'в назначении уже есть такая папка' }
-    elseif ((Test-ReparseChain $src) -or (Test-ReparseChain ($dst.Substring(0, $dst.LastIndexOf('\'))))) { $reason = 'в пути есть ссылка (reparse point)' }
-    else { $reason = Test-Listing $src $w.Items ($w.Rel + '\') }
+    $wholeRoot = $w.Dst -eq $w.Folder               # 1.2: вся «Скопировано на A» -> «Скопировано на A и B»
+    # 1.3: ошибка проверки или подготовки (права, занято, сбой) - папка идёт по файлам, у каждого файла своя причина
+    try {
+        if ($w.Items.Count -ne $w.Count -or $w.Count -eq 0) { $reason = 'список папки не сходится с перемещение.tsv' }
+        elseif (-not [System.IO.Directory]::Exists((Get-Long $src))) { $reason = 'папки нет на месте' }
+        elseif ([System.IO.Directory]::Exists((Get-Long $dst)) -or [System.IO.File]::Exists((Get-Long $dst))) { $reason = 'в назначении уже есть такая папка' }
+        elseif ((Test-ReparseChain $src) -or (Test-ReparseChain ($dst.Substring(0, $dst.LastIndexOf('\'))))) { $reason = 'в пути есть ссылка (reparse point)' }
+        else { $reason = Test-Listing $src $w.Items ($w.Rel + '\') }
+        if (-not $reason -and -not $wholeRoot) {
+            Confirm-Root $w.Folder
+            [void][System.IO.Directory]::CreateDirectory((Get-Long $dst.Substring(0, $dst.LastIndexOf('\'))))
+        }
+    } catch { $reason = 'не удалось проверить или подготовить: ' + (Get-Problem $_).Text }
     if ($reason) { Write-Host "Папка «$($w.Rel)» пойдёт по файлам: $reason." -ForegroundColor Yellow; continue }
     $op = "$Stamp-$n"
-    $wholeRoot = $w.Dst -eq $w.Folder               # 1.2: вся «Скопировано на A» -> «Скопировано на A и B»
-    if (-not $wholeRoot) {
-        Confirm-Root $w.Folder
-        [void][System.IO.Directory]::CreateDirectory($LongPrefix + $dst.Substring(0, $dst.LastIndexOf('\')))
-    }
     Write-Intent $op 'папка' 'намерение' $w.Rel $w.Dst $w.Count
     $moveErr = ''
-    try { [System.IO.Directory]::Move($LongPrefix + $src, $LongPrefix + $dst) } catch { $moveErr = Get-InnerMessage $_ }
+    try { [System.IO.Directory]::Move((Get-Long $src), (Get-Long $dst)) } catch { $moveErr = Get-InnerMessage $_ }
     if (-not $moveErr) {
         if ($wholeRoot) { Note-Root $w.Folder }
         foreach ($it in $w.Items) {
@@ -370,7 +408,7 @@ foreach ($w in $Whole) {
         $WholeDone++
         Write-Host ("Папка «{0}» перенесена целиком: {1} файлов." -f $w.Rel, $w.Count) -ForegroundColor Cyan
     } else {
-        $se = [System.IO.Directory]::Exists($LongPrefix + $src); $de = [System.IO.Directory]::Exists($LongPrefix + $dst)
+        $se = [System.IO.Directory]::Exists((Get-Long $src)); $de = [System.IO.Directory]::Exists((Get-Long $dst))
         if ($se -and -not $de) {
             Write-Intent $op 'папка' 'не выполнено' $w.Rel $w.Dst $w.Count
             Write-Host "Папку «$($w.Rel)» переименовать не удалось ($moveErr) - пойдёт по файлам." -ForegroundColor Yellow
@@ -387,19 +425,24 @@ foreach ($w in $Whole) {
 # --- 8. По файлам ---
 $LastUi = $Start.AddSeconds(-10)
 $i = 0
+$handled = 0
 foreach ($it in $Items) {
     $i++
     if ($Stopped) { break }
+    $handled = $i
     if ($it.Done) { continue }
     $src = $Root + '\' + $it.Rel
     $dst = $Root + '\' + $it.Dst
-    $result = ''
+    $result = ''; $Kind = ''
     try {
         if ($it.Blocked) { $result = $it.Blocked }
         else {
-            $s = [System.IO.FileInfo]::new($LongPrefix + $src)
-            $d = [System.IO.FileInfo]::new($LongPrefix + $dst)
+            $s = [System.IO.FileInfo]::new((Get-Long $src))
+            $d = [System.IO.FileInfo]::new((Get-Long $dst))
             if (-not $s.Exists) {
+                # 1.3: Exists = false и при нет прав, и при сбое диска - спросим ещё раз; «нет источника» - только при
+                # ответе Windows «нет файла» / «нет папки», иначе - настоящая причина (права, ввод-вывод)
+                try { [void][System.IO.File]::GetAttributes((Get-Long $src)) } catch { $h = $_.Exception; while ($h.InnerException) { $h = $h.InnerException }; if (@(-2147024894, -2147024893) -notcontains $h.HResult) { throw } }
                 $same = $d.Exists -and $d.Length -eq $it.Size -and ($it.Mtime -lt 0 -or [math]::Abs((Get-Unix $d.LastWriteTimeUtc) - $it.Mtime) -le 2)
                 if ($same -and $Started.ContainsKey((Get-DestKey $dst))) { $result = 'уже перемещён' }
                 elseif ($same) { $result = 'нужна ручная проверка: источника нет, в назначении такой же файл, но записи «начато» нет' }
@@ -408,27 +451,33 @@ foreach ($it in $Items) {
             elseif ($s.Attributes -band $RP) { $result = 'ссылка (reparse point), не трогал' }
             elseif ($s.Length -ne $it.Size) { $result = "размер изменился ($($s.Length)), не трогал" }
             elseif ($it.Mtime -ge 0 -and [math]::Abs((Get-Unix $s.LastWriteTimeUtc) - $it.Mtime) -gt 2) { $result = 'дата изменения другая, не трогал' }
-            elseif ($d.Exists -or [System.IO.Directory]::Exists($LongPrefix + $dst)) { $result = 'КОНФЛИКТ: в назначении уже есть файл, не трогал' }
+            elseif ($d.Exists -or [System.IO.Directory]::Exists((Get-Long $dst))) { $result = 'КОНФЛИКТ: в назначении уже есть файл, не трогал' }
             elseif ((Test-ReparseChain ($src.Substring(0, $src.LastIndexOf('\')))) -or (Test-ReparseChain ($dst.Substring(0, $dst.LastIndexOf('\'))))) { $result = 'в пути есть ссылка (reparse point), не трогал' }
             else {
                 Confirm-Root $it.Folder
-                [void][System.IO.Directory]::CreateDirectory($LongPrefix + $dst.Substring(0, $dst.LastIndexOf('\')))
+                [void][System.IO.Directory]::CreateDirectory((Get-Long $dst.Substring(0, $dst.LastIndexOf('\'))))
                 Write-LogLine $it 'начато' $src $dst
-                [System.IO.File]::Move($LongPrefix + $src, $LongPrefix + $dst)
+                [System.IO.File]::Move((Get-Long $src), (Get-Long $dst))
                 $result = 'перемещён'
                 $Moved++; $MovedBytes += $it.Size
             }
         }
     } catch {
-        $result = 'ОШИБКА: ' + (Get-InnerMessage $_)
+        $p = Get-Problem $_; $Kind = $p.Kind
+        $result = 'ОШИБКА: ' + $p.Text
         $Errors++
     }
     if ($result -eq 'уже перемещён') { $Already++ }
     elseif ($result -like 'нужна ручная проверка*') { $Skipped++; $Manual++ }
     elseif ($result -ne 'перемещён' -and $result -notlike 'ОШИБКА*') { $Skipped++ }
-    if ($result -like 'ОШИБКА*') { $ErrorsInRow++ } else { $ErrorsInRow = 0 }
+    # 1.3: «занят» и «нет прав» - не сбой диска: в «5 ошибок подряд» не идут (и счёт не сбрасывают)
+    if ($result -like 'ОШИБКА*') { if (@('занят', 'права') -notcontains $Kind) { $ErrorsInRow++ } } else { $ErrorsInRow = 0 }
     if ($ErrorsInRow -ge 5) { $Stopped = $true; $Failing = $true; $result += ' | 5 ошибок подряд - перемещение прекращено, проверьте диск' }
     Write-LogLine $it $result $src $dst
+    if ($result -ne 'перемещён' -and $result -ne 'уже перемещён') {
+        $g = if (@('занят', 'права', 'сбой') -contains $Kind) { $Kind } else { 'прочее' }
+        $ProblemList.Add([pscustomobject]@{ Group = $g; Text = "$src - $result" })
+    }
     $now = Get-Date
     if ($result -ne 'перемещён' -and $result -ne 'уже перемещён') { Write-Host ("[{0}/{1}] {2} - {3}" -f $i, $Items.Count, $it.Rel, $result) -ForegroundColor Yellow }
     if (($now - $LastUi).TotalMilliseconds -ge 500 -or $i -eq $Items.Count) {
@@ -452,6 +501,36 @@ Write-Host ("Итог: перемещено {0} ({1}; папок целиком 
 if ($Manual -gt 0) { Write-Host "Нужна ручная проверка: $Manual (строки журнала и «Намерение перемещения.tsv»)." -ForegroundColor Red }
 if ($Skipped -gt 0 -or $Errors -gt 0) { Write-Host 'Пропущенные и ошибки - строки журнала, кроме «перемещён» и «уже перемещён».' -ForegroundColor Yellow }
 Write-Host "Журнал: $LogPath"
+# 1.3: отдельный список того, что не перемещено, с причиной - на экране и в файле рядом с журналом
+$NotDone = @($Items | Select-Object -Skip $handled | Where-Object { -not $_.Done }).Count
+if ($NotDone -gt 0) {
+    $stopWhy = if ($Failing) { '5 ошибок подряд, проверьте диск' } else { 'остановлено клавишей Q' }
+    $ProblemList.Add([pscustomobject]@{ Group = 'прочее'; Text = "не обработано файлов: $NotDone - причина: $stopWhy. Запустите перемещение ещё раз" })
+}
+if ($ProblemList.Count) {
+    $Help = [ordered]@{
+        'занят' = 'Файл занят другой программой. Закройте её (фоторедактор, плеер, облачный клиент) и запустите перемещение ещё раз.'
+        'права' = 'Нет прав. Программа права НЕ меняет. Правой кнопкой по файлу или папке - Свойства - Безопасность - Дополнительно - Владелец «Изменить» (нужны права администратора); или запустите задание от имени администратора (правой кнопкой по «Запустить.cmd»).'
+        'сбой'  = 'Ошибка ввода-вывода диска. Файл остался на месте. Проверьте диск.'
+        'прочее' = 'Прочие (нет источника, изменился, конфликт, ручная проверка, другие ошибки) - причина в строке.'
+    }
+    $txt = New-Object System.Collections.Generic.List[string]
+    $txt.Add("Проблемные файлы - перемещение $Stamp. Журнал: $LogPath")
+    foreach ($g in $Help.Keys) {
+        $rows = @($ProblemList | Where-Object { $_.Group -eq $g })
+        if (-not $rows.Count) { continue }
+        $txt.Add(''); $txt.Add(("{0} ({1})" -f $Help[$g], $rows.Count))
+        foreach ($r in $rows) { $txt.Add('  ' + $r.Text) }
+    }
+    $ProbPath = Join-Path $Here "Проблемные файлы $Stamp.txt"
+    try { [System.IO.File]::WriteAllLines($ProbPath, $txt, [System.Text.UTF8Encoding]::new($true)) } catch { $ProbPath = "(файл записать не удалось: $(Get-InnerMessage $_))" }
+    Write-Host ("ПРОБЛЕМНЫЕ ФАЙЛЫ: не перемещено {0}. Список: {1}" -f $ProblemList.Count, $ProbPath) -ForegroundColor Yellow
+    $shown = 0
+    foreach ($line in $txt | Select-Object -Skip 1) {
+        if ($shown -ge 40) { Write-Host '  … остальное - в файле списка' -ForegroundColor Yellow; break }
+        Write-Host $line -ForegroundColor Yellow; $shown++
+    }
+}
 if (-not $Auto) { [void](Read-Host 'Enter - закрыть') }
 if ($Errors -gt 0 -or $Manual -gt 0) { exit 1 }
 exit 0

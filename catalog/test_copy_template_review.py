@@ -176,10 +176,10 @@ class Template24(unittest.TestCase):
 
     def test_version_line_and_no_pause_guard(self):
         lines = TEMPLATE.read_text(encoding='utf-8-sig').splitlines()
-        self.assertIn('версия 2.6', lines[0])
-        self.assertEqual(sv.copy_template_version(TEMPLATE.parent), (2, 6))
-        self.assertTrue(sv.copy_template_version(TEMPLATE.parent) >= (2, 4))     # очередь: 2.6 - как 2.4
-        for v in ('2.4', '2.5'):
+        self.assertIn('версия 2.7', lines[0])
+        self.assertEqual(sv.copy_template_version(TEMPLATE.parent), (2, 7))
+        self.assertTrue(sv.copy_template_version(TEMPLATE.parent) >= (2, 4))     # очередь: 2.7 - как 2.4
+        for v in ('2.4', '2.5', '2.6'):
             old = TEMPLATE.parent / f'Копировать - версия {v}.ps1.txt'
             self.assertIn(f'версия {v}', old.read_text(encoding='utf-8-sig').splitlines()[0])
         for i, x in enumerate(lines):

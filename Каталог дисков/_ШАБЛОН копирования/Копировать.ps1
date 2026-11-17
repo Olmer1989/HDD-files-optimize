@@ -1,4 +1,21 @@
-﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.6 от 16.11.2026)
+﻿# ЕДИНЫЙ ШАБЛОН КОПИРОВАНИЯ (версия 2.7 от 17.11.2026)
+#
+# Новое в 2.7 (проблемные файлы; решение владельца 17.11.2026, ЖУРНАЛ_ДОДЕЛОК.md):
+#   - длинные пути (больше 260 знаков) на источнике и цели: все обращения к файлам - через \\?\ (сетевой путь -
+#     \\?\UNC\…); в журнале и на экране пути обычные, без префикса;
+#   - понятная причина в журнале (строка по-прежнему начинается с «ОШИБКА: »): файл занят другой программой; нет прав
+#     на чтение (права программа НЕ меняет - инструкция в итоге); сбойный сектор / ошибка ввода-вывода (код Windows);
+#     в имени символ, который Windows не открывает (< > : " | ? * и управляющие) - файл не трогается, только список.
+#     «Занят» и «нет прав» на источнике не считаются в «5 ошибок подряд» (это не сбой диска);
+#   - имя с точкой или пробелом на конце и зарезервированное имя Windows (CON, PRN, AUX, NUL, COM1-9, LPT1-9, с любым
+#     расширением) - в любой части пути: читается через \\?\ и копируется под заменённым именем (концевые точки и
+#     пробелы -> «_», к зарезервированному имени добавляется «_»: «CON.jpg» -> «CON_.jpg»). Колонка «куда» - новый
+#     путь, «источник» - исходный, к результату дописано « (имя изменено: «…» -> «…»)». Замена всегда одна и та же:
+#     повторный запуск находит копию и сверяет SHA-256. В цели такое имя уже занято - КОНФЛИКТ, ничего не пишется;
+#   - в конце - отдельный список «Проблемные файлы» (на экране и в файле «Проблемные файлы <дата время>.txt» рядом
+#     с журналом) с причиной и что делать; отдельно - файлы, скопированные под другим именем;
+#   - -TestReadError '<путь>=<код Windows>[;…]' - только вместе с -TestRoots: имитация ошибки чтения источника
+#     (проверка ветки «сбойный сектор» без сбойного диска).
 #
 # Новое в 2.6 (логика v3, этап 16; «Логика_v3_разбор_носителя.md», раздел «Этап 16»; решение владельца 16.11.2026):
 #   - проверка свободного места считает только файлы, которых на месте назначения ещё НЕТ. Строка, у которой файл
@@ -80,6 +97,7 @@
 param(
     [string]$TestRoots = '',
     [double]$TestFreeBytes = -1,
+    [string]$TestReadError = '',
     [int]$TimeoutSec = 120,
     [switch]$Confirmed,
     [string]$Expect = ''
@@ -91,7 +109,6 @@ $ListFile = Join-Path $Here 'список.tsv'
 $VolFile = Join-Path $Here 'тома.tsv'
 $RazborFile = Join-Path $Here 'разбор.json'
 $DestFolder = 'ПЕРЕНОС с других дисков'
-$LongPrefix = '\\?\'
 $BufSize = 4MB
 $TimeoutMs = $TimeoutSec * 1000
 $U8 = [System.Text.Encoding]::UTF8
@@ -123,14 +140,80 @@ function Stop-Script([string]$text, [int]$code) {
     if (-not $NoPause) { [void](Read-Host 'Enter - закрыть') }
     exit $code
 }
-# Путь от корня: без буквы, без «/», без «..», не с «\» (одинаково для список.tsv и «зависимых» разбор.json).
+# Путь от корня: без «/», не с «\», без пустых частей, «.» и «..» (одинаково для список.tsv, «зависимых» разбор.json и
+# папок тома.tsv). 2.7: через \\?\ Windows такие части не убирает, поэтому они запрещены целиком. Двоеточие (в том
+# числе «C:…») в строке списка - не отказ всего задания, а проблема одной строки: запрещённый символ (Get-SafeRel),
+# такой файл не открывается вообще. В папках тома.tsv двоеточие - отказ.
 function Test-Rel([string]$rel) {
-    return [bool]($rel -and -not $rel.StartsWith('\') -and -not $rel.Contains(':') -and -not $rel.Contains('/') -and -not ('\' + $rel + '\').Contains('\..\'))
+    if (-not $rel -or $rel.StartsWith('\') -or $rel.Contains('/')) { return $false }
+    foreach ($c in $rel.Split('\')) { if ($c -eq '' -or $c -eq '.' -or $c -eq '..') { return $false } }
+    return $true
 }
 function Get-InnerMessage($err) {
     $e = $err.Exception
     while ($e.InnerException) { $e = $e.InnerException }
     return $e.Message
+}
+# 2.7: путь для .NET без предела 260 знаков; в журнал и на экран - всегда обычный путь (без префикса).
+function Get-Long([string]$p) {
+    if ($p.StartsWith('\\?\')) { return $p }
+    if ($p.StartsWith('\\')) { return '\\?\UNC\' + $p.Substring(2) }
+    return '\\?\' + $p
+}
+# 2.7: имя, которое Windows не разрешает. Символ < > : " | ? * или управляющий - файл не открывается вообще
+# (-> @{ Bad = 'символ «?»' }). Точка или пробел на конце части пути, зарезервированное имя (CON, PRN, AUX, NUL,
+# COM1-9, LPT1-9, в том числе COM¹-³/LPT¹-³, с любым расширением) - файл читается через \\?\, на цель идёт под
+# заменённым именем (-> @{ Rel = <путь на цели>; Changes = '«a.» -> «a_», …' }). Замена всегда одна и та же.
+$ReservedName = '^(CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3])$'
+function Get-SafeRel([string]$rel) {
+    $parts = $rel.Split('\'); $chg = @()
+    for ($k = 0; $k -lt $parts.Count; $k++) {
+        $c = $parts[$k]
+        $m = [regex]::Match($c, '[<>:"|?*\x00-\x1F]')
+        if ($m.Success) {
+            $ch = if ([int][char]$m.Value -lt 32) { "с кодом $([int][char]$m.Value)" } else { "«$($m.Value)»" }
+            return @{ Bad = "символ $ch в «$c»" }
+        }
+        $n = $c
+        $stem = $n.Split('.')[0].TrimEnd(' ')
+        if ($stem -match $ReservedName) { $n = $stem + '_' + $n.Substring($stem.Length) }
+        $t = $n.TrimEnd('.', ' ')
+        if ($t.Length -lt $n.Length) { $n = $t + ('_' * ($n.Length - $t.Length)) }
+        if ($n -cne $c) { $chg += "«$c» -> «$n»"; $parts[$k] = $n }
+    }
+    return @{ Rel = ($parts -join '\'); Changes = ($chg -join ', ') }
+}
+# строка задания: Rel - путь на источнике, DstRel - путь на цели (2.7: может быть с заменённым именем), Bad - не открывается
+function New-Row($target, [string]$rel, [int64]$size, [string]$hash, [string]$spare) {
+    $s = Get-SafeRel $rel
+    $bad = if ($s.Bad) { $s.Bad } else { '' }
+    $dr = if ($s.Bad) { $rel } else { $s.Rel }
+    $chg = if ($s.Bad) { '' } else { $s.Changes }
+    return [pscustomobject]@{ Target = $target; Rel = $rel; Size = $size; Hash = $hash; Spare = $spare; DstRel = $dr; Changes = $chg; Bad = $bad }
+}
+# 2.7: причина ошибки по коду Windows и стороне (источник / цель). -> @{ Kind; Text }. Kind: занят, права (только
+# источник - не считаются в «5 ошибок подряд»), сбой, ошибка. Строка журнала - «ОШИБКА: » + Text.
+$RightsHelp = 'программа права не меняет: правой кнопкой по файлу или папке - Свойства - Безопасность - Дополнительно - Владелец «Изменить» (нужны права администратора), или запустите задание от имени администратора'
+$IoText = @{ 23 = 'данные не читаются (ошибка CRC)'; 27 = 'сектор не найден'; 30 = 'ошибка чтения'; 31 = 'устройство не работает';
+    38 = 'неожиданный конец файла'; 483 = 'аппаратная ошибка устройства'; 1006 = 'том изменён извне'; 1117 = 'ошибка ввода-вывода устройства';
+    1392 = 'файл или папка повреждены' }
+function Get-Problem($err, [string]$side) {
+    $hr = Get-InnerHResult $err
+    $code = if (((($hr -shr 16) -band 0xFFFF) -eq 0x8007)) { $hr -band 0xFFFF } else { 0 }
+    $src = $side -eq 'источник'
+    if ($code -eq 32 -or $code -eq 33) {
+        if ($src) { return @{ Kind = 'занят'; Text = 'файл занят другой программой - закройте её и нажмите «Повторить копирование»' } }
+        return @{ Kind = 'ошибка'; Text = 'файл на диске-цели занят другой программой (антивирус, Проводник) - закройте её и повторите' }
+    }
+    if ($code -eq 5) {
+        if ($src) { return @{ Kind = 'права'; Text = 'нет прав на чтение (файл или его папка на источнике) - ' + $RightsHelp } }
+        return @{ Kind = 'ошибка'; Text = 'нет прав на запись на диске-цели - ' + $RightsHelp }
+    }
+    if ($IoText.ContainsKey($code)) {
+        if ($src) { return @{ Kind = 'сбой'; Text = "сбойный сектор или ошибка ввода-вывода при чтении источника (код Windows ${code}: $($IoText[$code])) - файл не скопирован, диск стоит проверить" } }
+        return @{ Kind = 'сбой'; Text = "ошибка ввода-вывода на диске-цели (запись или сверка; код Windows ${code}: $($IoText[$code])) - копия не оставлена, диск-цель стоит проверить" }
+    }
+    return @{ Kind = 'ошибка'; Text = (Get-InnerMessage $err) }
 }
 
 # --- 1. Диски: буквы определяются по серийному номеру тома ---
@@ -152,6 +235,14 @@ if ($TestRoots) {
         if ($kv.Count -eq 2) { $Override[$kv[0].Trim()] = $kv[1].Trim().TrimEnd('\') }
     }
 }
+# 2.7: -TestReadError 'путь=код;…' - имитация ошибки чтения источника (только на тестовых папках)
+$FakeErr = @{}
+if ($TestRoots -and $TestReadError) {
+    foreach ($pair in $TestReadError.Split(';')) {
+        $kv = $pair.Split('=', 2)
+        if ($kv.Count -eq 2) { $FakeErr[$kv[0]] = [int](-2147024896 + [int]$kv[1]) }
+    }
+}
 $Names = New-Object System.Collections.Generic.List[string]
 $Root = @{}
 $Dest = @{}
@@ -166,7 +257,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($VolFile, $U8)) {
     $Dest[$name] = $DestFolder
     if ($f.Count -ge 3 -and $f[2].Trim()) {
         $Dest[$name] = $f[2].Trim('\')        # 2.6: пробелы по краям - часть имени папки, не обрезаются
-        if ($Dest[$name].Contains(':') -or $Dest[$name].Contains('/') -or ('\' + $Dest[$name] + '\').Contains('\..\')) { Stop-Script "тома.tsv: недопустимая папка «$($Dest[$name])» у $name. Ничего не сделано." 5 }
+        if (-not (Test-Rel $Dest[$name]) -or $Dest[$name].Contains(':')) { Stop-Script "тома.tsv: недопустимая папка «$($Dest[$name])» у $name. Ничего не сделано." 5 }
     }
     if ($Names.Count -eq 1 -and $f.Count -ge 3 -and $f[2].Trim()) { $SourceSubfolder = $f[2].Trim('\') }
     if ($Override.ContainsKey($name)) {
@@ -182,6 +273,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($VolFile, $U8)) {
 }
 if ($Names.Count -lt 2) { Stop-Script 'В тома.tsv нужны минимум две строки: источник и хотя бы одна цель. Ничего не сделано.' 5 }
 $SrcName = $Names[0]
+if ($SourceSubfolder -and (-not (Test-Rel $SourceSubfolder) -or $SourceSubfolder.Contains(':'))) { Stop-Script "тома.tsv: недопустимая подпапка источника «$SourceSubfolder». Ничего не сделано." 5 }
 # Том (диск) каждого имени - ДО добавления подпапки источника: подпапка не меняет того, какой это диск.
 $Vol = @{}
 $Base = @{}
@@ -311,7 +403,34 @@ foreach ($line in [System.IO.File]::ReadAllLines($ListFile, $U8)) {
     }
     $hash = ''
     if ($f.Count -ge 5 -and $f[4] -match '^[0-9A-Fa-f]{64}$') { $hash = $f[4].ToUpper() }
-    $Items.Add([pscustomobject]@{ Target = $f[0]; Rel = $rel; Size = $size; Hash = $hash; Spare = '' })
+    $Items.Add((New-Row $f[0] $rel $size $hash ''))
+}
+# 2.7: заменённое имя не должно совпасть с другим путём того же задания (a. и a_, CON.jpg и CON_.jpg - без учёта
+# регистра, как в Windows): два разных исходника не сливаются в одну копию. Совпало - строка с заменой не копируется.
+$Natural = @{}
+foreach ($x in $Items) { if (-not $x.Bad -and -not $x.Changes) { $Natural["$($x.Target)|$($x.DstRel.ToLowerInvariant())"] = $x.Rel } }
+$SeenNew = @{}
+foreach ($x in $Items) {
+    if ($x.Bad -or -not $x.Changes) { continue }
+    $k = "$($x.Target)|$($x.DstRel.ToLowerInvariant())"
+    if ($Natural.ContainsKey($k)) { $x.Bad = "имя после замены совпадает с другим файлом «$($Natural[$k])»" }
+    elseif ($SeenNew.ContainsKey($k) -and $SeenNew[$k] -ne $x.Rel) { $x.Bad = "имя после замены совпадает с другим файлом «$($SeenNew[$k])»" }
+    else { $SeenNew[$k] = $x.Rel }
+}
+# 2.7: копия под заменённым именем уже в цели - признаётся, только если её записал этот же шаблон для этого же
+# исходника (строка «скопирован…»/«уже есть…» прежних журналов задания). Иначе это может быть копия другого файла
+# с таким именем - КОНФЛИКТ, даже при совпавшем SHA-256.
+$OwnCopy = @{}
+function Get-CopyKey([string]$t, [string]$src, [string]$dst) {     # без буквы диска: она между запусками может смениться
+    return ($t + '|' + $src.Substring([math]::Max(0, $src.IndexOf(''))) + '|' + $dst.Substring([math]::Max(0, $dst.IndexOf('')))).ToLowerInvariant()
+}
+if (@($Items | Where-Object { $_.Changes -and -not $_.Bad }).Count) {
+    foreach ($old in [System.IO.Directory]::GetFiles($Here, 'Журнал копирования *.tsv')) {
+        foreach ($line in [System.IO.File]::ReadAllLines($old, $U8)) {
+            $p = $line.Split("`t")
+            if ($p.Count -ge 7 -and ($p[2] -like 'скопирован*' -or $p[2] -like 'уже есть*')) { $OwnCopy[(Get-CopyKey $p[1] $p[5] $p[6])] = $true }
+        }
+    }
 }
 $Todo = New-Object System.Collections.Generic.List[object]
 foreach ($x in $Items) { if ($Root[$x.Target]) { $Todo.Add($x) } }
@@ -321,7 +440,7 @@ Write-Host ''
 # 2.6: файлы папки назначения - словарь «имя -> размер» без учёта регистра (как в Windows); папки нет - $null.
 # Содержимое файлов не читается. Ошибка перечисления - исключение (строки этой папки считаются новыми).
 function Get-DestFiles([string]$dir) {
-    $full = $LongPrefix + $dir
+    $full = Get-Long $dir
     if (-not [System.IO.Directory]::Exists($full)) { return $null }
     $d = New-Object 'System.Collections.Generic.Dictionary[string,long]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($fi in [System.IO.DirectoryInfo]::new($full).EnumerateFiles()) {
@@ -338,12 +457,12 @@ foreach ($t in $Targets) {
     # 2.6: место нужно только под файлы, которых на месте назначения ещё нет
     [double]$need = 0; [double]$sameBytes = 0; $same = 0; $other = 0; $unread = 0
     $destBase = $Root[$t] + '\' + $Dest[$t] + '\' + $SrcName
-    $haveBase = [System.IO.Directory]::Exists($LongPrefix + $destBase)
+    $haveBase = [System.IO.Directory]::Exists((Get-Long $destBase))
     $dirs = @{}
     foreach ($x in $g) {
         $len = $null
         if ($haveBase) {
-            $p = $destBase + '\' + $x.Rel
+            $p = $destBase + '\' + $x.DstRel
             $k = $p.LastIndexOf('\')
             $dir = $p.Substring(0, $k); $leaf = $p.Substring($k + 1)
             if (-not $dirs.ContainsKey($dir)) {
@@ -395,6 +514,8 @@ try { [void][Console]::KeyAvailable } catch { $CanKey = $false; Write-Host 'Не
 $Copied = 0; $Skipped = 0; $Errors = 0; $Stopped = $false; $Hung = ''
 $ErrorsInRow = 0; $MaxErrorsInRow = 5; $Failing = $false
 $QStop = $false; $Problems = 0; $Why = ''     # $Why - причина аварийной остановки (код 4)
+$ProblemList = New-Object System.Collections.Generic.List[object]     # 2.7: проблемные файлы для списка в конце
+$Renamed = New-Object System.Collections.Generic.List[string]
 # Том на месте? После «нет источника» и после ОШИБКИ: папка корня есть и (на настоящих дисках) серийный номер тома на
 # этой букве тот же - после отключения буква могла достаться другому диску (Дискуссия этапа 4, р2-9).
 $LastIdCheck = @{}
@@ -425,9 +546,9 @@ foreach ($t in $Targets) {
     if (-not $Root[$t]) { continue }
     $TmpDir[$t] = $Root[$t] + '\' + $TmpName
     try {
-        if ([System.IO.Directory]::Exists($LongPrefix + $TmpDir[$t])) {
+        if ([System.IO.Directory]::Exists((Get-Long $TmpDir[$t]))) {
             # остатки прошлых прерванных запусков: в этой папке лежат только наши файлы
-            foreach ($old in [System.IO.Directory]::GetFiles($LongPrefix + $TmpDir[$t], 'run*.part')) { [System.IO.File]::Delete($old) }
+            foreach ($old in [System.IO.Directory]::GetFiles((Get-Long $TmpDir[$t]), 'run*.part')) { [System.IO.File]::Delete($old) }
         }
     } catch { }
 }
@@ -440,7 +561,7 @@ $bytes = New-Object byte[] $BufSize
 function Read-Sha([string]$path, [string]$who, $it, [int]$i) {
     $s = $null; $h = $null
     try {
-        $s = [System.IO.FileStream]::new($LongPrefix + $path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, $BufSize)
+        $s = [System.IO.FileStream]::new((Get-Long $path), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, $BufSize)
         $h = [System.Security.Cryptography.SHA256CryptoServiceProvider]::new()
         [double]$got = 0
         while ($true) {
@@ -470,18 +591,38 @@ function Read-Sha([string]$path, [string]$who, $it, [int]$i) {
         if ($h) { try { $h.Dispose() } catch { } }
     }
 }
+$Processed = 0
 for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
     $it = $Todo[$idx]
+    $Processed++
     $i = $idx + 1
     $srcPath = $Root[$SrcName] + '\' + $it.Rel
-    $dstPath = $Root[$it.Target] + '\' + $Dest[$it.Target] + '\' + $SrcName + '\' + $it.Rel
+    $dstPath = $Root[$it.Target] + '\' + $Dest[$it.Target] + '\' + $SrcName + '\' + $it.DstRel
     $result = ''; $readHash = ''; $part = $null; $in = $null; $out = $null; $sha = $null; $sInfo = $null
+    $Kind = ''; $Side = 'источник'          # 2.7: вид проблемы и сторона, где случилась ошибка
     [double]$fileDone = 0
     try {
-        $sInfo = [System.IO.FileInfo]::new($LongPrefix + $srcPath)
-        $dInfo = [System.IO.FileInfo]::new($LongPrefix + $dstPath)
-        if (-not $sInfo.Exists) { $result = 'нет источника' }
+        if ($it.Bad) {
+            $Kind = 'имя'
+            $msg = if ($it.Bad -like 'имя после замены*') { "$($it.Bad) - не скопирован, чтобы два файла не слились в одну копию; переименуйте его вручную" }
+                   else { "в имени запрещённый в Windows $($it.Bad) - Windows этот файл не открывает, он не скопирован; переименуйте его там, где он записан (Mac, Linux, фотоаппарат)" }
+            throw [System.InvalidOperationException]::new($msg)
+        }
+        $sInfo = [System.IO.FileInfo]::new((Get-Long $srcPath))
+        $Side = 'цель'
+        $dInfo = [System.IO.FileInfo]::new((Get-Long $dstPath))
+        $Side = 'источник'
+        if (-not $sInfo.Exists) {
+            $result = 'нет источника'
+            # 2.7: FileInfo.Exists = false и при нет прав, и при сбое диска - спросим ещё раз; «нет источника» - только
+            # если Windows ответила «нет файла» или «нет папки», иначе - настоящая причина (права, ввод-вывод)
+            try { [void][System.IO.File]::GetAttributes((Get-Long $srcPath)) } catch { if (@(-2147024894, -2147024893) -notcontains (Get-InnerHResult $_)) { throw } }
+        }
         elseif ($sInfo.Length -ne $it.Size) { $result = "размер источника изменился ($($sInfo.Length))" }
+        elseif ([System.IO.Directory]::Exists((Get-Long $dstPath))) { $result = 'КОНФЛИКТ: в цели на месте файла лежит папка с таким именем, не трогал' }
+        elseif ($dInfo.Exists -and $it.Changes -and -not $OwnCopy.ContainsKey((Get-CopyKey $it.Target $srcPath $dstPath))) {
+            $result = 'КОНФЛИКТ: в цели уже есть файл с заменённым именем, но его записал не этот шаблон для этого файла (может быть копией другого файла), не трогал'
+        }
         elseif ($dInfo.Exists -and $dInfo.Length -eq $it.Size) {
             # 2.5: тот же размер - содержимое сверяется по SHA-256. Эталон - опись; нет в описи - прочитанный источник.
             $want = $it.Hash; $r = @{}
@@ -489,6 +630,7 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
                 $r = Read-Sha $srcPath "$SrcName ($($Root[$SrcName]))" $it $i
                 if ($r.Hash) { $want = $r.Hash }
             }
+            $Side = 'цель'
             if ($want) { $r = Read-Sha $dstPath "$($it.Target) ($($Root[$it.Target]))" $it $i }
             if ($r.Hung) {
                 $Hung = $r.Hung; $Stopped = $true; $Errors++
@@ -504,17 +646,23 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
         }
         elseif ($dInfo.Exists) { $result = "КОНФЛИКТ: в цели другой размер ($($dInfo.Length)), не трогал" }
         else {
-            [void][System.IO.Directory]::CreateDirectory($LongPrefix + $dstPath.Substring(0, $dstPath.LastIndexOf('\')))
-            [void][System.IO.Directory]::CreateDirectory($LongPrefix + $TmpDir[$it.Target])
-            $part = $LongPrefix + $TmpDir[$it.Target] + '\' + $RunId + '_' + $i + '.part'
-            $in = [System.IO.FileStream]::new($LongPrefix + $srcPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, $BufSize)
+            $Side = 'цель'
+            [void][System.IO.Directory]::CreateDirectory((Get-Long $dstPath.Substring(0, $dstPath.LastIndexOf('\'))))
+            [void][System.IO.Directory]::CreateDirectory((Get-Long $TmpDir[$it.Target]))
+            $part = (Get-Long $TmpDir[$it.Target]) + '\' + $RunId + '_' + $i + '.part'
+            $Side = 'источник'
+            $in = [System.IO.FileStream]::new((Get-Long $srcPath), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, $BufSize)
+            $Side = 'цель'
             $out = [System.IO.FileStream]::new($part, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, $BufSize)
             $sha = [System.Security.Cryptography.SHA256CryptoServiceProvider]::new()
             while ($true) {
+                $Side = 'источник'
                 $rt = $in.ReadAsync($bytes, 0, $BufSize)
                 if (-not $rt.Wait($TimeoutMs)) { $Hung = "чтение с $SrcName ($($Root[$SrcName]))"; break }
                 $n = $rt.Result
                 if ($n -le 0) { break }
+                if ($FakeErr.ContainsKey($it.Rel)) { throw [System.IO.IOException]::new('имитация ошибки чтения (-TestReadError)', $FakeErr[$it.Rel]) }
+                $Side = 'цель'
                 $wt = $out.WriteAsync($bytes, 0, $n)
                 if (-not $wt.Wait($TimeoutMs)) { $Hung = "запись на $($it.Target) ($($Root[$it.Target]))"; break }
                 [void]$sha.TransformBlock($bytes, 0, $n, $null, 0)
@@ -542,6 +690,7 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
                 $result = "ОШИБКА: диск не отвечает дольше $TimeoutSec с - $Hung. Копирование прекращено"
                 $Errors++
             } else {
+                $Side = 'цель'
                 $out.Flush($true)   # дождаться, пока Windows действительно запишет файл на диск
                 $out.Dispose(); $out = $null
                 $in.Dispose(); $in = $null
@@ -554,12 +703,12 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
                     $len = [System.IO.FileInfo]::new($part).Length
                     if ($fileDone -ne $it.Size -or $len -ne $it.Size) { throw "прочитано $fileDone, записано $len, а по списку $($it.Size)" }
                     if ($it.Hash -and $readHash -ne $it.Hash) { throw 'SHA-256 прочитанного с источника не совпал с описью, копия не оставлена' }
-                    [System.IO.File]::Move($part, $LongPrefix + $dstPath)
+                    [System.IO.File]::Move($part, (Get-Long $dstPath))
                     $result = if ($it.Hash) { 'скопирован, размер и SHA-256 совпали' } else { 'скопирован, размер совпал' }
                     if ($it.Spare) { $result += " (запасной экземпляр вместо «$($it.Spare)»)" }
                     try {
-                        [System.IO.File]::SetCreationTimeUtc($LongPrefix + $dstPath, $sInfo.CreationTimeUtc)
-                        [System.IO.File]::SetLastWriteTimeUtc($LongPrefix + $dstPath, $sInfo.LastWriteTimeUtc)
+                        [System.IO.File]::SetCreationTimeUtc((Get-Long $dstPath), $sInfo.CreationTimeUtc)
+                        [System.IO.File]::SetLastWriteTimeUtc((Get-Long $dstPath), $sInfo.LastWriteTimeUtc)
                     } catch { $result += ' (дату файла поставить не удалось)' }
                     $Copied++
                     $CopiedBytes += $it.Size
@@ -567,7 +716,9 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
             }
         }
     } catch {
-        $result = 'ОШИБКА: ' + (Get-InnerMessage $_)
+        # 2.7: понятная причина (занят / нет прав / сбойный сектор / запрещённое имя); строка по-прежнему «ОШИБКА: …»
+        if ($Kind -eq 'имя') { $result = 'ОШИБКА: ' + (Get-InnerMessage $_) }
+        else { $p = Get-Problem $_ $Side; $Kind = $p.Kind; $result = 'ОШИБКА: ' + $p.Text }
         $Errors++
         if ($DiskFull -contains (Get-InnerHResult $_)) {
             $Stopped = $true; $Failing = $true; $Why = "на $($it.Target) кончилось место"
@@ -581,8 +732,10 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
     }
     if ($sha) { try { $sha.Dispose() } catch { } }
     # Несколько ошибок подряд - признак сбоя диска: дальше не идём, чтобы не усугублять.
-    if ($result -like 'ОШИБКА*') { $ErrorsInRow++ } elseif ($result -like 'скопирован*' -or $result -like 'уже есть*') { $ErrorsInRow = 0 }
-    if (-not $Stopped -and ($result -eq 'нет источника' -or $result -like 'ОШИБКА*')) {
+    # 2.7: «занят», «нет прав» на источнике и запрещённое имя - не сбой диска: в счёт не идут и том не проверяют
+    $NotDisk = @('занят', 'права', 'имя') -contains $Kind
+    if ($result -like 'ОШИБКА*') { if (-not $NotDisk) { $ErrorsInRow++ } } elseif ($result -like 'скопирован*' -or $result -like 'уже есть*') { $ErrorsInRow = 0 }
+    if (-not $Stopped -and -not $NotDisk -and ($result -eq 'нет источника' -or $result -like 'ОШИБКА*')) {
         $check = if ($result -eq 'нет источника') { @($SrcName) } else { @($SrcName, $it.Target) }
         foreach ($n in $check) {
             if (-not (Test-Volume $n)) {
@@ -598,6 +751,7 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
     }
     if ($result -like 'уже есть*' -or $result -eq 'нет источника' -or $result -like 'КОНФЛИКТ*' -or $result -like 'размер источника*') { $Skipped++ }
     if ($result -eq 'нет источника' -or $result -like 'КОНФЛИКТ*' -or $result -like 'размер источника*') { $Problems++ }
+    if ($it.Changes -and ($result -like 'скопирован*' -or $result -like 'уже есть*' -or $result -like 'КОНФЛИКТ*')) { $result += " (имя изменено: $($it.Changes))" }
     # Запасной экземпляр дубля (2.4): этот файл не удался - следующей строкой следующий дубль с тем же SHA-256 на свой путь.
     # «уже есть, SHA-256 совпал» (2.5) - копия подтверждена, запасной не нужен; другой SHA-256 того же размера - КОНФЛИКТ.
     if ($it.Hash -and -not $Stopped -and ($result -eq 'нет источника' -or $result -like 'размер источника*' -or $result -like 'КОНФЛИКТ*' -or
@@ -606,7 +760,7 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
         if ($Spare.ContainsKey($key) -and $Spare[$key].Count -gt 0) {
             $next = $Spare[$key].Dequeue()
             $of = if ($it.Spare) { $it.Spare } else { $it.Rel }
-            $Todo.Insert($idx + 1, [pscustomobject]@{ Target = $it.Target; Rel = $next; Size = $it.Size; Hash = $it.Hash; Spare = $of })
+            $Todo.Insert($idx + 1, (New-Row $it.Target $next $it.Size $it.Hash $of))
             $Total += $it.Size
             $result += " | следующим берётся запасной экземпляр «$next»"
         }
@@ -616,6 +770,12 @@ for ($idx = 0; $idx -lt $Todo.Count; $idx++) {
     $srcMtime = ''
     try { if ($sInfo -and $sInfo.Exists) { $srcMtime = [string][int64][math]::Floor(($sInfo.LastWriteTimeUtc - [datetime]'1970-01-01').TotalSeconds) } } catch { }
     $Log.WriteLine(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}" -f (Get-Date -Format 'HH:mm:ss'), $it.Target, $result, $it.Size, $readHash, $srcPath, $dstPath, $srcMtime))
+    # 2.7: отдельный список в конце - всё, что не скопировано (кроме остановки по Q), и скопированное под другим именем
+    if ($result -like 'скопирован*' -or $result -like 'уже есть*') { if ($it.Changes) { $Renamed.Add("$($it.Target): $srcPath -> $dstPath") } }
+    elseif ($result -notlike 'ОСТАНОВЛЕНО*') {
+        $g = if (@('занят', 'права', 'имя', 'сбой') -contains $Kind) { $Kind } else { 'прочее' }
+        $ProblemList.Add([pscustomobject]@{ Group = $g; Text = "$($it.Target): $srcPath - $result" })
+    }
     $color = if ($result -like 'скопирован*' -or $result -like 'уже есть*') { 'Gray' } else { 'Yellow' }
     Write-Host ("[{0}/{1}] {2} {3} - {4}" -f $i, $Todo.Count, $it.Target, $it.Rel, $result) -ForegroundColor $color
     if ($Stopped) { break }
@@ -628,13 +788,55 @@ Write-Host ''
 $tail = if ($Hung) { ', ПРЕКРАЩЕНО: диск не отвечает' } elseif ($QStop) { ', ОСТАНОВЛЕНО по Q' } elseif ($Failing) { ", ПРЕКРАЩЕНО: $Why" } else { '' }
 # пустую папку временных файлов убираем за собой; непустую (остаток зависшего файла) оставляем следующему запуску
 foreach ($t in $TmpDir.Keys) {
-    try { if ([System.IO.Directory]::Exists($LongPrefix + $TmpDir[$t]) -and -not [System.IO.Directory]::EnumerateFileSystemEntries($LongPrefix + $TmpDir[$t]).GetEnumerator().MoveNext()) { [System.IO.Directory]::Delete($LongPrefix + $TmpDir[$t]) } } catch { }
+    try { if ([System.IO.Directory]::Exists((Get-Long $TmpDir[$t])) -and -not [System.IO.Directory]::EnumerateFileSystemEntries((Get-Long $TmpDir[$t])).GetEnumerator().MoveNext()) { [System.IO.Directory]::Delete((Get-Long $TmpDir[$t])) } } catch { }
 }
 $sumColor = if ($Errors -gt 0 -or $Hung) { 'Red' } else { 'Cyan' }
 Write-Host ("Итог: скопировано {0}, пропущено {1}, ошибок {2}{3}. Время {4:N1} мин." -f $Copied, $Skipped, $Errors, $tail, $mins) -ForegroundColor $sumColor
 if ($Errors -gt 0) { Write-Host 'Есть ошибки: строки со словом ОШИБКА в журнале.' -ForegroundColor Red }
 if ($Missing.Count) { Write-Host ('Не подключены: ' + ($Missing -join ', ') + ' - для них запустите задание ещё раз, когда подключите.') -ForegroundColor Yellow }
 Write-Host "Журнал: $LogPath"
+# 2.7: отдельный список проблемных файлов - на экране и в файле рядом с журналом. Эти файлы не скопированы, поэтому
+# программа не переместит их в «Скопировано на …» (перемещение берёт только подтверждённые копии).
+# 2.7: строки, до которых не дошло (остановка), и строки неподключённых целей - тоже в списке, одной строкой с причиной
+$NotDone = $Todo.Count - $Processed
+if ($NotDone -gt 0) {
+    $stopWhy = if ($Hung) { "диск не отвечает ($Hung)" } elseif ($QStop) { 'остановлено клавишей Q' } elseif ($Failing) { $Why } else { 'остановка' }
+    $ProblemList.Add([pscustomobject]@{ Group = 'прочее'; Text = "не обработано строк: $NotDone - причина: $stopWhy. Запустите задание ещё раз" })
+}
+foreach ($t in $Missing) {
+    $cnt = @($Items | Where-Object { $_.Target -eq $t }).Count
+    if ($cnt) { $ProblemList.Add([pscustomobject]@{ Group = 'прочее'; Text = "${t}: не обработано строк: $cnt - причина: диск не подключён. Запустите задание ещё раз, когда подключите" }) }
+}
+if ($ProblemList.Count -or $Renamed.Count) {
+    $Help = [ordered]@{
+        'занят' = 'Файл занят другой программой. Закройте её (фоторедактор, плеер, облачный клиент) и нажмите «Повторить копирование».'
+        'права' = 'Нет прав на чтение. Программа права НЕ меняет. Правой кнопкой по файлу или папке - Свойства - Безопасность - Дополнительно - Владелец «Изменить» (нужны права администратора); или запустите задание от имени администратора (правой кнопкой по «Запустить.cmd»). Потом - «Повторить копирование».'
+        'имя'   = 'Имя, которое Windows не открывает (< > : " | ? * или управляющий символ), или имя, которое после замены совпало с другим файлом. Программа такие файлы не копирует и не перемещает. Переименуйте их вручную (символы - на компьютере, где файлы записаны: Mac, Linux).'
+        'сбой'  = 'Сбойный сектор или ошибка ввода-вывода. Файл не скопирован и перемещён не будет. Проверьте диск; «Повторить копирование» иногда читает со второго раза.'
+        'прочее' = 'Прочие: нет источника, конфликт в цели, изменившийся размер, другие ошибки - причина в строке.'
+    }
+    $txt = New-Object System.Collections.Generic.List[string]
+    $txt.Add("Проблемные файлы - копирование $Stamp. Журнал: $LogPath")
+    foreach ($g in $Help.Keys) {
+        $rows = @($ProblemList | Where-Object { $_.Group -eq $g })
+        if (-not $rows.Count) { continue }
+        $txt.Add(''); $txt.Add(("{0} ({1})" -f $Help[$g], $rows.Count))
+        foreach ($r in $rows) { $txt.Add('  ' + $r.Text) }
+    }
+    if ($Renamed.Count) {
+        $txt.Add(''); $txt.Add(("Скопированы под другим именем - Windows не разрешает исходное (источник -> копия; соответствие - в журнале) ({0}):" -f $Renamed.Count))
+        foreach ($r in $Renamed) { $txt.Add('  ' + $r) }
+    }
+    $ProbPath = Join-Path $Here "Проблемные файлы $Stamp.txt"
+    try { [System.IO.File]::WriteAllLines($ProbPath, $txt, [System.Text.UTF8Encoding]::new($true)) } catch { $ProbPath = "(файл записать не удалось: $(Get-InnerMessage $_))" }
+    Write-Host ''
+    Write-Host ("ПРОБЛЕМНЫЕ ФАЙЛЫ: не скопировано {0}, скопировано под другим именем {1}. Список: {2}" -f $ProblemList.Count, $Renamed.Count, $ProbPath) -ForegroundColor Yellow
+    $shown = 0
+    foreach ($line in $txt | Select-Object -Skip 1) {
+        if ($shown -ge 40) { Write-Host '  … остальное - в файле списка' -ForegroundColor Yellow; break }
+        Write-Host $line -ForegroundColor Yellow; $shown++
+    }
+}
 Write-Host 'Повторный запуск продолжит с места остановки: уже скопированные файлы сверяются по SHA-256 и не копируются заново.'
 # код выхода (очередь окна: 10 и 11 - дальше, остальное - стоп): 2 завис > 3 Q > 4 авария > 1/11 не всё > 0/10 всё
 $code = if ($QStop) { 3 } elseif ($Failing) { 4 } elseif ($Errors -gt 0 -or $Problems -gt 0 -or $Missing.Count -gt 0) { $CodeIncomplete } else { $CodeOk }
