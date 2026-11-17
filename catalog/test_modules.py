@@ -19,8 +19,9 @@ import hb_cli        # noqa: E402
 # Уровни ядра снизу вверх: модуль может импортировать из ядра только модули СТРОГО ниже себя.
 LEVELS = {'paths': 0, 'consts': 0, 'schema': 1, 'util': 1, 'report': 2, 'sources': 3, 'apply_common': 4,
           'apply_disk': 5, 'apply_log': 5, 'apply_manual': 5, 'apply_partial': 5, 'apply_excl': 5,
-          'derived': 6, 'builder': 7, 'db': 8, 'query': 9, 'short': 10, 'api': 11,
-          'directions': 4, 'razbor_scope': 9, 'razbor': 10}          # логика v3 (15.11.2026): направления и отметки; расчёт разбора
+          'derived': 6, 'builder': 7, 'db': 8, 'query': 9, 'short': 10, 'api': 13,
+          'directions': 4, 'razbor_scope': 9, 'razbor_base': 10, 'razbor_contested': 10,
+          'razbor_planner': 11, 'razbor_report': 11, 'razbor': 12}          # логика v3 (15.11.2026): направления и отметки; расчёт разбора
 COMMANDS = {'missing', 'only', 'cmp', 'where', 'candel', 'mklist', 'mvlist', 'manual', 'fix-manual', 'decide',
             'exclude', 'tasks', 'stats', 'build', 'folders', 'find', 'rebuild', 'family-plan', 'family-check',
             'recovery-plan', 'recovery-staging', 'rescan-plan',
@@ -33,7 +34,7 @@ UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего �
 # только уменьшаться (разбиваются отдельными заданиями); после разбивки - убрать из списка.
 FILE_MAX = 600
 FILE_DEBT = {'commands_page.py': 1320,
-             'test_move_v3.py': 1210, 'hb_core/razbor.py': 1011,
+             'test_move_v3.py': 1210,
              'test_logic_v3.py': 944, 'hb_cmd/mvlist.py': 889, 'explorer_page.py': 841, 'directions_page.py': 820,
              'test_hashbase.py': 814, 'test_directions_page.py': 813, 'explorer_diff.py': 718,
              'build_pilot.py': 570, 'test_app.py': 519, 'test_copy_template_review.py': 515}
