@@ -111,9 +111,7 @@ class CarrierView:
             self.update_items()
         if gen_changed or not old_have or old_have[1] != need:
             self.run_have()
-        if gen_changed:
-            self.cont_timer.start(0)
-        self.changed(debounce=False)
+        self.changed(debounce=False)                      # и «без хеша» (17.11.2026) - по новому итогу
 
     def direction_disks(self):
         m = self.model

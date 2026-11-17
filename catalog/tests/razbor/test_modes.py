@@ -200,13 +200,19 @@ class ModesTest(PageBase):
         blocks = [b[1] for b in self.p.copy_cell.blocks]
         lay = self.p.copy_cell.layout()
         self.assertLess(lay.indexOf(self.p.copy_cell.body), lay.indexOf(self.p.copy_cell.blocks_box))
-        self.assertLess(lay.indexOf(self.p.copy_cell.blocks_box), lay.indexOf(self.p.tasks_btn))   # кнопка - под блоками
+        row = next(i for i in range(lay.count()) if lay.itemAt(i).layout()            # строка кнопок (17.11.2026: с
+                   and lay.itemAt(i).layout().indexOf(self.p.tasks_btn) >= 0)           # «Отсканировать эти папки»)
+        self.assertLess(lay.indexOf(self.p.copy_cell.blocks_box), row)                  # кнопка - под блоками
         self.assertTrue(all('border:1px solid' in b.styleSheet() for b in blocks))   # у каждого блока - рамка
         n, b = rp.stay_numbers(P)
         moved = P.part_a.get((rz.O_MOVED, None), (0, 0))[0]
         self.assertEqual(cp[0] + hv[0] + n + moved, P.total[0])                  # отмечено + остаётся + перенесено = опись
         self.assertEqual(self.p.copy_cell.state, 'unknown')
-        self.assertTrue(self.p.tasks_btn.isEnabled())
+        # 17.11.2026: документы без хеша пойдут на диски - задания только после пересканирования (test_nohash)
+        self.assertTrue(wait(lambda: self.p.nohash_result() is not None, 30))
+        self.assertGreater(self.p.nohash_result()['n'], 0)
+        self.assertFalse(self.p.tasks_btn.isEnabled())
+        self.assertIn('Сначала хеш', self.p.tasks_btn.toolTip())
         self.assertIs(self.p.tasks_btn, self.p.copy_cell.btn)
 
 

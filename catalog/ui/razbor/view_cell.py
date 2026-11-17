@@ -3,7 +3,7 @@
 Шаг А разбивки (17.11.2026): перенесено из razbor_page.py без правки тел (docs/СТРУКТУРА_ПРОГРАММЫ.md)."""
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from hb_core import razbor as rz
 from hb_core.directions import R_DIR
@@ -14,7 +14,7 @@ import service as sv
 
 from .common import (BLOCK_LOOK, BUSY_CSS, C_NAME, DEBOUNCE_MS, DISKS_WORDS, HEAD_BG, MIME, ROLE, SHORT_BG, UNKNOWN_BG,
                      mime_folders)
-from .texts_cell import ORANGE, RED, cell_numbers, dest_cell_html, disk_block_html, esc
+from .texts_cell import ORANGE, RED, cell_numbers, dest_cell_html, disk_block_html, esc, files_word, nohash_html
 from .texts_head import copies_word, hdds, short_place
 
 
@@ -64,12 +64,27 @@ class Cell(QFrame):
         self.blocks = []                                  # [[диск, QFrame, QLabel, состояние]]
         self.blocks_box.hide()
         lay.addWidget(self.blocks_box)
+        # «Без хеша» (17.11.2026): только то, что пойдёт на диск; кнопка «Отсканировать эти папки» - рядом с заданиями
+        self.nohash = QLabel('')
+        self.nohash.setWordWrap(True)
+        self.nohash.setTextFormat(Qt.RichText)
+        self.nohash.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.nohash.linkActivated.connect(page.nohash_link)
+        self.nohash.hide()
+        lay.addWidget(self.nohash)
         lay.addStretch(1)
-        self.btn = None
+        self.btn = self.scan_btn = None
         if drop:
+            row = QHBoxLayout()
+            row.addStretch(1)
+            self.scan_btn = QPushButton('Отсканировать эти папки…')
+            self.scan_btn.clicked.connect(lambda: page.scan_nohash())
+            self.scan_btn.hide()
+            row.addWidget(self.scan_btn)
             self.btn = QPushButton('Подготовить задания…')
             self.btn.clicked.connect(lambda: page.prepare())
-            lay.addWidget(self.btn, 0, Qt.AlignRight)
+            row.addWidget(self.btn)
+            lay.addLayout(row)
         self.state = 'normal'
 
     def set_busy(self, on):
@@ -207,12 +222,16 @@ class CellView:
                 c.paint('#b0bec5', '#fafafa', state)          # копировать нечего - без «зелёного» фона
             else:
                 c.paint('#43a047', HEAD_BG, state)
+        hash_ok, nh = self.render_nohash(d, plan)
         can = (d is not None and plan is not None and not plan.errors and state != 'short' and not self.writing
                and any(plan.group_state(g) == rz.G_COPY for g, x in plan.groups.items() if x['num'] == d.num))
-        c.btn.setEnabled(can)
+        c.btn.setEnabled(can and hash_ok)
         c.btn.setText('Подготовить задания…')
         if d is None:
             tip = ''
+        elif can and not hash_ok:
+            tip = ('Сначала хеш: у ' + files_word(nh['n']) + ', которые пойдут на диск, его нет - «Отсканировать эти '
+                   'папки».' if nh and 'n' in nh else 'Проверяю, у всех ли файлов, которые пойдут на диск, есть хеш…')
         elif state == 'short':
             tip = 'Не помещается: снимите галочки у части папок.'
         elif not can and plan is not None:
@@ -221,6 +240,35 @@ class CellView:
             tip = (f'Задания на копирование для «{d.num} {d.name}» по сохранённым отметкам; перед созданием - сверка '
                    'оглавления носителя и показ.')
         c.btn.setToolTip(tip)
+
+    def render_nohash(self, d, plan):
+        """Строки «без хеша» и кнопка «Отсканировать эти папки» (17.11.2026). -> (хеш у всех копируемых, ответ).
+        Быстрый признак итога: файлов без хеша к записи на диски направления нет - хеш точно у всех; иначе - по ответу
+        service.nohash_check (для этой ревизии, носителя и направления)."""
+        c = self.copy_cell
+        self.run_nohash()                                 # для этой ревизии и направления - один раз (в фоне)
+        nh = self.nohash_result()
+        if d is None or plan is None:
+            c.nohash.hide()
+            c.scan_btn.hide()
+            return False, nh
+        fast = sum(plan.unhashed_copy.get(x, (0, 0))[0] for x in d.disks if x != plan.disk)
+        by = {r['disk']: r for r in self.disk_rows}
+        label = lambda x: (by.get(x) or {}).get('letter') or x                     # noqa: E731
+        html_ = nohash_html(nh, fast, ' и '.join(label(x) for x in d.disks if x != plan.disk) or 'диск',
+                            cell_numbers(d, plan)['copy'][0], label)
+        c.nohash.setText(html_)
+        c.nohash.setVisible(bool(html_))
+        ok = not fast or bool(nh and 'n' in nh and not nh['n'])
+        show = bool(nh and nh.get('n') and nh.get('folders'))
+        c.scan_btn.setVisible(show)
+        if show:
+            c.scan_btn.setText(f'Отсканировать эти папки ({len(nh["folders"])})…')
+            c.scan_btn.setToolTip('Пересканировать только папки с файлами без хеша, которые пойдут на диск, и только '
+                                  'их типы файлов: ' + ', '.join(nh['cats']) + '. Сначала окно покажет, сколько '
+                                  'прочитать.')
+        c.scan_btn.setEnabled(show and not self.writing)
+        return ok, nh
 
     def drop(self, folders):
         """Папки сброшены в ячейку «Копировать на диск»: включить их в диск назначения (как галочка в «Только
@@ -292,9 +340,8 @@ class CellView:
         busy = self.writing or self.model is None
         self.undo_btn.setEnabled(bool(self.model and self.model.undo_stack) and not busy)
         self.unique_btn.setEnabled(not busy)
-        n = getattr(self, 'cont_n', None)
-        self.contested_btn.setEnabled(not busy and bool(n))
-        self.contested_list_btn.setEnabled(not busy and bool(n))
+        self.contested_btn.setEnabled(not busy)          # 17.11.2026: без числа - окно и список ищут спорные сами
+        self.contested_list_btn.setEnabled(not busy)
         if self.model is not None:
             self.render_cells()
         else:

@@ -42,7 +42,7 @@ from .rescan_run import (SCANNER, _scanner, disk_letter, rescan_plan, rescan_con
     rescan_argv, rescan_start, read_progress, partial_outcome)
 from .marks import mark_verdict, _real_path, marks_preview, add_marks_batch
 from .razbor_plan import (_plan, razbor, free_space, _task_meta, _write_json, same_task, _new_have_groups,
-    razbor_tasks, contested, contested_count)
+    razbor_tasks, contested, contested_count, nohash_check)
 from .owner import (manual_preview, add_manual, add_manual_batch, fix_manual, decision_preview, add_decision,
     exclusion_preview, add_exclusion)
 from .filelist import (LIST_KINDS, LIST_MAX, EV_TEXT, NO_HASH_TEXT, TYPE_WORD, WHY_HEAD, hash_text, _too_many, _meta,

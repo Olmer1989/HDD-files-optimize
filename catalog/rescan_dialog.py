@@ -29,7 +29,7 @@ def num(n):
 
 
 class RescanDialog(QDialog):
-    def __init__(self, win, disk, folders):
+    def __init__(self, win, disk, folders, cats=None):
         super().__init__(win)
         self.win, self.disk, self.folders = win, disk, list(folders)
         self.plan = self.proc = self.job = None
@@ -56,11 +56,14 @@ class RescanDialog(QDialog):
         self.type_box = {}
         for i, (cat, text) in enumerate(CAT_LABELS, start=1):
             b = QCheckBox(text)
-            b.setChecked(True)
+            b.setChecked(not cats or cat in cats)          # cats - «Отсканировать эти папки»: только нужные типы
             b.toggled.connect(self.types_changed)
             self.type_box[cat] = b
             grid.addWidget(b, i // 4, i % 4)
         lay.addLayout(grid)
+        self.all_types.blockSignals(True)
+        self.all_types.setChecked(hash_types.is_all(self.cats()))
+        self.all_types.blockSignals(False)
         self.types_line = QLabel('')
         self.types_line.setWordWrap(True)
         lay.addWidget(self.types_line)

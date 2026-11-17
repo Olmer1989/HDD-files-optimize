@@ -32,6 +32,8 @@ def tasks_check(disk, nums, toc=True):
     specs = [s for s in res['specs'] if s['num'] not in short]
     new = [s for s in specs if not s.get('exists')]
     out = dict(res=res, specs=specs, new=new, short=short, cap=cap, nums=nums, at=time.strftime('%H:%M:%S'), toc=None)
+    # 17.11.2026 (решение владельца): SHA-256 у всех копируемых - последняя проверка по тем же строкам заданий
+    out['nohash'] = len({r[1] for s in new for r in s['rows'] if r[3] == 'без хеша'})
     if toc and new:
         folders, root, zones = sv.toc_targets(P, new)
         out['toc'] = sv.toc_check(disk, folders, root, zones)
@@ -100,6 +102,10 @@ class TasksFlow:
             QMessageBox.warning(self, TITLE, 'Задания не посчитаны: ' + (val if kind == 'refused' else
                                                                        val.strip().splitlines()[-1]))
             return
+        if val.get('nohash'):
+            QMessageBox.warning(self, TITLE, f'У {val["nohash"]} файлов, которые пойдут на диск, нет хеша (SHA-256). '
+                                'Задания не создаются: сначала «Отсканировать эти папки» в ячейке «Копировать на диск».')
+            return
         body, new = tasks_html(val, self.disk_name, note)
         toc = val.get('toc')
         blocked = toc is not None and (not toc['connected'] or toc['problems'])
@@ -121,15 +127,16 @@ class TasksFlow:
         self.win.bg.run(safe, tasks_create, disk, nums, spec_keys(val['specs']),
                         ok=lambda r: self.tasks_created(disk, nums, r), quiet=True)
 
-    def rescan(self, disk, folders):
-        """Готовое окно «Пересканировать папки» (Диски и папки) с папками, где сверка нашла расхождения."""
+    def rescan(self, disk, folders, cats=None):
+        """Готовое окно «Пересканировать папки» (Диски и папки) с папками, где сверка нашла расхождения (или с папками
+        файлов без хеша - тогда cats: галочки только этих типов)."""
         import rescan_dialog
         running = getattr(self.win, 'rescan', None)
         if running is not None and running.running:
             QMessageBox.information(self, TITLE, 'Уже идёт пересканирование - дождитесь его или остановите.')
             running.raise_()
             return
-        self.win.rescan = rescan_dialog.RescanDialog(self.win, disk, folders)
+        self.win.rescan = rescan_dialog.RescanDialog(self.win, disk, folders, cats=cats)
         self.win.rescan.finished.connect(lambda *_: self.refresh())     # новая опись - дерево и итог заново
         self.win.rescan.show()
 

@@ -18,6 +18,7 @@ from hb_core.db import *          # noqa: F401,F403
 from hb_core.directions import *          # noqa: F401,F403
 from hb_core.query import *          # noqa: F401,F403
 from hb_core.razbor import *          # noqa: F401,F403
+from hb_core.razbor_scope import *          # noqa: F401,F403
 from hb_core.short import *          # noqa: F401,F403
 from hb_core import paths as _paths, db as _db
 

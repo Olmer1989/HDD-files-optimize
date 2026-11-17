@@ -69,10 +69,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QGridLayout, QHB
 
 from ui_common import StepsBar
 
-from .common import (CONTESTED_MS, CONTESTED_NOTE, C_CHECK, C_FILES, C_HAVE, C_NAME, C_OTHER, C_PHOTO, C_VIDEO, HEAD,
+from .common import (CONTESTED_NOTE, C_CHECK, C_FILES, C_HAVE, C_NAME, C_OTHER, C_PHOTO, C_VIDEO, HEAD,
                      HEAD_BG, MODE_CSS, MODE_TEXT)
 from .flow_autosave import AutosaveFlow, CloseGuard
 from .flow_contested import ContestedFlow
+from .flow_nohash import NohashFlow
 from .flow_tasks import TasksFlow
 from .texts_cell import BLUE, EVERY, EXCEPT, GRAY, ONLY, ORANGE
 from .texts_head import carrier_text, legend_html
@@ -85,7 +86,8 @@ from .view_summary import SummaryView
 from .view_tree import DragTree, TreeDelegate, TreeView
 
 
-class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryView, AutosaveFlow, TasksFlow, ListView, ContestedFlow, QWidget):
+class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryView, AutosaveFlow, TasksFlow, ListView,
+                 ContestedFlow, NohashFlow, QWidget):
     marks_changed = Signal(int)                           # этап 17: отметки изменились (ревизия) - окну «Список файлов»
     saving_changed = Signal(bool)                         # идёт / закончилась запись отметок
     def __init__(self, win):
@@ -276,9 +278,13 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         self.undo_btn = QPushButton('Отменить последнее')
         self.undo_btn.setToolTip('Вернуть отметки, какими они были до последнего действия (это тоже сохраняется сразу).')
         self.undo_btn.clicked.connect(self.undo)
-        self.contested_btn = QPushButton('Пересчитать хеши спорных файлов…')
+        # 17.11.2026: не главное место - «без хеша» того, что пойдёт на диск, теперь в ячейке; здесь - весь носитель
+        self.contested_btn = QPushButton('Спорные по всему носителю…')
+        self.contested_btn.setFlat(True)
+        self.contested_btn.setStyleSheet('QPushButton { color:#1565c0; text-decoration:underline; border:none; }')
         self.contested_btn.setToolTip('Где лежат файлы без хеша и неподтверждённые копии выделенной папки (или всего '
-                                      'носителя); подключённые диски - пересканировать с хешем всех файлов.')
+                                      'носителя, со всеми служебными файлами); подключённые диски - пересканировать с '
+                                      'хешем всех файлов.')
         self.contested_btn.clicked.connect(self.contested)
         self.contested_list_btn = QPushButton('Показать список')
         self.contested_list_btn.setToolTip('Спорные файлы поштучно: папка, имя, тип, размер, дата, на каком диске и '
@@ -307,11 +313,7 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self.autosave)
         self.root_before = {}                             # (носитель, D) -> отметка всего носителя до «Все папки»
-        self.cont_req = 0                                 # запрос числа спорных (ответ для старого выбора - не нужен)
-        self.cont_timer = QTimer(self)
-        self.cont_timer.setSingleShot(True)
-        self.cont_timer.timeout.connect(self.run_contested_count)
-        self.tree.itemSelectionChanged.connect(lambda: self.cont_timer.start(CONTESTED_MS))
+        self.nh = None                                    # «без хеша»: ключ (носитель, ревизия, направление) и ответ
         self.debounce = QTimer(self)
         self.debounce.setSingleShot(True)
         self.debounce.timeout.connect(self.run_summary)

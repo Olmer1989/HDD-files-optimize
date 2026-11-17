@@ -112,6 +112,7 @@ class TasksTest(PageBase):
         return sorted(x.name for x in hb.TASKS.iterdir() if x.name.startswith(SRC)) if hb.TASKS.exists() else []
 
     def test_prepare_tasks_after_saving_drafts(self):
+        self.skip_hash_gate()                                                   # см. test_nohash
         self.open()
         self.p.mode_every.setChecked(True)
         self.p.apply(['Работа'], N2)
@@ -126,6 +127,7 @@ class TasksTest(PageBase):
                         self.asked)
 
     def test_list_changed_before_create_is_shown_again(self):
+        self.skip_hash_gate()                                                   # см. test_nohash
         self.mark(('', 'Семейный архив'))
         self.open()
         real = flow_tasks.tasks_dry
@@ -219,6 +221,7 @@ class CapacityTest(PageBase):
     def test_short_disk_turns_cell_red_and_blocks_direction(self):
         """Не помещается на 45 (на 77 место неизвестно) - ячейка «Копировать на диски» красная, кнопка неактивна;
         другой диск назначения (Н2) - задания создаются, у Н1 - ни на 45, ни на 77."""
+        self.skip_hash_gate()                                                   # см. test_nohash
         import directions_page as dp
         dp.save_choice(['Н1', 'Н2'])
         self.mark(('', 'Н1'), ('Работа', 'Н2'))
@@ -297,6 +300,7 @@ class TocTest(PageBase):
         self.assertIn(('Поход 2010\\Монтаж', False), zones)
 
     def test_page_blocks_tasks_on_mismatch_and_offers_rescan(self):
+        self.skip_hash_gate()                                                   # см. test_nohash
         self.mark(('', 'Н1'))
         root = self.make_root()
         (root / 'Поход 2010' / 'Фото' / '2.jpg').unlink()
@@ -325,6 +329,7 @@ class Review6Test(PageBase):
     одно правило пропуска для описи и оглавления, очередь с числом файлов."""
 
     def test_toc_rechecked_right_before_create(self):
+        self.skip_hash_gate()                                                   # см. test_nohash
         self.mark(('', 'Н1'))
         answers = [TOC_OK, dict(connected=True, reason='', letter='K:', checked=5, problems=[
             dict(folder='Поход 2010', gone=1, new=0, size=0, date=0, unread=0,

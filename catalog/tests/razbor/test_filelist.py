@@ -234,21 +234,15 @@ class FileWindowTest(PageBase):
         self.loaded(w)
         self.assertTrue(wait(lambda: not w.stale.isVisibleTo(w), 30))
 
-    def test_contested_button_counts_and_unique(self):
+    def test_contested_link_and_unique(self):
+        """17.11.2026: спорные по всему носителю - ссылкой внизу, без числа (не считается при каждом выделении)."""
         self.open()
-        self.assertTrue(wait(lambda: getattr(self.p, 'cont_n', None) is not None, 30))
-        n = sv.contested_count(SRC)['total']
-        self.assertGreater(n, 0)
-        self.assertEqual(self.p.contested_btn.text(), f'Пересчитать хеши спорных файлов ({n})…')
+        self.assertEqual(self.p.contested_btn.text(), 'Спорные по всему носителю…')
+        self.assertTrue(self.p.contested_btn.isFlat())
         self.assertTrue(self.p.contested_btn.isEnabled() and self.p.contested_list_btn.isEnabled())
         self.assertIn('Спорные — файлы, чью копию нельзя проверить по SHA-256', self.p.contested_note.text())
-        with sv_patch('contested_count', lambda d, f='': dict(total=0, carrier=0, copies=0)):
-            self.p.run_contested_count()
-            self.assertTrue(wait(lambda: self.p.cont_n == 0, 10))
-        self.assertFalse(self.p.contested_btn.isEnabled())                       # 0 - неактивна
-        self.assertFalse(self.p.contested_list_btn.isEnabled())
-        self.item('Работа').setSelected(True)                                    # выделена папка - число для неё
-        self.assertTrue(wait(lambda: self.p.cont_n == sv.contested_count(SRC, 'Работа')['total'], 30))
+        self.assertFalse(hasattr(self.p, 'run_contested_count'))
+        self.item('Работа').setSelected(True)                                    # выделена папка - список для неё
         w = self.loaded(self.p.show_list('unique'))
         self.assertEqual({w.model.row(i)[2] for i in range(w.model.rowCount())}, {'схема.jpg'})
         self.assertIn('без хеша', w.notes.text())

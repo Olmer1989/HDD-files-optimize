@@ -213,3 +213,28 @@ def contested_count(disk, folder=''):
         c.close()
     own = sum(1 for r in rows if r[0] == disk)
     return dict(total=len(rows), carrier=own, copies=len(rows) - own)
+
+
+def nohash_check(disk, num, drafts=()):
+    """«Без хеша» ячейки «Копировать на диск …» (17.11.2026): только файлы, которые пойдут на диски направления num -
+    planner с collect (тот же расчёт, что итог, с черновиком отметок), одно состояние базы. Ничего не пишет.
+    -> dict(n, bytes, folders, root, cats, sample, unread, copies={диск: dict(k, folders, root, cats, sample)},
+    errors) или None (у направления нет диска)."""
+    snap = snapshot()
+    c = ro()                       # своё соединение только для чтения: считается в фоне
+    try:
+        check_disk(c, disk)
+        c.execute('begin')
+        dirs = hb.parse_directions(snap['directions'])
+        d = dirs.get(num)
+        if d is None or not d.disks:
+            return None
+        ms = hb.MarkSet.build(hb.mark_rows(disk, snap['decisions']), dirs, list(drafts))
+        P = hb.planner(c, disk, dirs, ms, collect=(num, {hb.O_COPY}))
+        res = hb.nohash_scope(P.items, d.disks, disk, P.blocked, hb.unread_files(c, disk))
+        res['copies'] = hb.namesakes_nohash(c, P.items, d.disks, disk)
+        res['errors'] = list(P.errors)
+        return res
+    finally:
+        c.rollback()
+        c.close()

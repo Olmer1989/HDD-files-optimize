@@ -24,6 +24,7 @@ from hb_core.consts import COPIED_PREFIX
 from hb_core.util import is_moved_dir, parent_of, prefix_cond
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
 from hb_core.query import _keys
+from hb_core.razbor_scope import B_UNREAD, top_folders, unread_files
 
 COPY_ROOT = 'ПЕРЕНОС с других дисков'  # куда шаблон копирования кладёт файлы на диске назначения
 ROOT_GROUP = None                      # папка группы «(файлы в корне)» - отдельный идентификатор, не путь
@@ -328,7 +329,9 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
     # независимый счёт числа и байтов носителя (сверка)
     real_n, real_b = c.execute('select count(*), coalesce(sum(size), 0) from files where disk=?', (disk,)).fetchone()
     twins = _twins(c, disk, folders, children, copied) if copied else set()
-    special |= twins
+    unread = {p: w for p, w in unread_files(c, disk).items()   # только где что-то копируется (не весь носитель)
+              if p in file_marks or route.get(parent_of(p), NONE_ROUTE).state == R_DIR}
+    special |= twins | set(unread)                               # снова не прочитан при пересканировании - поштучно
     occ = collections.defaultdict(dict)                          # путь носителя -> {диск D: (sha, ev) на D}
     blocked_pref = collections.defaultdict(list)                 # диск D -> папки носителя, где на D файл вместо папки
 
@@ -466,6 +469,8 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
     blocked_sha = collections.defaultdict(list)                  # (группа, диск, sha) -> [(путь, причина, размер)]
 
     def block_reason(path, d, sha):
+        if not sha and path in unread:                           # не копируется (решение владельца 17.11.2026)
+            return B_UNREAD
         if path in twins:
             return B_TWIN
         o = occ.get(path, {}).get(d)
@@ -523,7 +528,7 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
                         dep_cand[(g['key'], d, sha)].append(path)
             elif why:
                 P.blocked.append((path, d, why, size))
-                g['blocked'] += 1
+                g['blocked'] += why != B_UNREAD                  # непрочитанный не держит задание остальных
             else:
                 P.part_b[d][0] += 1; P.part_b[d][1] += size
                 g['per_disk'][d][0] += 1; g['per_disk'][d][1] += size
@@ -629,18 +634,7 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
     # ---------- detail: файлы без хеша поштучно (строки заданий) и тёзки ----------
     if detail and need_files:
         need = set(need_files)
-        tops = set()                                             # самые верхние папки (предок уже взят - не надо)
-        for f in sorted(need, key=lambda x: (x.count(SEP), x)):
-            if '' in tops:
-                break
-            p, inside = f, False
-            while p:
-                if p in tops:
-                    inside = True
-                    break
-                p = parent_of(p)
-            if not inside:
-                tops.add(f)
+        tops = top_folders(need)                                 # самые верхние папки (предок уже взят - не надо)
         seen_rows = 0
         for t in tops:
             cond, args = inside_cond('path', t)
@@ -710,20 +704,8 @@ def _collect_rest(c, P, disk, want, folders, dn, route, docs_ok, outcome, src_bi
     if not need:
         return
     expected = sum(dn[f][k] for f in need for k in range(N_TYPES) if dn[f][k] and wanted(f, k))
-    tops = set()
-    for f in sorted(need, key=lambda x: (x.count(SEP), x)):
-        if '' in tops:
-            break
-        p, inside = f, False
-        while p:
-            if p in tops:
-                inside = True
-                break
-            p = parent_of(p)
-        if not inside:
-            tops.add(f)
     seen = 0
-    for t in tops:
+    for t in top_folders(need):
         cond, args = inside_cond('path', t)
         for path, size, nm in c.execute(f'select path, size, name_lc from files where disk=? and {cond} and sha is null',
                                         [disk] + args):
@@ -874,7 +856,8 @@ def attention_lines(P):
                             'копируются; решите вручную на диске',
                 B_CHECK: 'путь назначения занят неподтверждённой записью - пересканируйте эту папку на диске',
                 B_TWIN: 'у двух файлов носителя один путь назначения (тот же путь в «Скопировано на …» и вне её, '
-                        'содержимое разное или без хеша) - не копируются; решите вручную на носителе'}[w]
+                        'содержимое разное или без хеша) - не копируются; решите вручную на носителе',
+                B_UNREAD: 'снова не прочитаны при пересканировании - не копируются (остальные копируются)'}[w]
         L.append(f'{d}: {_n(n)} файлов - {hint}.')
     st = P.info.get('status') or '?'
     if st != 'complete' or P.info.get('issues'):

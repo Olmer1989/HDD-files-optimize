@@ -3,7 +3,7 @@
 import collections
 import sqlite3
 import build_pilot as bp
-from hb_core.consts import EV_COPY, EV_NONE, EV_SCAN, EV_SIZE, EV_STALE, EV_USER, SEP
+from hb_core.consts import EV_COPY, EV_NONE, EV_SCAN, EV_SIZE, EV_STALE, EV_USER, HASH_UNREAD_KIND, SEP, UNREAD_KIND
 from hb_core.util import gb, inside, prefix_cond, rel_of
 from hb_core.apply_common import scan_row
 
@@ -28,14 +28,15 @@ def apply_partial(c, pj, seen, excl, report):
         report['warn'].add(f'{label}: в result.json нет списка папок - скан не принят')
         return False
     hp, ip = pj['dir'] / 'hashes.sqlite', pj['dir'] / 'inventory.sqlite'
-    hashes, unread = {}, 0
+    hashes, unread, tried = {}, {}, set()                        # tried - файлы, которые сканер пробовал читать
     if hp.exists():
         with bp.ro(hp) as h:
-            for p, s, m, x, st in h.execute('select path, size, mtime_ns, lower(sha256), status from hashes'):
+            for p, s, m, x, st, err in h.execute('select path, size, mtime_ns, lower(sha256), status, error from hashes'):
+                tried.add(p)
                 if st == 'verified' and x:
                     hashes[p] = (s, '' if m is None else str(m), x)
-                else:
-                    unread += 1
+                else:                                            # снова не прочитан - причина в issues (17.11.2026)
+                    unread[p] = f'{st or "?"}: {err or ""}'.strip(': ')[:300]
     with bp.ro(ip) as inv:
         scan = inv.execute('select path, size, mtime_ns from files').fetchall()
         try:
@@ -45,13 +46,17 @@ def apply_partial(c, pj, seen, excl, report):
     ex = excl.get(disk, [])
     origin = f'частичный скан: {pj["name"]}'
     st = {f: collections.Counter() for f in folders}
-    prev = {}
+    prev, old_unread = {}, {}
     for f in folders:
         cond, args = prefix_cond('path', f)
         for p, sha, exp, ev, size in c.execute(f'select path, sha, sha_exp, ev, size from files where disk=? and {cond}',
                                                [disk] + args):
             prev[p] = (sha or exp, ev, size or 0)
         c.execute(f'delete from files where disk=? and {cond}', [disk] + args)
+        # прежняя ошибка чтения файла остаётся, если сканер этот файл в этот раз не пробовал (тип не выбран)
+        old_unread.update({p: (k, n) for p, k, n in c.execute(f'select path, kind, note from issues where disk=? and '
+                                                              f'kind in (?, ?) and {cond}',
+                                                              [disk, HASH_UNREAD_KIND, UNREAD_KIND] + args)})
         c.execute(f'delete from issues where disk=? and {cond}', [disk] + args)
         seen.add(disk, f, pj['time'])
         c.execute('insert or replace into scan_folders values (?,?,?)', (disk, f, pj['time']))
@@ -70,6 +75,10 @@ def apply_partial(c, pj, seen, excl, report):
             c.execute('insert or replace into excluded values (?,?,?,?,?,?)', (disk, p, size or 0, h, r[5], origin))
             continue
         rows.append(r)
+        if not r[3] and p in unread:
+            c.execute('insert into issues values (?,?,?,?)', (disk, p, UNREAD_KIND, unread[p]))
+        elif not r[3] and p not in tried and p in old_unread:
+            c.execute('insert into issues values (?,?,?,?)', (disk, p) + old_unread[p])
         old = prev.pop(p, None)
         if old is None:
             k['новые'] += 1; k['новые байт'] += size or 0
@@ -103,6 +112,6 @@ def apply_partial(c, pj, seen, excl, report):
     if outside:
         report['warn'].add(f'{label}: {outside} файлов вне перечисленных папок - не приняты')
     if unread or info.get('damaged_files') or info.get('unread_files') or errors:
-        report['warn'].add(f'{label}: не прочитано файлов {unread or info.get("unread_files") or 0}, '
+        report['warn'].add(f'{label}: не прочитано файлов {len(unread) or info.get("unread_files") or 0}, '
                            f'повреждено {info.get("damaged_files") or 0}, ошибок описи {len(errors)}')
     return True

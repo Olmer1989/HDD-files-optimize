@@ -91,6 +91,19 @@ class PageBase(V3Base):
         super().tearDown()
 
     # --- помощники ---
+    def skip_hash_gate(self):
+        """Тесты заданий на общей обвязке (документы без хеша идут в копирование): последняя проверка «без хеша»
+        (17.11.2026) проверяется отдельно (test_nohash), здесь - как будто хеш у всех."""
+        orig = flow_tasks.tasks_check
+
+        def check(*a, **k):
+            out = orig(*a, **k)
+            out['nohash'] = 0
+            return out
+        p = mock.patch.object(flow_tasks, 'tasks_check', check)
+        p.start()
+        self.patches.append(p)
+
     def open(self, disk=SRC):
         self.p.choose_disk(disk)
         self.assertTrue(wait(lambda: self.p.model is not None and self.p.model.disk == disk), 'дерево не прочиталось')

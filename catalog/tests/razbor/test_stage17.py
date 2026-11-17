@@ -15,15 +15,13 @@ class CodeReview16UiTest(PageBase):
     """Этап 16, замечания критиков по коду окна: число спорных не посчитано - без ложного числа; пустые «Почему» и
     «Где копия» сортируются; строки Excel готовятся в фоне из снимка; выделены только файлы корня - кнопка неактивна."""
 
-    def test_contested_count_error_has_no_false_number(self):
+    def test_contested_link_has_no_number(self):
+        """17.11.2026: число спорных по всему носителю не считается - ложного числа нет, окно ищет спорные само."""
         self.open()
-        with sv_patch('contested_count', side_effect=sv.Refused('проба')):
-            self.p.run_contested_count()
-            self.assertTrue(wait(lambda: self.p.cont_n == -1, 10))
+        with sv_patch('contested_count', side_effect=AssertionError('не должно считаться')):
+            self.item('Работа').setSelected(True)
         self.assertNotRegex(self.p.contested_btn.text(), r'\(\d')
-        self.assertIn('не посчитано', self.p.contested_btn.text())
-        self.assertIn('проба', self.p.contested_btn.toolTip())
-        self.assertTrue(self.p.contested_btn.isEnabled())                       # окно ищет спорные само
+        self.assertTrue(self.p.contested_btn.isEnabled())
 
     def test_empty_why_sorted_and_export_from_snapshot(self):
         import filelist_window as fw
