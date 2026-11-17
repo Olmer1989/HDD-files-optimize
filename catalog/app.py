@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFrame, QHBoxLay
 from ui_common import *  # noqa: E402,F401,F403  (общее для страниц; вынесено 16.11.2026)
 from ui_common import _Signals  # noqa: E402,F401
 from overview_page import *  # noqa: E402,F401,F403  (страница «Обзор»)
-from disks_page import *  # noqa: E402,F401,F403  (страница «Диски и папки»)
+from ui.disks.page import DisksPage  # noqa: E402  (страница «Диски и папки»: пакет ui/disks)
 
 
 # ---------- главное окно ----------

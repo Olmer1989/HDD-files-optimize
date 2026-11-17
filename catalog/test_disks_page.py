@@ -18,6 +18,7 @@ import app                                                 # noqa: E402
 from tests.sv_patch import sv_patch, sv_patch_multiple       # noqa: E402 - подмена имён service во всех подмодулях
 import commands_page as cpg                                # noqa: E402
 import disk_ui                                             # noqa: E402
+from ui.disks import common as dk                           # noqa: E402 - столбцы и роли дерева
 
 QAPP = QApplication.instance() or QApplication([])
 
@@ -155,8 +156,8 @@ class DisksPageTest(unittest.TestCase):
         self.assertEqual(self.page.disk, 'HDD09')
         self.assertEqual(self.page.t.currentRow(), 0)
         root = self.root()
-        self.assertEqual(root.text(app.T_NAME), 'HDD09 (весь диск)')
-        self.assertEqual([root.child(i).text(app.T_NAME) for i in range(root.childCount())], ['Фото', 'Прочее', 'Пусто'])
+        self.assertEqual(root.text(dk.T_NAME), 'HDD09 (весь диск)')
+        self.assertEqual([root.child(i).text(dk.T_NAME) for i in range(root.childCount())], ['Фото', 'Прочее', 'Пусто'])
         self.assertEqual(self.page.tree_title.text(), 'Папки диска F: — Работа - SN850 — HDD09')
         self.assertIn('10 файлов · 1,0 ГБ · опись от 01.01.2026', self.page.tree_sum.text())
         h = self.page.hash_lab.text()                                               # этап 16: вместо «хеш у 73 %»
@@ -169,27 +170,27 @@ class DisksPageTest(unittest.TestCase):
         self.assertEqual(heads, ['', 'Папка', 'Файлов', 'ГБ', 'Без хеша', 'фото', 'видео', 'тексты', 'прочие', 'мусор',
                                  'Решение владельца'])
         foto, other, empty = (self.root().child(i) for i in range(3))
-        self.assertEqual(foto.text(app.T_GB), '0,5')
-        self.assertTrue(foto.font(app.T_GB).bold())                                # ГБ - жирно
-        self.assertEqual(foto.font(app.T_GB).pointSizeF(), self.page.tree.font().pointSizeF())   # шрифт дерева
-        self.assertEqual(foto.text(app.T_TYPE0), '0,5')
-        self.assertEqual(foto.text(app.T_TYPE0 + 1), '—')                          # ноль - серый прочерк
-        self.assertEqual(foto.foreground(app.T_TYPE0 + 1).color().name(), '#bdbdbd')
-        self.assertEqual(foto.data(app.T_NAME, app.TYPES_ROLE), [0.5, 0, 0, 0, 0])  # полоска состава под именем
-        self.assertEqual(foto.data(app.T_DEC, app.MARK_ROLE)['kind'], 'dir')       # оранжевая плашка с направлением
-        self.assertEqual(other.data(app.T_DEC, app.MARK_ROLE)['kind'], 'skip')     # серая «не копировать»
-        self.assertIn('от «весь носитель»', other.toolTip(app.T_DEC))
-        self.assertEqual(empty.text(app.T_DEC), '—')                                # нет решения - прочерк
+        self.assertEqual(foto.text(dk.T_GB), '0,5')
+        self.assertTrue(foto.font(dk.T_GB).bold())                                # ГБ - жирно
+        self.assertEqual(foto.font(dk.T_GB).pointSizeF(), self.page.tree.font().pointSizeF())   # шрифт дерева
+        self.assertEqual(foto.text(dk.T_TYPE0), '0,5')
+        self.assertEqual(foto.text(dk.T_TYPE0 + 1), '—')                          # ноль - серый прочерк
+        self.assertEqual(foto.foreground(dk.T_TYPE0 + 1).color().name(), '#bdbdbd')
+        self.assertEqual(foto.data(dk.T_NAME, dk.TYPES_ROLE), [0.5, 0, 0, 0, 0])  # полоска состава под именем
+        self.assertEqual(foto.data(dk.T_DEC, dk.MARK_ROLE)['kind'], 'dir')       # оранжевая плашка с направлением
+        self.assertEqual(other.data(dk.T_DEC, dk.MARK_ROLE)['kind'], 'skip')     # серая «не копировать»
+        self.assertIn('от «весь носитель»', other.toolTip(dk.T_DEC))
+        self.assertEqual(empty.text(dk.T_DEC), '—')                                # нет решения - прочерк
         self.assertTrue(foto.flags() & Qt.ItemIsUserCheckable)
-        self.assertIsNone(self.root().data(app.T_CHECK, Qt.CheckStateRole))        # весь диск не отмечается
+        self.assertIsNone(self.root().data(dk.T_CHECK, Qt.CheckStateRole))        # весь диск не отмечается
         self.page.tree.grab()                                                       # делегат рисует без ошибок
 
     def test_selection_line_and_actions(self):
         self.assertIn('Выбрано папок: 0', self.page.sel_lab.text())
         self.assertFalse(self.page.rescan_btn.isEnabled())
         foto, other = self.root().child(0), self.root().child(1)
-        foto.setCheckState(app.T_CHECK, Qt.Checked)
-        other.setCheckState(app.T_CHECK, Qt.Checked)
+        foto.setCheckState(dk.T_CHECK, Qt.Checked)
+        other.setCheckState(dk.T_CHECK, Qt.Checked)
         self.assertEqual(self.page.sel_lab.text(), 'Выбрано папок: 2 · файлов 8 · 0,7 ГБ')
         self.assertIn('Диск подключён (F:)', self.page.state.text())
         self.assertTrue(self.page.rescan_btn.isEnabled() and self.page.open_btn.isEnabled())
@@ -207,7 +208,7 @@ class DisksPageTest(unittest.TestCase):
     def test_missing_on_direction_disks(self):
         import types
         import directions_page
-        self.root().child(0).setCheckState(app.T_CHECK, Qt.Checked)
+        self.root().child(0).setCheckState(dk.T_CHECK, Qt.Checked)
         got = []
 
         def fm(disk, path, targets):
@@ -237,10 +238,10 @@ class DisksPageTest(unittest.TestCase):
         self.page.find()
         self.assertIsNone(self.page.disk)
         a, b = self.page.tree.topLevelItem(0), self.page.tree.topLevelItem(1)
-        self.assertEqual(a.text(app.T_NAME), 'HDD09\\Работа\\Сафари')
-        self.assertEqual(a.data(app.T_NAME, app.TYPES_ROLE), [0.3, 0.1, 0, 0, 0])   # полоска и типы - как в дереве
-        self.assertEqual(a.text(app.T_TYPE0), '0,3')
-        self.assertEqual(a.data(app.T_DEC, app.MARK_ROLE)['kind'], 'dir')          # решение владельца - плашкой
+        self.assertEqual(a.text(dk.T_NAME), 'HDD09\\Работа\\Сафари')
+        self.assertEqual(a.data(dk.T_NAME, dk.TYPES_ROLE), [0.3, 0.1, 0, 0, 0])   # полоска и типы - как в дереве
+        self.assertEqual(a.text(dk.T_TYPE0), '0,3')
+        self.assertEqual(a.data(dk.T_DEC, dk.MARK_ROLE)['kind'], 'dir')          # решение владельца - плашкой
         self.page.tree.setCurrentItem(a)                                            # выделена одна найденная строка
         self.assertIn('Выбрано папок: 1', self.page.sel_lab.text())
         self.assertIn('Диск подключён (F:)', self.page.state.text())
@@ -251,8 +252,8 @@ class DisksPageTest(unittest.TestCase):
             self.page.rescan()
             self.assertEqual(made, [('HDD09', ['Работа\\Сафари'])])
             self.assertEqual(asked, [])
-            a.setCheckState(app.T_CHECK, Qt.Checked)
-            b.setCheckState(app.T_CHECK, Qt.Checked)                                # папки двух дисков
+            a.setCheckState(dk.T_CHECK, Qt.Checked)
+            b.setCheckState(dk.T_CHECK, Qt.Checked)                                # папки двух дисков
             self.assertFalse(self.page.rescan_btn.isEnabled())
             self.assertIn('Подключите HDD01', self.page.state.text())
             self.page.rescan()
@@ -269,15 +270,15 @@ class DisksPageTest(unittest.TestCase):
         """Этап 16: столбец «Без хеша» (поддерево, один проход на носитель), ноль - серый прочерк, щелчок по числу -
         окно «Список файлов» этой папки; ссылка «Показать» - весь носитель."""
         foto, other, empty = (self.root().child(i) for i in range(3))
-        self.assertEqual(self.root().text(app.T_NOHASH), '3')
-        self.assertEqual((foto.text(app.T_NOHASH), other.text(app.T_NOHASH), empty.text(app.T_NOHASH)), ('2', '1', '—'))
-        self.assertEqual(empty.foreground(app.T_NOHASH).color().name(), '#bdbdbd')
+        self.assertEqual(self.root().text(dk.T_NOHASH), '3')
+        self.assertEqual((foto.text(dk.T_NOHASH), other.text(dk.T_NOHASH), empty.text(dk.T_NOHASH)), ('2', '1', '—'))
+        self.assertEqual(empty.foreground(dk.T_NOHASH).color().name(), '#bdbdbd')
         opened = []
-        from ui.filelist import page as filelist_page          # подмена там, где имя используется (disks_page)
+        from ui.filelist import page as filelist_page          # подмена там, где имя используется (ui/disks)
         with mock.patch.object(filelist_page, 'open_list', lambda win, **kw: opened.append(kw)):
-            self.page.item_clicked(foto, app.T_NOHASH)
-            self.page.item_clicked(empty, app.T_NOHASH)                                # ноль - не ссылка
-            self.page.item_clicked(foto, app.T_GB)                                     # другой столбец - ничего
+            self.page.item_clicked(foto, dk.T_NOHASH)
+            self.page.item_clicked(empty, dk.T_NOHASH)                                # ноль - не ссылка
+            self.page.item_clicked(foto, dk.T_GB)                                     # другой столбец - ничего
             self.page.hash_lab.linkActivated.emit('nohash:')
         self.assertEqual(opened, [dict(kind='nohash', disk='HDD09', folder='Фото'),
                                   dict(kind='nohash', disk='HDD09', folder='')])

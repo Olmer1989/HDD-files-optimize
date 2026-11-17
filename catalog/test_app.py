@@ -74,7 +74,7 @@ class WindowTest(Base):
         self.assertTrue(wait(lambda: dp.t.rowCount() == 4))
         row = [r['disk'] for r in dp.rows].index('HDD90')
         dp.t.selectRow(row)
-        N = app.T_NAME
+        N = __import__('ui.disks.common', fromlist=['T_NAME']).T_NAME
         root = dp.tree.topLevelItem(0)
         self.assertTrue(wait(lambda: root.childCount() == 2))                   # A и B, лениво
         names = sorted(root.child(i).text(N) for i in range(2))

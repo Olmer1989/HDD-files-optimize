@@ -22,9 +22,10 @@ UI_RANK = {'razbor': {'texts_cell': 0, 'common': 1, 'texts_tasks': 1, 'texts_hea
                       'model_show': 3, 'model': 4, 'dialogs': 5, 'page': 7},
            'filelist': {'texts_list': 0, 'common': 1, 'model_rows': 2, 'model_table': 3, 'page': 7},
            'tasks': {'common': 0, 'texts_words': 1, 'texts_rows': 2, 'model_journal': 3, 'model_rules': 3,
-                     'model_run': 3, 'model_move': 3, 'model_load': 4, 'widgets': 5, 'page': 7}}
+                     'model_run': 3, 'model_move': 3, 'model_load': 4, 'widgets': 5, 'page': 7},
+           'disks': {'texts_disks': 0, 'texts_tree': 0, 'texts_info': 0, 'common': 1, 'page': 7}}
 SHIMS = {'razbor_page': 60, 'razbor_cell': 60, 'test_razbor_page': 60,          # переходники шага А: прежние имена,
-         'filelist_window': 60, 'tasks_page': 60}                               # до 60 строк
+         'filelist_window': 60, 'tasks_page': 60, 'disks_page': 60}             # до 60 строк
 
 
 def ui_packages(root=CAT):
@@ -149,7 +150,7 @@ def find_cycle(g):
     return None
 
 
-SHIM_MODS = {'razbor_page', 'razbor_cell', 'filelist_window', 'tasks_page'}
+SHIM_MODS = {'razbor_page', 'razbor_cell', 'filelist_window', 'tasks_page', 'disks_page'}
 # Имена модулей до разбивки (без «__…»): переходник обязан отдавать их все (test_shims_keep_old_names).
 SHIM_NAMES = {
     'filelist_window': '''
@@ -193,6 +194,20 @@ SHIM_NAMES = {
         hash_words hb html json latest_manifest_groups load load_all member_word move_blocks move_items
         move_line n os progress queue_cmd r1_of re run_all_set run_hb serial_names state_text subprocess
         summary sv task_disks time what_where
+    ''',
+    'disks_page': '''
+        Background CARD_CSS C_NOHASH DEC_COLORS DISK_GROUPS DISK_HEAD DISK_ROLE DISK_TIPS DiskTable
+        DisksPage FolderDelegate GROUP_TIPS HANG_DUMP_S HANG_GAP_S HANG_LOG HEAD_BREAKS HtmlLabel Job
+        MARK_ROLE NEED_DISK OverviewPage Path QAbstractItemView QApplication QColor QFont QFontMetrics
+        QFrame QGridLayout QHBoxLayout QHeaderView QLabel QLineEdit QListWidget QMainWindow QMessageBox
+        QObject QPainter QPushButton QRectF QRunnable QScrollArea QSize QSplitter QStackedWidget QStyle
+        QStyledItemDelegate QTableWidget QTableWidgetItem QTextDocument QThreadPool QTimer QTreeWidget
+        QTreeWidgetItem QVBoxLayout QWidget Qt RED SCAN_RU SIZE_ROLE SLOW_S STEPS STEP_NOW STEP_OTHER
+        STEP_RAZBOR Signal StepPlate StepsBar TITLE TODO_LINE TYPES_ROLE TYPE_COLORS TYPE_NAMES T_CHECK
+        T_DEC T_FILES T_GB T_NAME T_NOHASH T_TYPE0 UNIQUE_NOTE WHY_TEXT Watchdog _Signals attention_html
+        card cell commands_page disk_cell disk_rows disk_table_html disk_ui explorer_page files_word gb_ru
+        gib hang_log hb html_esc log_error n_ru nohash_html os rescan_dialog rescan_tip scan_text
+        shown_disks sv sys table time timed todo_html todo_items traceback type_text unique_li
     ''',
 }
 
@@ -319,12 +334,12 @@ class UiLayersTest(unittest.TestCase):
 
     def test_shims_keep_old_names(self):
         """Переходники отдают все имена прежних модулей (до разбивки: filelist_window - 91, razbor_page - 175,
-        tasks_page - 107)."""
-        code = ('import json, filelist_window as f, razbor_page as r, tasks_page as t; '
-                'own = [f"{m.__name__}.{k}" for m in (f, r, t) for k, v in vars(m).items() '
+        tasks_page - 107, disks_page - 117: свои и звёздочные из ui_common и overview_page)."""
+        code = ('import json, filelist_window as f, razbor_page as r, tasks_page as t, disks_page as d; '
+                'own = [f"{m.__name__}.{k}" for m in (f, r, t, d) for k, v in vars(m).items() '
                 'if callable(v) and getattr(v, "__module__", None) == m.__name__]; '      # своё в переходнике - нельзя:
                 'print(json.dumps(own)); '                                                # только те же объекты ui/*
-                'print(json.dumps([sorted(vars(f)), sorted(vars(r)), sorted(vars(t))]))')
+                'print(json.dumps([sorted(vars(f)), sorted(vars(r)), sorted(vars(t)), sorted(vars(d))]))')
         env = dict(os.environ, QT_QPA_PLATFORM='offscreen')
         p = subprocess.run([sys.executable, '-X', 'utf8', '-c', code], cwd=str(CAT), env=env, capture_output=True,
                            text=True, encoding='utf-8', timeout=120)
@@ -334,7 +349,8 @@ class UiLayersTest(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout.splitlines()[-2]), [], 'переходник определяет свои функции/классы')
         for (name, old), have in zip(SHIM_NAMES.items(), now):
             old = old.split()
-            self.assertEqual(len(old), {'filelist_window': 91, 'razbor_page': 175, 'tasks_page': 107}[name])
+            self.assertEqual(len(old), {'filelist_window': 91, 'razbor_page': 175, 'tasks_page': 107,
+                                        'disks_page': 117}[name])
             self.assertEqual(sorted(set(old) - set(have)), [], f'{name}.py потерял прежние имена')
 
     def test_tests_do_not_patch_shim_names(self):
