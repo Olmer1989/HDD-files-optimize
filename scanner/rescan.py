@@ -17,8 +17,6 @@
 
 Здесь же - предпросмотр по оглавлению (содержимое файлов не читается) и поиск прежних заданий носителя.
 """
-import ctypes
-from ctypes import wintypes
 from contextlib import closing
 from datetime import datetime, timezone
 import json
@@ -30,10 +28,11 @@ import stat
 import time
 
 from inventory import EXCLUDED_DIRS, excluded_file
+from winpath import extended, plain, under
+from fileinfo import Busy, file_info   # noqa: F401 - rescan.Busy, rescan.file_info (portable, тесты)
 from build_selection import THRESHOLDS_V2, select
 
 PARTIAL_DIR = 'Повторное сканирование'
-EPOCH_DIFF = 116444736000000000             # FILETIME (100 нс с 1601) -> Unix
 FUTURE_NS = 24 * 3600 * 10**9               # ChangeTime позже «сейчас + сутки» - часы не в порядке
 REASONS = {'new': 'новые', 'changed': 'изменились (размер, дата или номер файла)',
            'change_time': 'запись файла менялась после прежнего скана (ChangeTime)',
@@ -109,68 +108,6 @@ def ns_utc(ns):
     return datetime.fromtimestamp(ns / 1e9, timezone.utc).isoformat() if ns else ''
 
 
-# ---------- сведения о файле через один дескриптор ----------
-
-class _BHFI(ctypes.Structure):
-    _fields_ = [('attrs', wintypes.DWORD), ('c', wintypes.FILETIME), ('a', wintypes.FILETIME), ('w', wintypes.FILETIME),
-                ('vsn', wintypes.DWORD), ('size_hi', wintypes.DWORD), ('size_lo', wintypes.DWORD),
-                ('links', wintypes.DWORD), ('idx_hi', wintypes.DWORD), ('idx_lo', wintypes.DWORD)]
-
-
-class _FBI(ctypes.Structure):
-    _fields_ = [('creation', ctypes.c_longlong), ('access', ctypes.c_longlong), ('write', ctypes.c_longlong),
-                ('change', ctypes.c_longlong), ('attrs', wintypes.DWORD)]
-
-
-_K32 = None
-
-
-def _k32():
-    global _K32
-    if _K32 is None:
-        k = ctypes.WinDLL('kernel32', use_last_error=True)
-        k.CreateFileW.restype = wintypes.HANDLE
-        k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
-                                  wintypes.DWORD, wintypes.HANDLE]
-        k.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
-        k.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-        k.CloseHandle.argtypes = [wintypes.HANDLE]
-        _K32 = k
-    return _K32
-
-
-class Busy(OSError):
-    """Файл открыт другой программой на запись: подтвердить его неизменность сейчас нельзя."""
-
-
-def file_info(path, exclusive=False):
-    """Размер, mtime, время создания, ChangeTime, номер файла NTFS, атрибуты, ссылок - через ОДИН дескриптор.
-    Содержимое не читается. exclusive=True - открыть так, чтобы никто не мог писать в файл, пока он открыт
-    (если пишет уже сейчас - Busy)."""
-    k = _k32()
-    access = 0x80000000 if exclusive else 0x80          # GENERIC_READ (данные не читаются) / FILE_READ_ATTRIBUTES
-    share = 0x1 if exclusive else 0x7                    # только чтение / чтение, запись, удаление
-    h = k.CreateFileW('\\\\?\\' + os.path.abspath(path), access, share, None, 3, 0x02000000 | 0x00200000, None)
-    if h in (None, wintypes.HANDLE(-1).value):
-        code = ctypes.get_last_error()
-        if code in (32, 33):
-            raise Busy(code, 'файл занят другой программой', str(path))
-        raise ctypes.WinError(code)
-    try:
-        b, f = _BHFI(), _FBI()
-        if not k.GetFileInformationByHandle(h, ctypes.byref(b)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        if not k.GetFileInformationByHandleEx(h, 0, ctypes.byref(f), ctypes.sizeof(f)):
-            raise ctypes.WinError(ctypes.get_last_error())
-    finally:
-        k.CloseHandle(h)
-
-    def ns(ft):
-        return (ft - EPOCH_DIFF) * 100 if ft else 0
-    return dict(size=(b.size_hi << 32) | b.size_lo, mtime_ns=ns(f.write), ctime_ns=ns(f.creation), change_ns=ns(f.change),
-                file_id=str((b.idx_hi << 32) | b.idx_lo), attrs=f.attrs, links=b.links)
-
-
 # ---------- папки ----------
 
 def normalize_folders(root, folders):
@@ -187,7 +124,7 @@ def normalize_folders(root, folders):
         current, names = Path(root), []
         for part in p.parts:
             try:
-                with os.scandir(current) as it:
+                with os.scandir(extended(current)) as it:
                     match = [e.name for e in it if e.name.lower() == part.lower()]
             except OSError as exc:
                 raise ValueError(f'Папка «{raw}» недоступна: {exc}')
@@ -196,7 +133,7 @@ def normalize_folders(root, folders):
                 raise ValueError(f'Папки «{raw}» нет на диске')
             name = exact[0] if exact else match[0]
             current = current / name
-            st = os.lstat(current)
+            st = os.lstat(extended(current))
             if stat.S_ISLNK(st.st_mode) or getattr(st, 'st_file_attributes', 0) & 0x400:
                 raise ValueError(f'В пути «{raw}» ссылка (reparse point) - такую папку сканировать нельзя')
             if not stat.S_ISDIR(st.st_mode):
@@ -227,7 +164,8 @@ def walk(root, folders, info=True):
     """Обход папок по тем же правилам, что опись сканера (служебные папки, ключи .env, reparse points - мимо).
     Возвращает (файлы {путь: сведения}, ошибки [(путь, действие, текст)], пропущено reparse). Содержимое не читается."""
     files, errors, reparse = {}, [], 0
-    stack = [os.path.join(root, f) for f in folders]
+    root_x = extended(root)                      # 1.6.2: \\?\-пути, как в описи (CON.jpg, «a.», «b », длинные)
+    stack = [os.path.join(root_x, f) for f in folders]
     while stack:
         d = stack.pop()
         try:
@@ -246,12 +184,12 @@ def walk(root, folders, info=True):
                             continue
                         if not stat.S_ISREG(st.st_mode):
                             continue
-                        rel = os.path.relpath(e.path, root)
+                        rel = under(e.path, root_x)
                         files[rel] = file_info(e.path) if info else dict(size=st.st_size, mtime_ns=st.st_mtime_ns)
-                    except OSError as exc:
-                        errors.append((e.path, 'stat', str(exc)))
+                    except Exception as exc:     # 1.6.2: сбой на одном файле не прерывает обход
+                        errors.append((plain(e.path), 'не прочитан', str(exc) or type(exc).__name__))
         except OSError as exc:
-            errors.append((d, 'scandir', str(exc)))
+            errors.append((plain(d), 'scandir', str(exc)))
     return files, errors, reparse
 
 

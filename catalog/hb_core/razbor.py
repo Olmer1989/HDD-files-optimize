@@ -25,7 +25,6 @@ from hb_core.util import is_moved_dir, parent_of, prefix_cond
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
 from hb_core.query import _keys
 
-MAX_PATH = 259                         # политика совместимости с Проводником (как в mvlist)
 COPY_ROOT = 'ПЕРЕНОС с других дисков'  # куда шаблон копирования кладёт файлы на диске назначения
 ROOT_GROUP = None                      # папка группы «(файлы в корне)» - отдельный идентификатор, не путь
 ROOT_TITLE = '(файлы в корне)'
@@ -36,7 +35,7 @@ NONE_ROUTE = Route(R_NONE, None, None, False)
 # исходы части А (каждый файл - ровно в одном)
 O_COPY, O_HAVE, O_TYPE, O_NODISK = 'копировать', 'уже есть', 'не подходит по типу', 'диск не назначен'
 O_SKIP, O_UNSET, O_NONE, O_MOVED, O_JUNK = 'не копировать', 'не задано', 'не отмечено', 'перенесено', 'мусор'
-B_LONG, B_CONFLICT, B_CHECK = 'длинный путь', 'конфликт', 'нужна проверка'
+B_CONFLICT, B_CHECK = 'конфликт', 'нужна проверка'     # «длинный путь» снят 17.11.2026
 B_TWIN = 'двойник пути'                # этап 14: у двух файлов носителя один путь назначения
 G_COPY, G_HAVE, G_TYPE, G_NODISK, G_BLOCKED = ('есть что копировать', 'все подходящие уже есть на всех дисках',
                                                'нет подходящих файлов', 'у направления нет диска',
@@ -213,7 +212,6 @@ class Plan:
         self.groups = {}                                             # ключ группы -> dict
         self.blocked = []                                            # (путь, диск, причина, размер)
         self.blocked_agg = collections.Counter()                     # (диск, причина) -> файлов без пути (по папкам)
-        self.move_long = [0, 0]                                      # путь на носителе после переноса > 259
         self.docs_near = []                                          # (папка, документов, байт, основание)
         self.unhashed_copy = collections.defaultdict(lambda: [0, 0]) # диск -> файлов без хеша к копированию
         self.namesakes = collections.Counter()                       # диск -> тёзки без хеша (только с detail)
@@ -324,23 +322,11 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
             sets[d] = {s for (s,) in c.execute('select sha from files where disk=? and sha is not null', (d,))}
     ftype = fast_folder_type(fine=True)
 
-    # ---------- поштучные файлы без хеша: длинный путь назначения и занятый путь назначения ----------
-    copy_prefix_len = len(f'X:{SEP}{COPY_ROOT}{SEP}{disk}{SEP}')
+    # ---------- поштучные файлы без хеша: занятый путь назначения ----------
+    # длина пути не ограничена (17.11.2026, решение владельца): шаблоны копирования 2.7 и перемещения 1.3 - через \\?\
     special = set(file_marks)
-    copy_thr = MAX_PATH - copy_prefix_len
-    move_names = [dirs[n].folder() for n in nums if dirs[n].disks]
-    move_thr = None
-    if move_names and not any(disk in dirs[n].disks for n in dirs):
-        move_thr = MAX_PATH - len(f'X:{SEP}') - max(len(x) for x in move_names) - 1
-    # ОДИН проход по носителю: независимый счёт числа и байтов (сверка) и длинные пути (порог - меньший из двух)
-    thr = min(copy_thr, move_thr) if move_thr is not None else copy_thr
-    real_n, real_b, longs = c.execute("select count(*), coalesce(sum(size), 0), group_concat(case when length(path) > ? "
-                                      "then path end, char(1)) from files where disk=?", (thr, disk)).fetchone()
-    longs = longs.split('\x01') if longs else []
-    # этап 14: путь назначения - без служебной «Скопировано на …» (dest_rel); длина - по нему
-    long_copy = {p for p in longs if len(dest_rel(p, copied)) > copy_thr}
-    long_move = {p for p in longs if move_thr is not None and len(p) > move_thr}
-    special |= long_copy | long_move
+    # независимый счёт числа и байтов носителя (сверка)
+    real_n, real_b = c.execute('select count(*), coalesce(sum(size), 0) from files where disk=?', (disk,)).fetchone()
     twins = _twins(c, disk, folders, children, copied) if copied else set()
     special |= twins
     occ = collections.defaultdict(dict)                          # путь носителя -> {диск D: (sha, ev) на D}
@@ -480,8 +466,6 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
     blocked_sha = collections.defaultdict(list)                  # (группа, диск, sha) -> [(путь, причина, размер)]
 
     def block_reason(path, d, sha):
-        if path in long_copy:
-            return B_LONG
         if path in twins:
             return B_TWIN
         o = occ.get(path, {}).get(d)
@@ -548,11 +532,6 @@ def planner(c, disk, dirs, marks, detail=False, collect=None):
                     P.rows[(g['key'], d)].append((d, path, size, 'без хеша', ''))
                     if nm is not None:
                         P.info.setdefault('nh_keys', collections.defaultdict(set))[d].add((nm, size))
-        if path in long_move and not r.moved:
-            dd = dirs[r.num]
-            orig = path
-            if len(f'X:{SEP}{dd.folder()}{SEP}{orig}') > MAX_PATH:
-                P.move_long[0] += 1; P.move_long[1] += size
 
     for path, size, sha, k, mask in hashed:
         f = parent_of(path)
@@ -891,16 +870,12 @@ def attention_lines(P):
             L.append(f'Без хеша к копированию на {d}: {_n(n)} файлов (сравнение только по имени и размеру{extra}).')
     why = collections.Counter((d, w) for _p, d, w, _s in P.blocked) + P.blocked_agg
     for (d, w), n in sorted(why.items()):
-        hint = {B_LONG: f'путь назначения длиннее {MAX_PATH} символов - не копируются',
-                B_CONFLICT: 'на месте назначения другое подтверждённое содержимое (или файл вместо папки) - не '
+        hint = {B_CONFLICT: 'на месте назначения другое подтверждённое содержимое (или файл вместо папки) - не '
                             'копируются; решите вручную на диске',
                 B_CHECK: 'путь назначения занят неподтверждённой записью - пересканируйте эту папку на диске',
                 B_TWIN: 'у двух файлов носителя один путь назначения (тот же путь в «Скопировано на …» и вне её, '
                         'содержимое разное или без хеша) - не копируются; решите вручную на носителе'}[w]
         L.append(f'{d}: {_n(n)} файлов - {hint}.')
-    if P.move_long[0]:
-        L.append(f'После переноса на носителе путь станет длиннее {MAX_PATH} у {_n(P.move_long[0])} файлов: '
-                 'скопировать можно, переносить их не будут.')
     st = P.info.get('status') or '?'
     if st != 'complete' or P.info.get('issues'):
         L.append(f'Опись: состояние «{st}», непрочитанных мест {_n(P.info.get("issues", 0))} - итог по тому, что описано.')

@@ -13,6 +13,7 @@ import shutil
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from winpath import extended, plain, under
 
 EXCLUDED_DIRS = {'$recycle.bin', 'system volume information', 'node_modules',
                  '.git', '.svn', '__pycache__', '.venv', 'venv', '$windows.~bt',
@@ -84,12 +85,14 @@ def inventory(root, db, check, progress=None, folders=None):
     db.execute('create table metadata(key text primary key,value text)')
     db.execute('insert into metadata values (?,?)', ('status', 'running'))
     db.commit()
-    stack = [os.path.join(root, f) for f in folders] if folders else [root]
+    # 1.6.2: обход по \\?\-путям - читаются CON.jpg, «a.», «b » и длинные пути; путь в описи - строкой от корня.
+    root_x = extended(root)
+    stack = [os.path.join(root_x, f) for f in folders] if folders else [root_x]
     tops = set(stack)
     last = time.monotonic()
     def error(path, op, exc):
         summary['errors'] += 1
-        db.execute('insert into errors values (?,?,?)', (path, op, str(exc)))
+        db.execute('insert into errors values (?,?,?)', (plain(path), op, str(exc) or type(exc).__name__))
     try:
         check()
         while stack:
@@ -116,7 +119,7 @@ def inventory(root, db, check, progress=None, folders=None):
                                 continue
                             if not stat.S_ISREG(st.st_mode):
                                 continue
-                            rel = os.path.relpath(entry.path, root)
+                            rel = under(entry.path, root_x)
                             cat = classification(entry.name, st.st_size)
                             db.execute('insert into files values (?,?,?,?,?,?,?)',
                                        (rel, st.st_size, str(st.st_mtime_ns), str(st.st_ctime_ns),
@@ -129,8 +132,10 @@ def inventory(root, db, check, progress=None, folders=None):
                                 group[key][1] += st.st_size
                             if summary['files'] % 2000 == 0:
                                 db.commit()
-                        except OSError as exc:
-                            error(entry.path, 'stat', exc)
+                        except (sqlite3.Error, MemoryError):
+                            raise                         # сбой записи описи - не «файл не прочитан»: опись прерывается
+                        except Exception as exc:          # 1.6.2: любой сбой на одном файле не прерывает опись
+                            error(entry.path, 'не прочитан', exc)
             except OSError as exc:
                 error(directory, 'scandir', exc)
                 if directory in tops:

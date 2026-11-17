@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 import re
 import shutil
 import sqlite3
@@ -20,6 +20,7 @@ import uuid
 from inventory import inventory, volume, discover_disk, MEDIA, MIN_BYTES, EXCLUDED_DIRS
 from build_selection import select, THRESHOLDS_V1, THRESHOLDS_V2, CAMERA_IMAGES, VIDEO
 from hash_files import hash_one, signature, ReadFailure
+from winpath import safe_relative, source_path   # noqa: F401 (safe_relative - для тестов и прежних вызовов)
 import rescan
 
 # VERSION is the job format/algorithm. It is unchanged, so jobs started by
@@ -28,7 +29,8 @@ VERSION = '1.0.0'
 # Partial (selected folders) jobs have their own format version, so that a program
 # before 1.4.0 refuses to continue them as a full scan of the whole disk.
 VERSION_PARTIAL = '1.1.0'
-APP_VERSION = '1.6.1'   # 1.6.1 (16.11.2026): папки с пробелом по краям имени не обрезаются (rescan.normalize_folders)
+APP_VERSION = '1.6.2'   # 1.6.2 (17.11.2026): файлы CON.jpg, «a.», «b » читаются (\\?\-пути, winpath); сбой на одном файле не останавливает опись
+# 1.6.1 (16.11.2026): папки с пробелом по краям имени не обрезаются (rescan.normalize_folders)
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
@@ -66,7 +68,7 @@ def error_kind(exc):
         return 'device'
     if isinstance(exc, ReadFailure):
         return 'file' if code in FILE_WINERRORS else 'device'
-    if isinstance(exc, (RuntimeError, PermissionError, FileNotFoundError)):
+    if isinstance(exc, (RuntimeError, ValueError, PermissionError, FileNotFoundError)):   # ValueError: путь (1.6.2)
         return 'file'
     return 'file' if code in FILE_WINERRORS else 'device'
 
@@ -475,12 +477,6 @@ def refresh_index(root):
     except (OSError, ValueError, KeyError) as exc:
         say(f'Реестр дисков не обновлён (результаты сохранены): {exc}', to_file=False)
 
-def safe_relative(rel):
-    p = PureWindowsPath(rel)
-    if not p.parts or p.is_absolute() or p.drive or any(x in ('.', '..') or ':' in x for x in p.parts):
-        raise ValueError('Unsafe relative path')
-    return p.parts
-
 def append_run(job, event):
     with (job / 'runs.jsonl').open('a', encoding='utf-8') as handle:
         handle.write(json.dumps(event, ensure_ascii=False) + '\n')
@@ -613,7 +609,7 @@ def process(job):
                         last_file_line = now
             try:
                 for rel, size, mtime, file_id in rows:
-                    path = Path(root).joinpath(*safe_relative(rel))
+                    path = source_path(root, rel)
                     expected = size, str(mtime), str(file_id)
                     check()
                     old = target.execute('select size,mtime_ns,file_id,status from hashes where disk_id=? and path=?', (disk_id, rel)).fetchone()
@@ -625,7 +621,7 @@ def process(job):
                             progress()
                             continue
                         digest = hash_one(path, expected, progress)
-                    except (OSError, RuntimeError) as exc:
+                    except (OSError, RuntimeError, ValueError) as exc:
                         # One unreadable file is skipped and recorded; it is read
                         # again on the next resume. A vanished disk (check below)
                         # or several device errors in a row stop the scan.
@@ -825,7 +821,7 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                     f'из ~{to_read / 1e9:,.1f} ГБ · осталось {duration(current["eta_seconds"])}', to_file=force)
         try:
             for rel, size, mtime, ctime, file_id in rows:
-                path = Path(root).joinpath(*safe_relative(rel))
+                path = source_path(root, rel)
                 expected = size, str(mtime), str(file_id)
                 check()
                 cand = usable(rel, size, mtime, ctime, file_id)
@@ -874,7 +870,7 @@ def run_partial(job, manifest, root, check, run_id, base_state, physical, starte
                     if why == 'new' and len(by_id.get((str(file_id), size, str(mtime)), [])) == 1:
                         why = 'renamed'
                     digest = hash_one(path, expected, progress)
-                except (OSError, RuntimeError) as exc:
+                except (OSError, RuntimeError, ValueError) as exc:
                     kind = error_kind(exc)
                     target.execute('insert or replace into hashes values (?,?,?,?,?,?,?,?)',
                                    (disk_id, rel, *expected, None, 'damaged' if kind == 'device' else 'error', str(exc)))

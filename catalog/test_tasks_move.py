@@ -186,7 +186,8 @@ class MoveAnyTargetTest(Base):
         self.quiet(mv.cmd_mvlist, args(task='С 45', allow_main=True))
         self.assertEqual(self.lines(hb.TASKS / ('С 45' + MOVE_SUFFIX)), {('X\\2.jpg', 'ПЕРЕНЕСЕНО → 91')})
 
-    def test_long_path_stays(self):
+    def test_long_path_moves(self):
+        # 17.11.2026: ограничение «путь после переноса не длиннее 259» снято (шаблон перемещения 1.3 - через \\?\)
         long = 'Д' * 120 + '\\' + 'е' * 125 + '.jpg'                  # 250 символов: после переноса > 259
         make_disk(self.scans, 'HDD92', 'AAAA0092', [(long, 700, S[7]), ('Коротко\\7.jpg', 700, S[8])])
         for job in self.scans.glob('HDD92*/*'):
@@ -198,8 +199,10 @@ class MoveAnyTargetTest(Base):
                            ('2', 'HDD91', OK, '700', S[8], 'K:\\Коротко\\7.jpg', 'L:\\П\\Коротко\\7.jpg')]},
                        src=('HDD92', 'AAAA0092'))
         self.quiet(mv.cmd_mvlist, args(task='Длинные', dry=True))
-        self.assertIn('путь станет длиннее 259 символов: 1 файлов', self.printed)
-        self.assertIn('Можно перенести: 1 файлов', self.printed)
+        self.assertNotIn('длиннее', self.printed)
+        self.assertIn('Можно перенести: 2 файлов', self.printed)
+        self.quiet(mv.cmd_mvlist, args(task='Длинные'))
+        self.assertIn((long, 'ПЕРЕНЕСЕНО → 91'), self.lines(hb.TASKS / ('Длинные' + MOVE_SUFFIX)))
 
     def test_recheck_sees_new_copy_task(self):
         self.done_task()

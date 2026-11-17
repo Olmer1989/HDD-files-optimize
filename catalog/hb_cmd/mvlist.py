@@ -6,7 +6,7 @@
 - на каждой цели в месте назначения из журнала база держит S или C с SHA-256 этой версии файла
   (у файла без хеша в описи - SHA-256 прочитанного при последнем копировании);
 - если среди целей есть 45 или 77 - файл подтверждён и на 45, и на 77 (прежнее правило);
-- файл не в «ПЕРЕНЕСЕНО → …», не под решением владельца; путь после переноса не длиннее 259 символов;
+- файл не в «ПЕРЕНЕСЕНО → …», не под решением владельца (длина пути не ограничена - шаблоны работают с длинными путями, 17.11.2026);
 - папка переноса - по набору целей (moved_folder): «ПЕРЕНЕСЕНО → 78», «… → 45 и 77», «… → только 77».
 Логика v3 (этап 3, --razbor / --razbor-manifest): перенос папки разбора в «Скопировано на <направление> (<диски>)» -
 см. раздел «логика v3» ниже.
@@ -25,7 +25,6 @@ from hb_core.db import connect
 from hb_core.query import check_disk, decision_of, decisions_for
 from hb_core import razbor as rz
 
-MAX_PATH = 259          # политика совместимости: Проводник и большинство программ не открывают пути длиннее
 COPY_OK = ('скопирован', HAVE_SHA)                   # HAVE_SHA - шаблон 2.5: файл в цели прочитан, SHA-256 совпал
 
 
@@ -246,9 +245,6 @@ def plan(c, jobs, disk, folders=None, task=None, only=None):
             stay('нет подтверждённой копии на 45 или 77', path, size)
             continue
         folder = moved_folder(req)
-        if len('X:' + SEP + folder + SEP + path) > MAX_PATH:
-            stay(f'путь станет длиннее {MAX_PATH} символов', path, size)
-            continue
         via_log += by_log
         lines.append((path, size, mt if mt is not None else '', folder, h.upper(),
                       'копия подтверждена: ' + ', '.join(sorted(req))))
@@ -376,7 +372,6 @@ R_ERR = 'ошибка копирования'
 R_WAIT = 'ждёт задания копирования'
 R_WEAK = 'копия не подтверждена (в базе только сверка по размеру)'
 R_NONE = 'копии на диске нет (не подходит направлению по типу или заблокирован)'
-R_LONG = f'путь станет длиннее {MAX_PATH} символов'
 R_BUSY = 'в назначении уже есть файл'
 
 
@@ -611,9 +606,6 @@ def plan_v3(c, jobs, src, only=None):
             stay(R_OWN, size)
             continue
         new = new_of(path)
-        if len('X:' + SEP + new) > MAX_PATH:
-            stay(R_LONG, size)
-            continue
         if c.execute('select 1 from files where disk=? and path=?', (disk, new)).fetchone():
             stay(R_BUSY, size)
             continue

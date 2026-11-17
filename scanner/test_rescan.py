@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import portable
 import rescan
+from winpath import plain
 
 SERIAL = 'ABCD1234'
 
@@ -71,7 +72,7 @@ def scanner_patches(root, record, reads):
     real = portable.hash_one
 
     def counting(path, expected, progress=None):
-        reads.append(str(Path(path).relative_to(root)))
+        reads.append(str(Path(plain(path)).relative_to(root)))      # 1.6.2: сканер читает по \\?\-пути
         return real(path, expected, progress)
     return [patch.object(portable, 'discover_disk', return_value=(str(root), {})),
             patch.object(portable, 'describe', return_value={'letter': 'Z', 'model': 'Test disk'}),

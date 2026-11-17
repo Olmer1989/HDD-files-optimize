@@ -33,8 +33,8 @@ UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего �
 # только уменьшаться (разбиваются отдельными заданиями); после разбивки - убрать из списка.
 FILE_MAX = 600
 FILE_DEBT = {'commands_page.py': 1320,
-             'test_move_v3.py': 1210, 'hb_core/razbor.py': 1053,
-             'test_logic_v3.py': 944, 'hb_cmd/mvlist.py': 897, 'explorer_page.py': 841, 'directions_page.py': 820,
+             'test_move_v3.py': 1210, 'hb_core/razbor.py': 1028,
+             'test_logic_v3.py': 944, 'hb_cmd/mvlist.py': 889, 'explorer_page.py': 841, 'directions_page.py': 820,
              'test_hashbase.py': 814, 'test_directions_page.py': 813, 'explorer_diff.py': 718,
              'build_pilot.py': 570, 'test_app.py': 519, 'test_copy_template_review.py': 515}
 PATHVARS = {'BASE_DIR', 'DB', 'SNAP', 'MANUAL', 'DECISIONS', 'EXCLUSIONS', 'ANSWERS', 'TEMPLATE', 'MOVE_TEMPLATE', 'TASKS',

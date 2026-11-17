@@ -8,6 +8,7 @@ import sqlite3
 import stat
 import time
 from inventory import discover_disk, volume
+from winpath import extended
 
 def signature(st):
     return st.st_size, str(st.st_mtime_ns), str(st.st_ino)
@@ -42,6 +43,8 @@ def last_windows_error():
     return None
 
 def hash_one(path, expected, progress=None):
+    # 1.6.2: only a \\?\ path reaches CON.jpg, «a.», «b » (a plain one reads the console or another file).
+    path = Path(extended(path))
     # Refuse symlinks/junctions at every component, including ancestor directories.
     for part in [*path.parents, path]:
         st = part.lstat()
@@ -126,7 +129,7 @@ def main():
             parts = PureWindowsPath(rel).parts
             if PureWindowsPath(rel).is_absolute() or any(p in ('.','..') or ':' in p for p in parts):
                 raise RuntimeError('Unsafe relative path in selection')
-            path = Path(root).joinpath(*parts)
+            path = Path(extended(root)).joinpath(*parts)
             expected = (size, str(mtime), str(file_id))
             old = target.execute('select size,mtime_ns,file_id,status from hashes where disk_id=? and path=?', (args.disk, rel)).fetchone()
             try:
