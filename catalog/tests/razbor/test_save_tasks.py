@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tests.razbor.base import *                          # noqa: E402,F401,F403 - общая основа
+from tests.sv_patch import sv_patch                        # noqa: E402 - подмена имён service во всех подмодулях
 
 
 class SaveTest(PageBase):
@@ -23,7 +24,7 @@ class SaveTest(PageBase):
             self.assertFalse(hasattr(self.p, gone), gone)
         before = self.rows()
         real = sv.add_marks_batch
-        with mock.patch.object(sv, 'add_marks_batch', side_effect=real) as spy:
+        with sv_patch('add_marks_batch', side_effect=real) as spy:
             self.p.mode_except.setChecked(True)
             self.p.apply(['Поход 2010\\Монтаж', 'Друзья'], rp.SKIP)          # одно событие - один пакет
             self.settle()
@@ -67,7 +68,7 @@ class SaveTest(PageBase):
 
     def test_refused_write_is_reported_and_forgotten(self):
         self.open()
-        with mock.patch.object(sv, 'add_marks_batch', side_effect=sv.Refused('проба отказа')):
+        with sv_patch('add_marks_batch', side_effect=sv.Refused('проба отказа')):
             self.p.apply(['Работа'], N2)
             self.settle()
         self.assertEqual(self.p.model.drafts, {})                               # на экране - сохранённое
@@ -84,7 +85,7 @@ class SaveTest(PageBase):
         self.settle()
         self.p.apply(['A'], N2)
         self.p.save_timer.stop()
-        with mock.patch.object(sv, 'add_marks_batch', side_effect=sv.Refused('проба отказа')):
+        with sv_patch('add_marks_batch', side_effect=sv.Refused('проба отказа')):
             self.answer = rp.QMessageBox.No
             self.assertFalse(self.w.close())                                    # не записалось - окно не закрылось
         self.assertTrue(any('Отметки не сохранились: проба отказа' in x for x in self.asked), self.asked)
@@ -100,7 +101,7 @@ class TasksTest(PageBase):
         def toc(*a, **k):
             self.toc_calls.append(a)
             return TOC_OK
-        self.toc_patch = mock.patch.object(sv, 'toc_check', toc)       # носителя в тестах нет - сверка отдельно
+        self.toc_patch = sv_patch('toc_check', toc)       # носителя в тестах нет - сверка отдельно
         self.toc_patch.start()
 
     def tearDown(self):
@@ -173,7 +174,7 @@ class ContestedTest(PageBase):
             def show(self):
                 pass
         fake = [('HDD90', 'K:', [('A', 1), ('', 2)]), ('HDD45', '', [('X', 3)])]
-        with mock.patch.object(sv, 'contested', lambda d, f: fake), mock.patch('rescan_dialog.RescanDialog', Fake):
+        with sv_patch('contested', lambda d, f: fake), mock.patch('rescan_dialog.RescanDialog', Fake):
             dlg.load()
             self.assertTrue(wait(lambda: dlg.buttons.count() == 1))
             text = dlg.text.toPlainText()
@@ -222,8 +223,8 @@ class CapacityTest(PageBase):
         dp.save_choice(['Н1', 'Н2'])
         self.mark(('', 'Н1'), ('Работа', 'Н2'))
         space = {'HDD45': ('F:', 1000, 10 ** 12, 4096)}
-        with mock.patch.object(sv, 'disk_space', lambda dd: {d: v for d, v in space.items() if d in dd}), \
-                mock.patch.object(sv, 'toc_check', lambda *a, **k: TOC_OK):
+        with sv_patch('disk_space', lambda dd: {d: v for d, v in space.items() if d in dd}), \
+                sv_patch('toc_check', lambda *a, **k: TOC_OK):
             self.open()
             self.plan()
             c = self.p.copy_cell
@@ -262,7 +263,7 @@ class TocTest(PageBase):
 
     def test_toc_check_on_temp_folder(self):
         root = self.make_root()
-        with mock.patch.object(sv, 'volumes', return_value={'AAAA0060': str(root)}):
+        with sv_patch('volumes', return_value={'AAAA0060': str(root)}):
             ok = sv.toc_check(SRC, ['Поход 2010', 'Работа'], True)
             self.assertTrue(ok['connected'])
             self.assertEqual(ok['problems'], [])
@@ -300,7 +301,7 @@ class TocTest(PageBase):
         root = self.make_root()
         (root / 'Поход 2010' / 'Фото' / '2.jpg').unlink()
         opened = []
-        with mock.patch.object(sv, 'volumes', return_value={'AAAA0060': str(root)}):
+        with sv_patch('volumes', return_value={'AAAA0060': str(root)}):
             self.open()
             self.p.rescan = lambda d, f: opened.append((d, f))
             self.p.prepare(['Н1'])
@@ -333,7 +334,7 @@ class Review6Test(PageBase):
         def toc(*a, **k):
             calls.append(a)
             return answers[min(len(calls) - 1, 1)]
-        with mock.patch.object(sv, 'toc_check', toc):
+        with sv_patch('toc_check', toc):
             self.open()
             self.p.prepare(['Н1'])
             self.assertTrue(wait(lambda: len(self.dialogs) >= 2 and not self.p.writing, 60), self.asked)
@@ -346,8 +347,8 @@ class Review6Test(PageBase):
     def test_only_selected_directions_and_queue_of_this_carrier(self):
         self.mark(('', 'Н1'), ('Работа', 'Н2'))
         space = {'HDD45': ('F:', 1000, 10 ** 12, 4096)}                          # Н1 не помещается на 45
-        with mock.patch.object(sv, 'disk_space', lambda dd: {d: v for d, v in space.items() if d in dd}), \
-                mock.patch.object(sv, 'toc_check', lambda *a, **k: TOC_OK):
+        with sv_patch('disk_space', lambda dd: {d: v for d, v in space.items() if d in dd}), \
+                sv_patch('toc_check', lambda *a, **k: TOC_OK):
             v = rp.tasks_check(SRC, ['Н2'])
             self.assertEqual(v['short'], [])                                    # Н1 в выбор не входит - не мешает
             self.assertEqual({s['num'] for s in v['specs']}, {'Н2'})
@@ -413,11 +414,11 @@ class Review6Test(PageBase):
         (root / 'Поход 2010' / 'Фото' / 'ключи.env').write_bytes(b'1')          # .env - опись пропускает
         sv.add_exclusion(SRC, 'Документы')                                       # исключённая владельцем папка
         (root / 'Документы' / 'новое.doc').write_bytes(b'1')
-        with mock.patch.object(sv, 'volumes', return_value={'AAAA0060': str(root)}):
+        with sv_patch('volumes', return_value={'AAAA0060': str(root)}):
             res = sv.toc_check(SRC, ['Поход 2010', 'Документы'])
         self.assertEqual(res['problems'], [])
         (root / 'Поход 2010' / 'Фото' / 'desktop.ini').write_bytes(b'1')        # опись его описала бы - «новый»
-        with mock.patch.object(sv, 'volumes', return_value={'AAAA0060': str(root)}):
+        with sv_patch('volumes', return_value={'AAAA0060': str(root)}):
             res = sv.toc_check(SRC, ['Поход 2010'])
         self.assertEqual([(p['folder'], p['new']) for p in res['problems']], [('Поход 2010', 1)])
 

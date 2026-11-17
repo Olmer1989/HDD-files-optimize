@@ -32,7 +32,7 @@ UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего �
 # файл. Новый файл .py в catalog - не больше FILE_MAX строк. Файлы, уже превысившие предел, - долг: расти им нельзя,
 # только уменьшаться (разбиваются отдельными заданиями); после разбивки - убрать из списка.
 FILE_MAX = 600
-FILE_DEBT = {'service.py': 2438, 'commands_page.py': 1320,
+FILE_DEBT = {'commands_page.py': 1320,
              'tasks_page.py': 1263, 'test_move_v3.py': 1210, 'hb_core/razbor.py': 1053,
              'test_logic_v3.py': 944, 'hb_cmd/mvlist.py': 897, 'explorer_page.py': 841, 'directions_page.py': 820,
              'test_hashbase.py': 814, 'test_directions_page.py': 813, 'explorer_diff.py': 718, 'disks_page.py': 679,
@@ -106,8 +106,11 @@ class ModulesTest(unittest.TestCase):
     def test_upper_layers(self):
         for name in ('service', 'app', 'recovery_staging_audit', 'recovery_plan', 'copy_workflow', 'commands_page'):
             banned = {'hashbase', 'hb_cmd'} | ({'hb_cli'} if name != 'commands_page' else set())
-            for mod, _ in imports(CAT / f'{name}.py'):
-                self.assertNotIn(top(mod), banned, f'{name}.py импортирует {mod}')
+            paths = sorted((CAT / name).glob('*.py')) if (CAT / name).is_dir() else [CAT / f'{name}.py']   # service/
+            self.assertTrue(paths and all(p.exists() for p in paths), name)
+            for p in paths:
+                for mod, _ in imports(p):
+                    self.assertNotIn(top(mod), banned, f'{p.relative_to(CAT)} импортирует {mod}')
 
     def test_window_never_runs_commands_in_its_process(self):
         # раздел «Команды» берёт у hb_cli только описание (commands()); выполняет команды отдельный процесс
@@ -174,7 +177,9 @@ class ModulesTest(unittest.TestCase):
 
     def test_paths_are_read_as_attributes(self):
         # «from hb_core.paths import DB» сохранил бы старый путь после set_root(); соединение - только в db
-        for f in list((CAT / 'hb_core').glob('*.py')) + list((CAT / 'hb_cmd').glob('*.py')) + [CAT / 'service.py']:
+        sv_files = list((CAT / 'service').glob('*.py'))                        # пакет service/ (бывший service.py)
+        self.assertGreater(len(sv_files), 1)
+        for f in list((CAT / 'hb_core').glob('*.py')) + list((CAT / 'hb_cmd').glob('*.py')) + sv_files:
             for mod, names in imports(f):
                 if mod == 'hb_core.paths':
                     self.assertFalse(PATHVARS & set(names or []), f'{f.name}: пути копируются из paths')

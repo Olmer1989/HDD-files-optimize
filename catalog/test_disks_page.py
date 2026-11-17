@@ -15,6 +15,7 @@ from PySide6.QtCore import Qt                              # noqa: E402
 from PySide6.QtWidgets import QApplication                 # noqa: E402
 
 import app                                                 # noqa: E402
+from tests.sv_patch import sv_patch, sv_patch_multiple       # noqa: E402 - подмена имён service во всех подмодулях
 import commands_page as cpg                                # noqa: E402
 import disk_ui                                             # noqa: E402
 
@@ -111,12 +112,12 @@ class DiskUiTest(unittest.TestCase):
 
 class DisksPageTest(unittest.TestCase):
     def setUp(self):
-        self.p = mock.patch.multiple(app.sv, disks=lambda: [dict(r) for r in ROWS], folder_children=children,
-                                     hash_dates=lambda d, p: dict(text='', hint=''), generation=lambda: 'g1',
-                                     disk_hash_info=hash_info, nohash_info=lambda d: NOHASH,
-                                     find_folders=lambda words: [dict(disk='HDD09', path='Работа\\Сафари', files=4, gib=0.4,
-                                                                      types=[0.3, 0.1, 0, 0, 0], mark=MARK_DIR),
-                                                                 dict(disk='HDD01', path='Сафари', files=2, gib=0.1)])
+        self.p = sv_patch_multiple(disks=lambda: [dict(r) for r in ROWS], folder_children=children,
+                           hash_dates=lambda d, p: dict(text='', hint=''), generation=lambda: 'g1',
+                           disk_hash_info=hash_info, nohash_info=lambda d: NOHASH,
+                           find_folders=lambda words: [dict(disk='HDD09', path='Работа\\Сафари', files=4, gib=0.4,
+                                                            types=[0.3, 0.1, 0, 0, 0], mark=MARK_DIR),
+                                                       dict(disk='HDD01', path='Сафари', files=2, gib=0.1)])
         self.p.start()
         self.win = Win()
         self.page = app.DisksPage(self.win)
@@ -214,7 +215,7 @@ class DisksPageTest(unittest.TestCase):
             return dict(files=5, gib=0.5, nohash=1, missing={'HDD45': (2, 0.2), 'HDD77': (0, 0.0)}, weak={'HDD45': 1},
                         stale=0)
         with mock.patch.object(directions_page, 'chosen', lambda: [types.SimpleNamespace(disks=('HDD45', 'HDD77'))]), \
-                mock.patch.object(app.sv, 'folder_missing', fm, create=True):
+                sv_patch('folder_missing', fm, create=True):
             self.page.presence()
         self.assertEqual(got, [('HDD09', 'Фото', ['HDD45', 'HDD77'])])            # диски - отмеченных в «Обзоре»
         text = self.page.info.text()
@@ -282,7 +283,7 @@ class DisksPageTest(unittest.TestCase):
                                   dict(kind='nohash', disk='HDD09', folder='')])
 
     def test_nothing_connected(self):
-        with mock.patch.object(app.sv, 'disks', lambda: [row('HDD01'), row('Flash01')]):
+        with sv_patch('disks', lambda: [row('HDD01'), row('Flash01')]):
             p = app.DisksPage(Win())
             p.refresh()
         self.assertIsNone(p.disk)

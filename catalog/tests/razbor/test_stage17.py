@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tests.razbor.base import *                          # noqa: E402,F401,F403 - общая основа
+from tests.sv_patch import sv_patch                        # noqa: E402 - подмена имён service во всех подмодулях
 
 
 class CodeReview16UiTest(PageBase):
@@ -16,7 +17,7 @@ class CodeReview16UiTest(PageBase):
 
     def test_contested_count_error_has_no_false_number(self):
         self.open()
-        with mock.patch.object(sv, 'contested_count', side_effect=sv.Refused('проба')):
+        with sv_patch('contested_count', side_effect=sv.Refused('проба')):
             self.p.run_contested_count()
             self.assertTrue(wait(lambda: self.p.cont_n == -1, 10))
         self.assertNotRegex(self.p.contested_btn.text(), r'\(\d')
@@ -71,7 +72,7 @@ class Stage17AutosaveTest(PageBase):
             calls.append(threading.current_thread() is threading.main_thread())
             gate.wait(10)
             return real(*a, **k)
-        with mock.patch.object(sv, 'add_marks_batch', slow), mock.patch.object(flow_autosave, 'FLUSH_WAIT_MS', 200):
+        with sv_patch('add_marks_batch', slow), mock.patch.object(flow_autosave, 'FLUSH_WAIT_MS', 200):
             self.p.apply(['Работа'], N2)
             self.assertTrue(wait(lambda: self.p.saving, 10))
             self.p.apply(['Друзья'], N2)                                         # правка во время записи
@@ -104,7 +105,7 @@ class Stage17AutosaveTest(PageBase):
                 fails.append(1)
                 raise OSError('проба: база занята')
             return real(disk)
-        with mock.patch.object(sv, 'razbor_tree', once):
+        with sv_patch('razbor_tree', once):
             self.p.apply(['Работа'], N2)
             self.settle()
             self.assertTrue(wait(lambda: self.p.loading is None and self.p.model.inflight == {}, 20))
@@ -296,7 +297,7 @@ class Stage17CodeReviewTest(PageBase):
         def boom(*a, **k):
             calls.append(1)
             raise OSError('проба: диск занят')
-        with mock.patch.object(sv, 'add_marks_batch', boom):
+        with sv_patch('add_marks_batch', boom):
             self.p.apply(['Работа'], N2)
             self.settle()
             wait(lambda: False, 0.3)

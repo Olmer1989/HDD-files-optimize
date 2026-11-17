@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tests.razbor.base import *                          # noqa: E402,F401,F403 - общая основа
+from tests.sv_patch import sv_patch                        # noqa: E402 - подмена имён service во всех подмодулях
 from PySide6.QtWidgets import QFileDialog                 # noqa: E402 - окно сохранения подменяется у класса
 from ui.filelist import model_rows, view_buttons         # noqa: E402 - подмены там, где имя используется
 
@@ -183,7 +184,7 @@ class FileWindowTest(PageBase):
         self.assertTrue(wait(lambda: 'файл' in w.rescan_btn.text() or 'папок)' in w.rescan_btn.text(), 10),
                         w.rescan_btn.text())
         # не подключён - подсказка
-        with mock.patch.object(sv, 'disk_letter', side_effect=sv.Refused('HDD60 не подключён: подключите диск')):
+        with sv_patch('disk_letter', side_effect=sv.Refused('HDD60 не подключён: подключите диск')):
             w.open_explorer()
             self.assertTrue(wait(lambda: any('не подключён' in x for x in self.fw_asked), 10), self.fw_asked)
         # подключён - папка файла с выделением
@@ -195,7 +196,7 @@ class FileWindowTest(PageBase):
         (root / r[1]).mkdir(parents=True, exist_ok=True)
         (root / r[1] / r[2]).write_bytes(b'x')
         calls = []
-        with mock.patch.object(sv, 'disk_letter', lambda d: str(root)), \
+        with sv_patch('disk_letter', lambda d: str(root)), \
                 mock.patch('subprocess.Popen', lambda cmd, *a, **k: calls.append(cmd)):
             w.open_explorer()
             self.assertTrue(wait(lambda: calls, 10))
@@ -241,7 +242,7 @@ class FileWindowTest(PageBase):
         self.assertEqual(self.p.contested_btn.text(), f'Пересчитать хеши спорных файлов ({n})…')
         self.assertTrue(self.p.contested_btn.isEnabled() and self.p.contested_list_btn.isEnabled())
         self.assertIn('Спорные — файлы, чью копию нельзя проверить по SHA-256', self.p.contested_note.text())
-        with mock.patch.object(sv, 'contested_count', lambda d, f='': dict(total=0, carrier=0, copies=0)):
+        with sv_patch('contested_count', lambda d, f='': dict(total=0, carrier=0, copies=0)):
             self.p.run_contested_count()
             self.assertTrue(wait(lambda: self.p.cont_n == 0, 10))
         self.assertFalse(self.p.contested_btn.isEnabled())                       # 0 - неактивна

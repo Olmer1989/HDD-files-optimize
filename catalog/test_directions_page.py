@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QWidget       # noqa: E402
 import app                                                 # noqa: E402
 import directions_page as dp                               # noqa: E402
 import hashbase as hb                                      # noqa: E402
-import service as sv                                       # noqa: E402
+from tests.sv_patch import sv, sv_patch                    # noqa: E402 - service и подмена его имён (все подмодули)
 from hb_cmd import directions as c_dirs                    # noqa: E402
 from test_hashbase import NS, Base                         # noqa: E402
 
@@ -429,8 +429,8 @@ class SectionTest(DirBase):
         dlg2 = dp.DirectionDialog(s, s.data, s.data['dirs']['Н1'])
         dlg2.desc.setText('семейное')
         real = sv.direction_save_preview
-        sv.direction_save_preview = lambda **kw: dict(real(**kw), confirm=True)     # переспрос - на всякий случай
-        self.addCleanup(setattr, sv, 'direction_save_preview', real)
+        confirm = sv_patch('direction_save_preview', lambda **kw: dict(real(**kw), confirm=True))   # переспрос
+        confirm.start(), self.addCleanup(confirm.stop)                                  # - на всякий случай
 
         def meddle(lines, ack):
             dlg2.name.setText('Другое имя')                                         # поменяли поле во время переспроса

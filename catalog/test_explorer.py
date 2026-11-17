@@ -19,6 +19,7 @@ import explorer_diff as ed                                 # noqa: E402
 import explorer_page as ep                                 # noqa: E402
 import hashbase as hb                                      # noqa: E402
 import service as sv                                       # noqa: E402
+from tests.sv_patch import sv_patch                        # noqa: E402 - подмена имён service во всех подмодулях
 from test_hashbase import Base                             # noqa: E402
 
 QAPP = QApplication.instance() or QApplication([])
@@ -228,7 +229,7 @@ class PageTest(DiskBase):
         super().setUp()
         real = sv.disks
         self.patches = [
-            mock.patch.object(sv, 'disks', lambda: [dict(r, letter='T:' if r['disk'] == 'HDD90' else '') for r in real()]),
+            sv_patch('disks', lambda: [dict(r, letter='T:' if r['disk'] == 'HDD90' else '') for r in real()]),
             mock.patch.object(ed, 'disk_root', lambda disk: (str(self.root), None)),
             mock.patch.object(QMessageBox, 'question', lambda *a, **k: QMessageBox.Yes),
             mock.patch.object(QMessageBox, 'information', lambda *a, **k: None),

@@ -20,6 +20,7 @@ sys.path.insert(0, str(CAT))
 sys.path.insert(0, str(CAT.parent / 'scanner'))
 import hashbase as hb                                      # noqa: E402
 import service as sv                                       # noqa: E402
+from tests.sv_patch import sv_patch                        # noqa: E402 - подмена имён service во всех подмодулях
 import portable                                            # noqa: E402  (сканер)
 import rescan                                              # noqa: E402
 from test_hashbase import Base                             # noqa: E402
@@ -102,7 +103,7 @@ class RescanBaseTest(Base):
         self.assertFalse([w for w in res['warn'] if 'не прочитано' in w], res['warn'])
 
     def test_preview_in_service(self):
-        with mock.patch.object(sv, 'volumes', return_value={SERIAL: str(self.root)}), \
+        with sv_patch('volumes', return_value={SERIAL: str(self.root)}), \
                 mock.patch('inventory.volume', return_value=(SERIAL, '', 'NTFS')):
             self.db()
             p = sv.rescan_plan('HDD92', ['котуй'])
@@ -132,7 +133,7 @@ class RescanBaseTest(Base):
             self.assertIn('Взять хеш из прежней описи', out.getvalue())
         self.assertEqual(self.reads, [])
         with self.assertRaises(sv.Refused):                                            # не подключён
-            with mock.patch.object(sv, 'volumes', return_value={}):
+            with sv_patch('volumes', return_value={}):
                 sv.rescan_plan('HDD92', ['Котуй'])
 
 
@@ -168,9 +169,9 @@ class RescanWindowTest(Base):
             proc = mock.Mock()
             proc.poll.return_value = 0
             proc.returncode = 0
-            with mock.patch.object(sv, 'rescan_plan', return_value=plan), \
-                    mock.patch.object(sv, 'rescan_start', return_value=proc) as start, \
-                    mock.patch.object(sv, 'partial_outcome', return_value=dict(accepted=True, warn=[],
+            with sv_patch('rescan_plan', return_value=plan), \
+                    sv_patch('rescan_start', return_value=proc) as start, \
+                    sv_patch('partial_outcome', return_value=dict(accepted=True, warn=[],
                                                                                 lines=['A: стало S 5; новые 1'])), \
                     mock.patch.object(QMessageBox, 'question', return_value=QMessageBox.Yes):
                 dlg = rescan_dialog.RescanDialog(w, 'HDD90', ['A'])
@@ -193,9 +194,9 @@ class RescanWindowTest(Base):
                      ('A\\c.docx', 10 ** 9, '.docx', True), ('A\\d.zip', 2 * 10 ** 9, '.zip', False)]
             plan = dict(plan, items=items, rehash_all=False)
             proc.poll.return_value = None
-            with mock.patch.object(sv, 'rescan_plan', return_value=plan), \
-                    mock.patch.object(sv, 'rescan_confirmed', return_value={'A\\d.zip': 'C'}), \
-                    mock.patch.object(sv, 'rescan_start', return_value=proc) as start, \
+            with sv_patch('rescan_plan', return_value=plan), \
+                    sv_patch('rescan_confirmed', return_value={'A\\d.zip': 'C'}), \
+                    sv_patch('rescan_start', return_value=proc) as start, \
                     mock.patch.object(QMessageBox, 'question', return_value=QMessageBox.Yes) as ask:
                 dlg = rescan_dialog.RescanDialog(w, 'HDD90', ['A'])
                 self.assertTrue(wait(lambda: dlg.go.isEnabled()))
@@ -244,9 +245,9 @@ class TypesDialogTest(unittest.TestCase):
         win.bg = self.Bg()
         plan = dict(letter='F:', folders=['A'], read=[4, 4e9], reuse=[0, 0], errors=[], lines=['x'], items=self.ITEMS,
                     rehash_all=False)
-        conf = mock.patch.object(sv, 'rescan_confirmed', side_effect=OSError('нет базы')) if confirmed is None else \
-            mock.patch.object(sv, 'rescan_confirmed', return_value=confirmed)
-        with mock.patch.object(sv, 'rescan_plan', return_value=plan), conf:
+        conf = sv_patch('rescan_confirmed', side_effect=OSError('нет базы')) if confirmed is None else \
+            sv_patch('rescan_confirmed', return_value=confirmed)
+        with sv_patch('rescan_plan', return_value=plan), conf:
             d = rescan_dialog.RescanDialog(win, 'HDD90', ['A'])
         self.addCleanup(d.close)
         self.keep = win
@@ -272,7 +273,7 @@ class TypesDialogTest(unittest.TestCase):
         d = self.dialog(None)
         self.assertIsNone(d.plan['confirmed'])
         with mock.patch.object(QMessageBox, 'question', return_value=QMessageBox.No) as ask, \
-                mock.patch.object(sv, 'rescan_start') as start:
+                sv_patch('rescan_start') as start:
             d.start()                                                          # все типы - вопроса о потере нет
             self.assertNotIn('не удалось проверить', ask.call_args[0][2])
             d.all_types.setChecked(False)
@@ -285,7 +286,7 @@ class TypesDialogTest(unittest.TestCase):
     def test_resume_keeps_job_rule(self):
         """Продолжение задания: окно передаёт только «resume <задание>», правило типов - из job.json."""
         files = (Path('ход.json'), Path('стоп.txt'), Path('вывод.txt'))         # настоящую «_БАЗА» не трогаем
-        with mock.patch.object(sv, 'rescan_files', return_value=files):
+        with sv_patch('rescan_files', return_value=files):
             a = sv.rescan_argv('HDD90', 'F:', ['A'], job='C:\\x\\HDD90_job', cats=None)
             b = sv.rescan_argv('HDD90', 'F:', ['A'], job='C:\\x\\HDD90_job', cats=[hb.CAT_PHOTO])
         self.assertEqual(a, b)

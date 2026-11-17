@@ -82,16 +82,24 @@ def load_time_imports(tree):
     return out
 
 
+PACKAGES = ('service',)          # пакеты catalog вне ui/*: в графе циклов - пакет и каждый его файл (service.write …)
+
+
 def module_graph(root=CAT):
     """{модуль: {модули}} по импортам при загрузке, один граф на всё: файлы <root>/*.py (имя без .py), ui/__init__.py
-    (ui), ui/<экран>/__init__.py (ui.<экран>) и ui/<экран>/*.py (ui.<экран>.x) - круговой импорт ловится и между
-    пакетами, и через __init__, и через модули catalog. Импорт ui.a.x загружает и ui, ui.a - ребро к ним тоже."""
+    (ui), ui/<экран>/__init__.py (ui.<экран>) и ui/<экран>/*.py (ui.<экран>.x), service/ (service, service.x) -
+    круговой импорт ловится и между пакетами, и через __init__, и через модули catalog. Импорт ui.a.x загружает и ui,
+    ui.a - ребро к ним тоже. Файл service.x к своему пакету service ребра не даёт: __init__ (он выше всех) уже
+    загружается, а service.x берёт только соседние файлы («from .y import», test_service_layers.test_layers)."""
     files = {p.stem: p for p in root.glob('*.py')}
     if (root / 'ui' / '__init__.py').exists():
         files['ui'] = root / 'ui' / '__init__.py'
     for k in ui_packages(root):
         files.update({f'ui.{k}' + ('' if p.stem == '__init__' else f'.{p.stem}'): p
                       for p in (root / 'ui' / k).glob('*.py')})
+    for k in PACKAGES:                                                 # пакеты catalog вне ui: service (бывший service.py)
+        if (root / k / '__init__.py').exists():
+            files.update({k + ('' if p.stem == '__init__' else f'.{p.stem}'): p for p in (root / k).glob('*.py')})
     g = {}
     for name, p in files.items():
         here = name if p.name == '__init__.py' else name.rsplit('.', 1)[0] if '.' in name else ''
@@ -103,13 +111,13 @@ def module_graph(root=CAT):
                 mod = resolve(here, n.level, n.module) if n.level else n.module
                 mods = [mod] + [f'{mod}.{a.name}' for a in n.names] if mod else []
             for m in mods:
-                if m != 'ui' and not m.startswith('ui.'):
+                if top(m) not in ('ui', *PACKAGES):
                     m = top(m)
                 parts = m.split('.')
                 for i in range(1, len(parts) + 1):                     # ui.a.x -> ui, ui.a, ui.a.x
                     x = '.'.join(parts[:i])
-                    if x in files and x != name:
-                        edges.add(x)
+                    if x in files and x != name and not (x in PACKAGES and name.startswith(x + '.')):
+                        edges.add(x)                                   # service.x -> service: __init__ уже грузится
         g[name] = edges
     return g
 
@@ -263,14 +271,17 @@ class UiLayersTest(unittest.TestCase):
 
     def test_ui_checks_catch_broken_code(self):
         """Проверки слоёв и циклов на нарочно испорченном коде (временный каталог): цикл через __init__ пакета, цикл
-        через «from ..x import» (к родительскому пакету), «from . import x, y» - каждое имя; __init__ - ниже всех."""
+        через «from ..x import» (к родительскому пакету), «from . import x, y» - каждое имя; __init__ - ниже всех;
+        service.x не даёт ребра к своему пакету, но цикл через модуль catalog ловится."""
         import tempfile
         root = Path(tempfile.mkdtemp(prefix='ui_broken_'))
         try:
             src = {'m.py': 'from ui.a import x\n', 'ui/__init__.py': '', 'ui/a/__init__.py': 'import m\n',
                    'ui/a/x.py': '', 'ui/b/__init__.py': '', 'ui/b/y.py': 'from ..a import z\n',
                    'ui/a/z.py': 'from ui.b import y\n', 'ui/a/v.py': 'from . import x, z\nfrom ..b import y\n',
-                   'ui/a/w.py': 'from ...q import r\n'}
+                   'ui/a/w.py': 'from ...q import r\n',
+                   'service/__init__.py': 'from .x import a\n', 'service/x.py': 'from .y import b\nimport m2\n',
+                   'service/y.py': '', 'm2.py': 'import service\n'}
             for k, v in src.items():
                 (root / k).parent.mkdir(parents=True, exist_ok=True)
                 (root / k).write_text(v, encoding='utf-8')
@@ -280,6 +291,8 @@ class UiLayersTest(unittest.TestCase):
             self.assertEqual(g['ui.b.y'], {'ui', 'ui.a', 'ui.a.z'})           # «..a» - родитель, не ui.b.a
             self.assertTrue(find_cycle({k: g[k] for k in ('m', 'ui.a', 'ui.a.x')}))
             self.assertTrue(find_cycle({k: g[k] for k in ('ui.a.z', 'ui.b.y', 'ui', 'ui.a', 'ui.b')}))
+            self.assertEqual(g['service.x'], {'service.y', 'm2'})              # к своему пакету ребра нет
+            self.assertTrue(find_cycle({k: g[k] for k in ('service', 'service.x', 'service.y', 'm2')}))  # через m2
             self.assertEqual(ui_targets(root / 'ui/a/v.py', 'a'), [(1, 'x'), (1, 'z')])   # «..b» - не свой пакет
             self.assertEqual(ui_targets(root / 'ui/a/w.py', 'a'), [(1, '..q')])           # выше корня - неизвестный
             (root / 'ui/a/__init__.py').write_text('from .x import X\n', encoding='utf-8')

@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from PySide6.QtWidgets import QApplication                  # noqa: E402
 
 import hashbase as hb                                       # noqa: E402
-import service as sv                                        # noqa: E402
+from tests.sv_patch import sv, sv_patch                    # noqa: E402 - service и подмена его имён (все подмодули)
 import tasks_page as tp                                     # noqa: E402
 from hb_cmd import mvlist as mv                             # noqa: E402
 from hb_core import razbor as rz                            # noqa: E402
@@ -307,8 +307,8 @@ class PartialCopyTest(MoveBase):
         self.assertIn('обработано 1 из 2', str(e.exception))
 
     def page_rows(self):
-        with mock.patch.object(sv, 'running_scripts', return_value=[]), \
-                mock.patch.object(sv, 'volumes', return_value={}), \
+        with sv_patch('running_scripts', return_value=[]), \
+                sv_patch('volumes', return_value={}), \
                 mock.patch.object(tp, 'serial_names', return_value={'AAAA0060': SRC, 'AAAA0045': 'HDD45',
                                                                     'AAAA0077': 'HDD77', 'AAAA0091': 'HDD91'}), \
                 mock.patch.object(tp, 'disk_labels', return_value={'HDD45': 'Бэкап фото и видео', 'HDD77': 'Путешествия'}):

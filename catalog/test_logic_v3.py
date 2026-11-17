@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hashbase as hb                                        # noqa: E402
-import service as sv                                         # noqa: E402
+from tests.sv_patch import sv, sv_patch                    # noqa: E402 - service и подмена его имён (все подмодули)
 from hb_core import razbor as rz                             # noqa: E402
 from hb_core.derived import folder_type                      # noqa: E402
 from hb_core.consts import F_JUNK, F_PHOTO, F_TEXT, F_VIDEO  # noqa: E402
@@ -676,12 +676,12 @@ class CategoriesTest(V3Base):
 
         def broken():
             raise sqlite3.OperationalError('database is locked')
-        with mock.patch.object(sv, 'ro', broken):
+        with sv_patch('ro', broken):
             self.assertTrue(sv._disk_has_data('HDD45'))
 
         def nodb():
             raise sv.Refused('База ещё собирается - подождите.')
-        with mock.patch.object(sv, 'ro', nodb):
+        with sv_patch('ro', nodb):
             self.assertFalse(sv._disk_has_data('HDD45'))
         self.assertTrue(sv._disk_has_data('HDD45'))
         self.assertFalse(sv._disk_has_data('HDD99'))
@@ -924,7 +924,7 @@ class CodeReview16Test(V3Base):
     def test_unique_limit_before_rows_and_no_media_text(self):
         from unittest import mock
         stop = mock.Mock(side_effect=AssertionError('строки не собирать'))
-        with mock.patch.object(sv, 'LIST_MAX', 1), mock.patch.object(sv.hb, 'fast_folder_type', return_value=stop):
+        with sv_patch('LIST_MAX', 1), mock.patch.object(sv.hb, 'fast_folder_type', return_value=stop):
             with self.assertRaises(sv.Refused):
                 sv.file_list('unique', SRC)
         make_disk(self.scans, 'HDD63', 'AAAA0063', [], unhashed=[('Д\\письмо.doc', 10)])
