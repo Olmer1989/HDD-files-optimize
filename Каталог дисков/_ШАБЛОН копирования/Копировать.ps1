@@ -84,17 +84,20 @@ function Stop-Script([string]$text, [int]$code) {
     if (-not $NoPause) { [void](Read-Host 'Enter - закрыть') }
     exit $code
 }
-# 2.8: части шаблона. SHA-256 текста части (UTF-8 без BOM, концы строк LF): нет файла или SHA-256 другой -
+# 2.8: части шаблона. SHA-256 текста части (строгий UTF-8 без BOM, концы строк LF): нет файла, не UTF-8 или SHA-256 другой -
 # ничего не делается, код 5. Выполняется ровно тот текст, который проверен.
 $PartSha = [ordered]@{
     'Копировать - общее.psm1' = '6A4C72D8193B9193FDBFF49FF581E82B72A0BC7EE09B91C8E662E9AF19C547F1'
     'Копировать - проверки.psm1' = '68FB9864E19DAEE6DB96C469368D12BB382848E9540454FB811C61808C21DBEA'
     'Копировать - файл и итог.psm1' = '67152CA5EA048B5AFD9D5F5D29A5467F4EBBDFF4CAAF9C0F53B7480D6D6D5C2E'
 }
+$U8Strict = New-Object System.Text.UTF8Encoding($false, $true)      # битые байты - ошибка, а не замена (как в Python)
 foreach ($pn in $PartSha.Keys) {
     $pp = Join-Path $Here $pn
     if (-not [System.IO.File]::Exists($pp)) { Stop-Script "Нет части шаблона «$pn» рядом с Копировать.ps1. Подготовьте задание заново. Ничего не сделано." 5 }
-    $pt = $U8.GetString([System.IO.File]::ReadAllBytes($pp)).TrimStart([char]0xFEFF).Replace("`r`n", "`n")
+    try { $pt = $U8Strict.GetString([System.IO.File]::ReadAllBytes($pp)) }
+    catch { Stop-Script "Часть шаблона «$pn» повреждена (не UTF-8). Подготовьте задание заново. Ничего не сделано." 5 }
+    $pt = $pt.TrimStart([char]0xFEFF).Replace("`r`n", "`n").Replace("`r", "`n")      # концы строк: CRLF и CR -> LF
     $ph = [System.Security.Cryptography.SHA256]::Create()
     $px = [System.BitConverter]::ToString($ph.ComputeHash($U8.GetBytes($pt))).Replace('-', ''); $ph.Dispose()
     if ($px -ne $PartSha[$pn]) { Stop-Script "Часть шаблона «$pn» изменена (SHA-256 не тот, что записан в Копировать.ps1). Подготовьте задание заново. Ничего не сделано." 5 }
