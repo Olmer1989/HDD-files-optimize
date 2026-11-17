@@ -219,7 +219,9 @@ def nohash_html(res, fast, label, copy_n, labels=None):
                  'есть хеш…</span>')
     elif (res is None and not fast) or (res is not None and not res['n']):
         if copy_n:
-            h.append(f'<span style="color:{GREEN}">✔ У всех файлов, которые пойдут на {esc(label)}, есть хеш.</span>')
+            who = (f'всех {num(copy_n)} {plural(copy_n, "файла", "файлов", "файлов")}, которые пойдут' if copy_n > 1
+                   else 'файла, который пойдёт')                      # 17.11.2026: число - по просьбе владельца
+            h.append(f'<span style="color:{GREEN}">✔ У {who} на {esc(label)}, есть хеш.</span>')
     else:
         n, m = res['n'], len(res['folders'])
         h.append(f'<span style="color:{RED}"><b>Без хеша: {files_word(n)}'
