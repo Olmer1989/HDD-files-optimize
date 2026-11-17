@@ -16,7 +16,7 @@ import razbor_cell as rc                                   # noqa: E402
 import razbor_page as rp                                   # noqa: E402
 import service as sv                                       # noqa: E402
 from test_app import wait                                  # noqa: E402
-from test_razbor_page import PageBase                      # noqa: E402
+from tests.razbor.base import PageBase                     # noqa: E402 - шаг А: основа тестов разбора
 
 G = 1024 ** 3
 

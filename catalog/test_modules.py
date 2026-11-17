@@ -32,11 +32,16 @@ UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего �
 # файл. Новый файл .py в catalog - не больше FILE_MAX строк. Файлы, уже превысившие предел, - долг: расти им нельзя,
 # только уменьшаться (разбиваются отдельными заданиями); после разбивки - убрать из списка.
 FILE_MAX = 600
-FILE_DEBT = {'razbor_page.py': 2951, 'service.py': 2438, 'test_razbor_page.py': 2055, 'commands_page.py': 1320,
+FILE_DEBT = {'service.py': 2438, 'commands_page.py': 1320,
              'tasks_page.py': 1263, 'test_move_v3.py': 1210, 'filelist_window.py': 1096, 'hb_core/razbor.py': 1053,
              'test_logic_v3.py': 944, 'hb_cmd/mvlist.py': 897, 'explorer_page.py': 841, 'directions_page.py': 820,
              'test_hashbase.py': 814, 'test_directions_page.py': 813, 'explorer_diff.py': 718, 'disks_page.py': 679,
              'build_pilot.py': 570, 'test_app.py': 519, 'test_copy_template_review.py': 515}
+# Экран «Разбор носителя» по блокам (шаг А разбивки 17.11.2026, docs/СТРУКТУРА_ПРОГРАММЫ.md): ранги слоёв ui/razbor.
+# Файл пакета импортирует из пакета только файлы СТРОГО ниже рангом: view_* и flow_* друг друга не импортируют.
+RAZBOR_RANK = {'texts_cell': 0, 'common': 1, 'texts_tasks': 1, 'texts_head': 2, 'model_marks': 3, 'model_checks': 3,
+               'model_show': 3, 'model': 4, 'dialogs': 5, 'page': 7}           # view_*, flow_* - 6
+SHIMS = {'razbor_page': 60, 'razbor_cell': 60, 'test_razbor_page': 60}       # переходники шага А: прежние имена, до 60 строк
 PATHVARS = {'BASE_DIR', 'DB', 'SNAP', 'MANUAL', 'DECISIONS', 'EXCLUSIONS', 'ANSWERS', 'TEMPLATE', 'MOVE_TEMPLATE', 'TASKS',
             'DIRECTIONS', 'RAZBORY'}
 
@@ -56,6 +61,140 @@ def top(mod):
     return mod.split('.')[0]
 
 
+def razbor_rank(stem):
+    return RAZBOR_RANK.get(stem, 6 if stem.startswith(('view_', 'flow_')) else None)
+
+
+def razbor_targets(path):
+    """Какие файлы пакета ui/razbor импортирует файл пакета: [(строка, имя файла)]. Учитывает «from .x import»,
+    «from . import x, y», «from ui.razbor import x», «import ui.razbor.x», «from ui.razbor.x import»."""
+    out = []
+    for n in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+        if isinstance(n, ast.ImportFrom):
+            if n.level == 1:
+                out += [(n.lineno, n.module.split('.')[0])] if n.module else [(n.lineno, a.name) for a in n.names]
+            elif n.level:
+                out.append((n.lineno, '..' + (n.module or '')))             # выше пакета - неизвестный импорт
+            elif n.module == 'ui.razbor':
+                out += [(n.lineno, a.name) for a in n.names]
+            elif n.module and n.module.startswith('ui.razbor.'):
+                out.append((n.lineno, n.module.split('.')[2]))
+        elif isinstance(n, ast.Import):
+            out += [(n.lineno, a.name.split('.')[2]) for a in n.names if a.name.startswith('ui.razbor.')]
+    return out
+
+
+def load_time_imports(tree):
+    """Импорты, выполняемые при загрузке модуля: верхний уровень и вложенные в if / try / with верхнего уровня."""
+    todo, out = list(tree.body), []
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            out.append(n)
+        elif isinstance(n, (ast.If, ast.Try, ast.With)):
+            for f in ('body', 'orelse', 'finalbody', 'handlers'):
+                todo += getattr(n, f, [])
+        elif isinstance(n, ast.ExceptHandler):
+            todo += n.body
+    return out
+
+
+def module_graph():
+    """{модуль: {модули}} по импортам при загрузке: файлы catalog/*.py (имя без .py) и ui/razbor/*.py (ui.razbor.x)."""
+    files = {p.stem: p for p in CAT.glob('*.py')}
+    files.update({f'ui.razbor.{p.stem}': p for p in (CAT / 'ui' / 'razbor').glob('*.py') if p.stem != '__init__'})
+    g = {}
+    for name, p in files.items():
+        edges = set()
+        for n in load_time_imports(ast.parse(p.read_text(encoding='utf-8'))):
+            if isinstance(n, ast.Import):
+                mods = [a.name for a in n.names]
+            elif n.level:
+                mods = [f'ui.razbor.{n.module}'] if n.module else [f'ui.razbor.{a.name}' for a in n.names]
+            elif n.module == 'ui.razbor':
+                mods = [f'ui.razbor.{a.name}' for a in n.names]
+            else:
+                mods = [n.module]
+            for m in mods:
+                m = '.'.join(m.split('.')[:3]) if m.startswith('ui.razbor.') else top(m)
+                if m in files and m != name:
+                    edges.add(m)
+        g[name] = edges
+    return g
+
+
+def find_cycle(g):
+    """Первый найденный цикл [a, b, …, a] или None."""
+    state, stack = {}, []
+
+    def dfs(v):
+        state[v] = 1
+        stack.append(v)
+        for w in sorted(g.get(v, ())):
+            if state.get(w) == 1:
+                return stack[stack.index(w):] + [w]
+            if not state.get(w):
+                c = dfs(w)
+                if c:
+                    return c
+        state[v] = 2
+        stack.pop()
+        return None
+    for v in sorted(g):
+        if not state.get(v):
+            c = dfs(v)
+            if c:
+                return c
+    return None
+
+
+SHIM_MODS = {'razbor_page', 'razbor_cell'}
+
+
+def shim_aliases(tree, seen=()):
+    """Имена, под которыми в файле доступен модуль-переходник: import razbor_page as rp; from base import * / rp
+    (по файлам проекта, в том числе tests/razbor/base.py); rp2 = rp."""
+    alias = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            alias |= {a.asname or a.name for a in n.names if a.name in SHIM_MODS}
+        elif isinstance(n, ast.ImportFrom) and not n.level:
+            alias |= {a.asname or a.name for a in n.names if a.name in SHIM_MODS}
+            src = CAT / (n.module.replace('.', '/') + '.py') if n.module else None
+            if src and src.exists() and src not in seen:
+                inner = shim_aliases(ast.parse(src.read_text(encoding='utf-8')), (*seen, src))
+                alias |= inner if any(a.name == '*' for a in n.names) else                     {a.asname or a.name for a in n.names if a.name in inner}
+    for _ in range(3):
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Name) and n.value.id in alias:
+                alias |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+    return alias
+
+
+def shim_patches(src):
+    """Строки подмен имени модуля-переходника: patch.object(<псевдоним переходника>, …), patch.multiple(…) и
+    patch('…razbor_page.X') строкой. Подмена атрибута класса (rp.RazborPage, 'set_item') разрешена."""
+    tree = ast.parse(src)
+    alias = shim_aliases(tree)
+    bad = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        fname = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ''
+        owner = f.value if isinstance(f, ast.Attribute) else None
+        owner_name = owner.attr if isinstance(owner, ast.Attribute) else owner.id if isinstance(owner, ast.Name) else ''
+        target = n.args[0] if n.args else next((k.value for k in n.keywords if k.arg == 'target'), None)
+        if fname in ('object', 'multiple') and owner_name == 'patch':
+            if isinstance(target, ast.Name) and target.id in alias:
+                bad.append(n.lineno)
+        elif fname == 'patch' and isinstance(target, ast.Constant) and isinstance(target.value, str):
+            parts = target.value.split('.')
+            if any(x in SHIM_MODS and len(parts) - i == 2 for i, x in enumerate(parts)):
+                bad.append(n.lineno)
+    return bad
+
+
 class ModulesTest(unittest.TestCase):
     def test_file_size(self):
         """Правило владельца 17.11.2026: файл .py не больше FILE_MAX строк; долг из FILE_DEBT только уменьшается."""
@@ -70,6 +209,45 @@ class ModulesTest(unittest.TestCase):
             if n > limit:
                 bad.append(f'{key}: {n} строк (предел {limit})')
         self.assertEqual(bad, [], 'Файл вырос сверх предела - вынесите часть в отдельный файл')
+
+    def test_razbor_layers(self):
+        """ui/razbor: слои по рангам; блоки (view_*) и процессы (flow_*) друг друга не импортируют (в том числе
+        «from . import x»); переходники razbor_page / razbor_cell не импортируются; без __all__ (переходник отдаёт имена
+        звёздочкой); тексты без Qt; переходники до 60 строк."""
+        pkg = CAT / 'ui' / 'razbor'
+        files = sorted(p for p in pkg.glob('*.py') if p.stem != '__init__')
+        self.assertTrue(files)
+        for f in files:
+            rank = razbor_rank(f.stem)
+            self.assertIsNotNone(rank, f'{f.name}: нет ранга - добавьте в RAZBOR_RANK')
+            self.assertNotIn('__all__', f.read_text(encoding='utf-8'), f.name)
+            for mod, _ in imports(f):
+                self.assertNotIn(top(mod), set(SHIMS), f'{f.name} импортирует переходник {mod}')
+                if f.stem.startswith('texts_'):
+                    self.assertNotEqual(top(mod), 'PySide6', f'{f.name}: тексты без Qt')
+            for line, t in razbor_targets(f):
+                trank = razbor_rank(t)
+                self.assertIsNotNone(trank, f'{f.name}:{line}: импорт неизвестного {t}')
+                self.assertLess(trank, rank, f'{f.name}:{line}: импорт вверх или вбок - {t}')
+        for name, limit in SHIMS.items():
+            n = len((CAT / f'{name}.py').read_text(encoding='utf-8').splitlines())
+            self.assertLessEqual(n, limit, f'{name}.py - переходник, не больше {limit} строк')
+
+    def test_no_import_cycles_through_razbor(self):
+        """Граф импортов при загрузке (верхний уровень файла) по ui/razbor и модулям catalog (service, disk_ui,
+        directions_page, commands_page, ui_common, переходники …): циклов нет. Импорт внутри функции цикла не создаёт."""
+        cyc = find_cycle(module_graph())
+        self.assertIsNone(cyc, 'круговой импорт: ' + ' -> '.join(cyc or []))
+
+    def test_tests_do_not_patch_shim_names(self):
+        """Подмена имени модуля-переходника (mock.patch.object(rp, 'X'), mock.patch('razbor_page.X')) не действует на код
+        в ui/razbor - тест проверял бы не то или открыл настоящее окно. Подменять там, где имя используется, или у класса
+        (rp.RazborPage.set_item - тот же объект класса, разрешено). Разбор по AST: многострочные вызовы, псевдонимы."""
+        bad = []
+        for p in CAT.rglob('test*.py'):
+            if '__pycache__' not in p.parts and p.name != 'test_modules.py':
+                bad += [f'{p.relative_to(CAT)}:{n}' for n in shim_patches(p.read_text(encoding='utf-8'))]
+        self.assertEqual(bad, [], 'подмена имени переходника')
 
     def test_command_contract(self):
         seen = []
