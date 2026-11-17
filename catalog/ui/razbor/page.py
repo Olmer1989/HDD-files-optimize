@@ -71,7 +71,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QGridLayout, QHB
 from ui_common import StepsBar
 
 from .common import (CONTESTED_NOTE, C_CHECK, C_FILES, C_HAVE, C_NAME, C_OTHER, C_PHOTO, C_VIDEO, HEAD,
-                     HEAD_BG, MODE_CSS, MODE_TEXT)
+                     HEAD_BG, MODE_CSS, MODE_TEXT, ROLE)
 from .flow_autosave import AutosaveFlow, CloseGuard
 from .flow_contested import ContestedFlow
 from .flow_nohash import NohashFlow
@@ -172,12 +172,13 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         self.mode_only = QPushButton(MODE_TEXT[ONLY])
         self.mode_every = QPushButton(MODE_TEXT[EVERY])
         self.mode_except = QPushButton(MODE_TEXT[EXCEPT])
-        self.mode_only.setToolTip('Копируются только папки с галочкой. Остальное остаётся на носителе (или идёт туда, '
-                                  'куда отмечен весь носитель).')
-        self.mode_every.setToolTip('Весь носитель - на этот диск. Исключения («не копировать») снимаются; папки, '
-                                   'отмеченные для другого диска, остаются за ним (метка «А2»).')
-        self.mode_except.setToolTip('Весь носитель - на этот диск, кроме папок с галочкой: галочка здесь значит '
-                                    '«не копировать» (такие папки - красным).')
+        # 18.11.2026: подсказки - с переносом строк (<p>), длинная обрезалась у правого края экрана
+        self.mode_only.setToolTip('<p>Копируются только папки с галочкой. Остальное остаётся на носителе (или идёт '
+                                  'туда, куда отмечен весь носитель).</p>')
+        self.mode_every.setToolTip('<p>Весь носитель — на этот диск. Исключения («не копировать») снимаются; папки, '
+                                   'отмеченные для другого диска, остаются за ним (метка «А2»).</p>')
+        self.mode_except.setToolTip('<p>Весь носитель — на этот диск, кроме папок с галочкой: галочка здесь значит '
+                                    '«не копировать» (такие папки — красным).</p>')
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
         self.mode_btn = {ONLY: self.mode_only, EVERY: self.mode_every, EXCEPT: self.mode_except}
@@ -218,9 +219,24 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
                                 'меняется у всех выделенных.')
         self.tree_hint.setWordWrap(True)
         l2.addWidget(self.tree_hint)
+        self.legend = QWidget()                           # 18.11.2026: что значит зелёный и розовый фон (texts_head)
+        lg = QVBoxLayout(self.legend)
+        lg.setContentsMargins(0, 0, 0, 0)
+        lg.setSpacing(2)
+        self.legend_rows = []
+        for _ in range(2):
+            row, box, lab = QHBoxLayout(), QLabel(), QLabel('')
+            box.setFixedSize(14, 14)
+            row.addWidget(box, 0, Qt.AlignVCenter)
+            row.addWidget(lab, 1)
+            lg.addLayout(row)
+            self.legend_rows.append((box, lab))
+        l2.addWidget(self.legend)
         self.tree = DragTree(self)
         self.tree.setHeaderLabels(HEAD)
         self.tree.setTreePosition(C_NAME)                 # галочки - ровной колонкой слева, ветви дерева - у имени
+        self.tree.setRootIsDecorated(False)               # 18.11.2026: стрелка у строки носителя казалась второй галочкой
+        self.tree.itemCollapsed.connect(lambda it: it.data(C_NAME, ROLE) == '' and it.setExpanded(True))
         self.tree.setItemDelegate(TreeDelegate(self.tree))
         hd = self.tree.header()
         hd.setSectionResizeMode(QHeaderView.Interactive)

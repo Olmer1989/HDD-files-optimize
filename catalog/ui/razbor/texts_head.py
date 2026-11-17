@@ -7,7 +7,7 @@ import disk_ui
 from directions_look import show_num                 # «Н2» на экране - «А2» (18.11.2026)
 from disk_ui import tb_text   # перенесена в disk_ui (17.11.2026); имя здесь - для прежних импортов
 
-from .common import EXC_BG, EXC_FG, JOURNAL, PALE, SEL_BG
+from .common import EXC_BG, EXC_FG, JOURNAL, NONE_BG, PALE, SEL_BG
 from .texts_cell import BLUE, EVERY, EXCEPT, GRAY, GREEN, LINK, ONLY, ORANGE, RED, esc, files_word, gb, num, vol
 
 
@@ -187,24 +187,51 @@ def short_place(row, disk):
 
 
 def kinds_words(d):
-    """Что копирует направление словами (строка «нет на H:», 18.11.2026): «фото, видео и документы рядом с ними»;
-    «Все файлы» - «все файлы, кроме программ и временных»."""
+    """Что копирует направление словами (18.11.2026, решение владельца): каждый тип в кавычках через запятую -
+    «фото», «видео», «документы рядом с ними»; «Все файлы» - «все, кроме программ и временных»."""
     if d.cats == hb.ALL_CATS and not d.docs_near:
-        return 'все файлы, кроме программ и временных'
+        return 'все, кроме программ и временных'
     w = [('документы рядом с ними' if c == hb.CAT_DOC and d.docs_near else c) for c in hb.COPY_CATS if c in d.cats]
     if not w:
         return 'ничего (набор «что копировать» не распознан)'
-    return w[0] if len(w) == 1 else ', '.join(w[:-1]) + ' и ' + w[-1]
+    return ', '.join(f'«{x}»' for x in w)
+
+
+def kinds_line(d):
+    """«Типы файлов: «фото», «видео» — согласно настройкам А1» (строка «нет на H:» и строка «без хеша» ячейки)."""
+    return f'Типы файлов: {kinds_words(d)} — согласно настройкам {show_num(d.num)}'
+
+
+def archive_where(d, rows, carrier=None, space=None):
+    """«Архивном диске А1 (H: «Бэкап фото и видео», 16 ТБ)» для строки «без хеша» ячейки (18.11.2026): буква (не
+    подключён - код диска), метка тома в кавычках (меток нет - без неё), объём (нет данных - без него); дисков
+    направления несколько - «Архивных дисках А1 (H: …, 16 ТБ и HDD77 …)». Сам носитель не считается."""
+    by = {r['disk']: r for r in rows}
+    parts = []
+    for x in [x for x in d.disks if x != carrier] or d.disks:
+        r = disk_ui.as_row(by.get(x) or {'disk': x, 'label': '', 'letter': ''})
+        name = disk_ui.disk_name(r)
+        s = (r.get('letter') or x) + (f' «{name}»' if name and name != disk_ui.kind_word(x) else '')
+        size = tb_text(total_of(x, rows, space))
+        parts.append(s + (f', {size}' if size else ''))
+    word = 'Архивном диске' if len(parts) == 1 else 'Архивных дисках'
+    return f'{word} {show_num(d.num)} ({" и ".join(parts)})'
+
+
+def tree_legend(label):
+    """Пояснение цветов над деревом (18.11.2026, решение владельца): [(цвет фона, текст)] - друг под другом."""
+    return [(SEL_BG, f'зелёный — папка отмечена, из неё есть что копировать на {label}'),
+            (NONE_BG, f'розовый — папка отмечена, но копировать из неё нечего: всё уже есть на {label} или нет файлов '
+                      'выбранных типов')]
 
 
 def not_on_target_html(carrier, label, d, v, x):
-    """Строка над «Что копировать с носителя» (18.11.2026, решение владельца): «На HDD09 нет на H: 1 234 файла
-    (15,9 ГБ)», мелко - какие типы; зелёным - в отмеченных (= «Копировать на H:» ячейки), красным - в неотмеченных и
+    """Строка над «Что копировать с носителя» (18.11.2026, решение владельца): «Из содержимого HDD09 нет на H:
+    1 234 файла (15,9 ГБ)», мелко - какие типы; зелёным - в отмеченных (= «Копировать на H:» ячейки), красным - в неотмеченных и
     «Показать по папкам» (ссылка nt:<диск>), серым - без хеша в неотмеченных (отдельно: проверить нельзя).
     v - Model.not_on_disk(...)[x]; None - «Уже есть» ещё считается."""
-    head = f'На {esc(carrier)} нет на {esc(label)}'
-    kinds = (f'<br><span style="color:{GRAY}; font-size:8pt">{esc(kinds_words(d))} — как в настройках '
-             f'{esc(show_num(d.num))}</span>')
+    head = f'Из содержимого {esc(carrier)} нет на {esc(label)}'
+    kinds = f'<br><span style="color:{GRAY}; font-size:8pt">{esc(kinds_line(d))}</span>'
     if v is None:
         return f'<b>{head}:</b> <span style="color:{GRAY}">считаю…</span>{kinds}'
     mk, mn, un, nh = v['marked'], v['marked_nohash'], v['unmarked'], v['nohash']

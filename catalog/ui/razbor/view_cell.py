@@ -16,7 +16,7 @@ import service as sv
 from .common import (BLOCK_LOOK, BUSY_CSS, C_NAME, DEBOUNCE_MS, DISKS_WORDS, HEAD_BG, MIME, ROLE, SHORT_BG, UNKNOWN_BG,
                      mime_folders)
 from .texts_cell import ORANGE, RED, cell_numbers, dest_cell_html, disk_block_html, esc, files_word, nohash_html
-from .texts_head import copies_word, hdds, short_place
+from .texts_head import archive_where, copies_word, hdds, kinds_line, short_place
 
 START_TEXT = 'Начать копирование…'                # 18.11.2026 (решение владельца; прежде «Подготовить задания…»)
 
@@ -260,7 +260,8 @@ class CellView:
         by = {r['disk']: r for r in self.disk_rows}
         label = lambda x: (by.get(x) or {}).get('letter') or x                     # noqa: E731
         html_ = nohash_html(nh, fast, ' и '.join(label(x) for x in d.disks if x != plan.disk) or 'диск',
-                            cell_numbers(d, plan)['copy'][0], label)
+                            cell_numbers(d, plan)['copy'][0], label, kinds=kinds_line(d),
+                            where=archive_where(d, self.disk_rows, plan.disk, self.plan[1] if self.plan else None))
         c.nohash.setText(html_)
         c.nohash.setVisible(bool(html_))
         ok = not fast or bool(nh and 'n' in nh and not nh['n'])

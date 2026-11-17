@@ -1,5 +1,5 @@
-"""«Разбор носителя»: строка «На HDD60 нет на H: …» над «Что копировать с носителя» и окно «Показать по папкам»
-(18.11.2026, решение владельца); кнопки «Файлы только на этом носителе…» и группы «больше нигде нет» в «Обзоре» нет.
+"""«Разбор носителя»: строка «Из содержимого HDD60 нет на H: …» над «Что копировать с носителя» и окно «Показать по
+папкам» (18.11.2026, решение владельца); кнопки «Файлы только на этом носителе…» и группы «больше нигде нет» в «Обзоре» нет.
 
 Запуск из корня проекта:  py -m unittest catalog.tests.razbor.test_not_on_target
 Настоящие диски, таблицы и задания не используются.
@@ -42,8 +42,8 @@ class NotOnTargetTest(PageBase):
         v = self.same('HDD91')
         self.assertEqual((v['marked'], v['unmarked'], v['nohash']), ((0, 0), (HASHED, HASHED_B), (NOHASH, NOHASH_B)))
         t = self.p.missing.text()
-        self.assertIn(f'На {SRC} нет на HDD91 {rp.files_word(HASHED)}', t)
-        self.assertIn('все файлы, кроме программ и временных — как в настройках А2', t)
+        self.assertIn(f'Из содержимого {SRC} нет на HDD91 {rp.files_word(HASHED)}', t)
+        self.assertIn('Типы файлов: все, кроме программ и временных — согласно настройкам А2', t)
         self.assertIn('в отмеченных папках 0 файлов, 0 ГБ — будут скопированы на HDD91', t)
         self.assertIn(f'в неотмеченных папках {rp.files_word(HASHED)}', t)
         self.assertIn('Показать по папкам', t)
@@ -76,16 +76,17 @@ class NotOnTargetTest(PageBase):
         self.assertEqual(b['marked'], (2, 210))                                  # + 2.jpg (есть только на 45)
         self.assertEqual(a['unmarked'][0], 9 - 1)                                # 1.jpg и 2.jpg на 45 есть
         t = self.p.missing.text()
-        self.assertIn(f'На {SRC} нет на HDD45', t)
-        self.assertIn(f'На {SRC} нет на HDD77', t)                               # строка на каждый диск
-        self.assertIn('фото, видео и документы рядом с ними — как в настройках А1', t)
+        self.assertIn(f'Из содержимого {SRC} нет на HDD45', t)
+        self.assertIn(f'Из содержимого {SRC} нет на HDD77', t)                   # строка на каждый диск
+        self.assertIn('Типы файлов: «фото», «видео», «документы рядом с ними» — согласно настройкам А1', t)
         self.p.toggle(['Работа'], True)                                           # отчёт.doc рядом со схема.jpg
         self.same('HDD45')
         self.same('HDD77')
         m = self.p.model                                                          # «Уже есть» ещё не посчитано
         m.set_have(None, [])
         self.p.render_missing()
-        self.assertIn(f'На {SRC} нет на HDD45:</b> <span style="color:{rp.GRAY}">считаю…', self.p.missing.text())
+        self.assertIn(f'Из содержимого {SRC} нет на HDD45:</b> <span style="color:{rp.GRAY}">считаю…',
+                      self.p.missing.text())
         self.p.run_have()
         self.settle()
         self.p.render_missing()

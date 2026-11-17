@@ -1,13 +1,14 @@
-"""RazborPage, строка «На HDD09 нет на H: …» над «Что копировать с носителя» и окно «Показать по папкам» (18.11.2026,
-решение владельца; числа - Model.not_on_disk, тексты - texts_head.not_on_target_html)."""
+"""RazborPage, строка «Из содержимого HDD09 нет на H: …» над «Что копировать с носителя» и окно «Показать по папкам»
+(18.11.2026, решение владельца; числа - Model.not_on_disk, тексты - texts_head.not_on_target_html); пояснение цветов
+над деревом (render_legend)."""
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QHeaderView, QLabel, QTreeWidget, QTreeWidgetItem, QVBoxLayout
 
 from hb_core import api as hb
 
 from .common import SEP
-from .texts_cell import num, vol
-from .texts_head import not_on_target_html
+from .texts_cell import EXCEPT, num, vol
+from .texts_head import not_on_target_html, tree_legend
 
 PATH_ROLE, SORT_ROLE = Qt.UserRole, Qt.UserRole + 1
 HEAD = ['Папка', 'В неотмеченных', 'В отмеченных', 'Без хеша']
@@ -98,6 +99,7 @@ class MissingView:
         m = self.model
         d = self.dest_dir() if m is not None else None
         xs = [x for x in d.disks if x != m.disk] if d is not None else []
+        self.render_legend(d, xs)
         if not xs:
             self.missing.hide()
             return
@@ -105,6 +107,17 @@ class MissingView:
         self.missing.setText('<br>'.join(not_on_target_html(m.disk, self.missing_label(x), d,
                                                             None if res is None else res.get(x), x) for x in xs))
         self.missing.show()
+
+    def render_legend(self, d, xs):
+        """Пояснение цветов над деревом (18.11.2026): зелёный / розовый с квадратиком цвета фона строки; без диска
+        назначения и в «Все, кроме выбранных» (там отмеченные - красным) - не показывается."""
+        on = d is not None and self.mode() != EXCEPT
+        if on:
+            label = ' и '.join(self.missing_label(x) for x in (xs or d.disks))
+            for (box, lab), (color, text) in zip(self.legend_rows, tree_legend(label)):
+                box.setStyleSheet(f'background:{color}; border:1px solid #9e9e9e')
+                lab.setText(text)
+        self.legend.setVisible(on)
 
     def missing_link(self, href):
         """«Показать по папкам» (nt:<диск>) -> окно (не ждёт закрытия) или None."""

@@ -174,7 +174,7 @@ class NohashButtonTest(PageBase):
         self.settle()
         self.assertTrue(wait(lambda: self.p.nohash_result() is not None, 60))
         c = self.p.copy_cell
-        self.assertIn('✖ У 1 из 4 файлов нет хеша', c.nohash.text())
+        self.assertIn('✖ Из 4 файлов, которых нет на Архивных дисках А1 (HDD45 и HDD77), у 1 нет хеша', c.nohash.text())
         self.assertTrue(c.scan_btn.isVisibleTo(c))
         self.assertEqual(c.scan_btn.text(), 'Посчитать хеш (1)')
         self.assertFalse(c.btn.isEnabled())

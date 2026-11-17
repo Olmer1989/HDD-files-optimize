@@ -26,7 +26,7 @@ class NohashCellTest(PageBase):
         self.assertEqual((nh['n'], nh['folders'], nh['cats']), (1, ['Поход 2010'], [hb.CAT_DOC]))
         cell = self.p.copy_cell
         text = cell.nohash.text()
-        self.assertIn('✖ У 1 из 4 файлов нет хеша</b>', text)                   # 18.11.2026 - вид строки владельца
+        self.assertIn('✖ Из 4 файлов, которых нет на Архивных дисках А1 (HDD45 и HDD77), у 1 нет хеша</b>', text)
         self.assertIn('в 1 папке', text)
         self.assertFalse(self.p.tasks_btn.isEnabled())
         self.assertIn('Сначала хеш', self.p.tasks_btn.toolTip())
