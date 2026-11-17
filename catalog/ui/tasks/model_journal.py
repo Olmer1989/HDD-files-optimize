@@ -85,7 +85,7 @@ def progress(task, kind, running=False, now=None):
                             if isinstance(k, tuple) and r.startswith(('скопирован', hb.HAVE_SHA)) and HASH_WORD in r)
     last_res = cur[-1][1] if cur else ''
     res = dict(total_b=total_b, done_b=done_b, speed=None, eta=None, eta_text='', ago=None, examples=errs,
-               hashed=len(hashed_keys), hashed_keys=hashed_keys, last_res=last_res)
+               hashed=len(hashed_keys), hashed_keys=hashed_keys, last_res=last_res, moved_b=0, elapsed=0)
     if not logs or start is None:
         return res
     times = [t for _k, _r, _s, t in cur if t is not None]
@@ -96,6 +96,7 @@ def progress(task, kind, running=False, now=None):
         last_ts = start
     moved_b = sum(s for _k, r, s, _t in cur if r.startswith('скопирован' if kind == 'копирование' else 'перемещён'))
     elapsed = (now if running else last_ts) - start
+    res['moved_b'], res['elapsed'] = moved_b, max(0, elapsed)    # для оценки времени новых копирований (разбор)
     if running:
         res['ago'] = max(0, now - last_ts)
     if kind == 'копирование':

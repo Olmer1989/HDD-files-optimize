@@ -4,10 +4,11 @@
 from hb_core import api as hb
 
 import disk_ui
+from directions_look import show_num                 # «Н2» на экране - «А2» (18.11.2026)
 from disk_ui import tb_text   # перенесена в disk_ui (17.11.2026); имя здесь - для прежних импортов
 
 from .common import EXC_BG, EXC_FG, JOURNAL, PALE, SEL_BG
-from .texts_cell import BLUE, EVERY, EXCEPT, GRAY, GREEN, ONLY, ORANGE, esc, gb
+from .texts_cell import BLUE, EVERY, EXCEPT, GRAY, GREEN, LINK, ONLY, ORANGE, RED, esc, files_word, gb, num, vol
 
 
 def place(row, disk=''):
@@ -52,13 +53,13 @@ def dest_text(d, rows):
     """Строка списка «Диск назначения»: «I: My Book — Н3 Фильмы — HDD55 (по журналу сканирования дисков)»; у
     направления с несколькими дисками - коротко «Н1 Семейный архив — H: и S: (две копии)» (этап 12)."""
     if len(d.disks) > 1:
-        return f'{d.num} {d.name} — {letters(d, rows)} ({copies_word(len(d.disks))})'
-    return f'{dest_places(d, rows)} — {d.num} {d.name} — {hdds(d)} ({JOURNAL})'
+        return f'{show_num(d.num)} {d.name} — {letters(d, rows)} ({copies_word(len(d.disks))})'
+    return f'{dest_places(d, rows)} — {show_num(d.num)} {d.name} — {hdds(d)} ({JOURNAL})'
 
 
 def dest_html(d, rows):
     """То же с именем направления оранжевым (как отмеченные в «Обзоре»)."""
-    name = f'<span style="color:{ORANGE}"><b>{esc(d.num)} {esc(d.name)}</b></span>'
+    name = f'<span style="color:{ORANGE}"><b>{esc(show_num(d.num))} {esc(d.name)}</b></span>'
     if len(d.disks) > 1:
         return f'{name} — {esc(letters(d, rows))} <span style="color:{GRAY}">({copies_word(len(d.disks))})</span>'
     return (f'{esc(dest_places(d, rows))} — {name} — '
@@ -115,13 +116,13 @@ def head_html(d, rows, space=None, others=()):
         h = 'Диск назначения: ' + disk_head(d.disks[0], rows, space)
     if others:
         h += ('<br><span style="font-size:9pt; font-weight:normal; color:#37474f">В «Обзоре» отмечено ещё: '
-              + esc(', '.join(f'{o.num} {o.name}' for o in others)) +
+              + esc(', '.join(f'{show_num(o.num)} {o.name}' for o in others)) +
               ' — здесь используется первое по номеру; сменить диск — в «Обзоре», шаг 1.</span>')
     return h
 
 
 MODE_NOTE = {ONLY: 'Копируются только папки с галочкой — остальные остаются на носителе.',
-             EVERY: 'Весь носитель копируется на этот диск. Папки, отмеченные для другого диска (метка «Н2»), остаются '
+             EVERY: 'Весь носитель копируется на этот диск. Папки, отмеченные для другого диска (метка «А2»), остаются '
                     'за ним.',
              EXCEPT: 'Весь носитель копируется на этот диск, кроме папок с галочкой — они подсвечены красным и не '
                      'копируются.'}
@@ -171,7 +172,7 @@ def legend_html(mode):
     else:
         first = f'<span style="background:{SEL_BG}">&nbsp;зелёный фон&nbsp;</span> — папка выбрана; '
     return (first + f'<span style="color:{PALE}">бледный текст и серая галочка</span> — вместе с родительской папкой; '
-            f'<span style="color:{GRAY}">Н2</span> — папка отмечена для другого диска; '
+            f'<span style="color:{GRAY}">А2</span> — папка отмечена для другого диска; '
             f'<i style="color:{BLUE}">• курсив</i> — сохраняется (отметки сохраняются сразу).'
             + (' Галочка у строки носителя — выбрать все папки.' if mode == ONLY else ''))
 
@@ -183,3 +184,38 @@ def short_place(row, disk):
     title = disk_ui.disk_title(row) or disk
     title = title.rsplit(' (', 1)[0] if title.endswith(')') else title
     return f'{row["letter"]} {title}' if row.get('letter') else f'{title} (не подключён)'
+
+
+def kinds_words(d):
+    """Что копирует направление словами (строка «нет на H:», 18.11.2026): «фото, видео и документы рядом с ними»;
+    «Все файлы» - «все файлы, кроме программ и временных»."""
+    if d.cats == hb.ALL_CATS and not d.docs_near:
+        return 'все файлы, кроме программ и временных'
+    w = [('документы рядом с ними' if c == hb.CAT_DOC and d.docs_near else c) for c in hb.COPY_CATS if c in d.cats]
+    if not w:
+        return 'ничего (набор «что копировать» не распознан)'
+    return w[0] if len(w) == 1 else ', '.join(w[:-1]) + ' и ' + w[-1]
+
+
+def not_on_target_html(carrier, label, d, v, x):
+    """Строка над «Что копировать с носителя» (18.11.2026, решение владельца): «На HDD09 нет на H: 1 234 файла
+    (15,9 ГБ)», мелко - какие типы; зелёным - в отмеченных (= «Копировать на H:» ячейки), красным - в неотмеченных и
+    «Показать по папкам» (ссылка nt:<диск>), серым - без хеша в неотмеченных (отдельно: проверить нельзя).
+    v - Model.not_on_disk(...)[x]; None - «Уже есть» ещё считается."""
+    head = f'На {esc(carrier)} нет на {esc(label)}'
+    kinds = (f'<br><span style="color:{GRAY}; font-size:8pt">{esc(kinds_words(d))} — как в настройках '
+             f'{esc(show_num(d.num))}</span>')
+    if v is None:
+        return f'<b>{head}:</b> <span style="color:{GRAY}">считаю…</span>{kinds}'
+    mk, mn, un, nh = v['marked'], v['marked_nohash'], v['unmarked'], v['nohash']
+    if not (mk[0] or un[0] or nh[0]):
+        return f'<span style="color:{GREEN}"><b>Всё нужное с {esc(carrier)} уже есть на {esc(label)}</b></span>{kinds}'
+    h = [f'<b>{head} {files_word(mk[0] + un[0])} ({vol(mk[1] + un[1])})</b>', kinds,
+         f'<br><span style="color:{GREEN}">в отмеченных папках {files_word(mk[0])}, {vol(mk[1])} — будут скопированы на '
+         f'{esc(label)}' + (f' (из них без хеша {num(mn[0])} — сначала «Посчитать хеш»)' if mn[0] else '') + '</span>',
+         f'<br><span style="color:{RED}">в неотмеченных папках {files_word(un[0])}, {vol(un[1])} — не попадут на '
+         f'{esc(label)}</span> <a href="nt:{esc(x)}" style="{LINK}">Показать по папкам</a>']
+    if nh[0]:
+        h.append(f'<br><span style="color:{GRAY}">ещё без хеша {files_word(nh[0])}, {vol(nh[1])} в неотмеченных папках — '
+                 f'есть ли они на {esc(label)}, проверить нельзя</span>')
+    return ''.join(h)

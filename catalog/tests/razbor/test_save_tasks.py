@@ -50,7 +50,7 @@ class SaveTest(PageBase):
         self.p.undo()                                                            # шаг 1 - режим «Все, кроме»
         self.settle()
         self.assertIsNone(self.p.model.saved_ms.get(''))
-        self.assertFalse(self.p.undo_btn.isEnabled())                            # отменять больше нечего
+        self.assertEqual(self.p.model.undo_stack, [])                            # отменять больше нечего
         self.assertEqual(self.asked, [])
 
     def test_edit_while_writing_is_kept(self):
@@ -119,12 +119,14 @@ class TasksTest(PageBase):
         self.p.prepare(['Н1', 'Н2'])         # черновик есть - сначала записывается (этап 16: без вопроса), затем задания
         self.assertTrue(wait(lambda: self.made() and not self.p.writing, 60), self.asked)
         self.assertFalse(any('несохранённ' in x for x in self.asked), self.asked)
-        self.assertTrue(any(f'{SRC} — Работа — Работа' in x for x in self.dialogs), self.dialogs)
+        self.assertTrue(any('Работа\n2\n' in x for x in self.dialogs), self.dialogs)   # строка таблицы папок
         self.assertIn(f'{SRC} — Работа — Работа', self.made())
         self.assertTrue(list(hb.RAZBORY.glob(f'{SRC} *.json')))
+        # 18.11.2026: без вопроса «Создано заданий…» - набор сразу запускается по очереди, открыт «3. Копирование»
+        self.assertTrue(wait(lambda: self.started), self.asked)
+        self.assertEqual([Path(x).name for x in self.started], ['очередь заданий.cmd'])
         self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания на копирование'))
-        self.assertTrue(any(x.startswith('Создано заданий') and 'Задания на копирование' in x for x in self.asked),
-                        self.asked)
+        self.assertFalse(any(x.startswith('Создано заданий') for x in self.asked), self.asked)
 
     def test_list_changed_before_create_is_shown_again(self):
         self.skip_hash_gate()                                                   # см. test_nohash
@@ -248,7 +250,8 @@ class CapacityTest(PageBase):
         self.assertEqual(made, [f'{SRC} — Работа — Работа'])
         self.assertIn('Семейный архив не помещается', self.dialogs[0])
         self.assertIn('Снимите галочки у части папок', self.dialogs[0])
-        self.assertTrue(any('Задания на копирование' in x for x in self.asked), self.asked)
+        self.assertTrue(wait(lambda: self.started), self.asked)                 # Н2 - запущено (окно не открылось)
+        self.assertEqual([Path(x).parent.name for x in self.started], [f'{SRC} — Работа — Работа'])
         self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания на копирование'))
 
 
@@ -310,7 +313,7 @@ class TocTest(PageBase):
             self.p.rescan = lambda d, f: opened.append((d, f))
             self.p.prepare(['Н1'])
             self.assertTrue(wait(lambda: self.dialogs and not self.p.writing, 60), self.asked)
-        self.assertIn('Задания не создаются: оглавление носителя не совпадает с описью', self.dialogs[0])
+        self.assertIn('Копирование не начнётся: оглавление носителя не совпадает с описью', self.dialogs[0])
         self.assertIn('Поход 2010 — исчезли 1', self.dialogs[0])
         self.assertIsNone(self.dlgs[0].ok)                                      # кнопки «Создать» нет
         self.dlgs[0].extra.click()                                               # «Пересканировать эти папки…»

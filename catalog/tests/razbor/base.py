@@ -20,7 +20,8 @@ import hashbase as hb                                      # noqa: E402
 import razbor_page as rp                                   # noqa: E402 - переходник: прежние имена
 import service as sv                                       # noqa: E402
 from hb_core import razbor as rz                           # noqa: E402
-from ui.razbor import dialogs, flow_autosave, flow_tasks   # noqa: E402,F401 - подмены там, где имя используется
+from ui.razbor import dialog_start, dialogs, flow_autosave, flow_tasks   # noqa: E402,F401 - подмены там, где имя
+# используется
 from test_app import put, wait                             # noqa: E402
 from test_hashbase import make_disk, S                     # noqa: E402
 from test_logic_v3 import SRC, FILES, H, V3Base            # noqa: E402
@@ -70,13 +71,16 @@ class PageBase(V3Base):
         self.patches = [mock.patch.object(QMessageBox, 'question', ask),
                         mock.patch.object(QMessageBox, 'information', lambda *a, **k: self.asked.append(a[2])),
                         mock.patch.object(QMessageBox, 'warning', lambda *a, **k: self.asked.append(a[2])),
-                        mock.patch.object(dialogs.TextDialog, 'exec', exec_)]
+                        mock.patch.object(dialogs.TextDialog, 'exec', exec_),
+                        mock.patch.object(dialog_start.StartDialog, 'exec', exec_)]     # «Начать копирование» (18.11)
         for x in self.patches:
             x.start()
         self.w = app.Window()
         self.w.show_error = self.asked.append
         self.assertTrue(wait(lambda: not self.w.updating), 'первая сборка базы в фоне не закончилась')
         self.p = self.w.page('Разбор носителя')
+        self.started = []                                  # запуск заданий: окна PowerShell не открываются (18.11)
+        self.w.page('Задания на копирование').start_file = self.started.append
         self.w.open_page('Разбор носителя')
         self.assertTrue(wait(lambda: self.p.disk_rows))
 

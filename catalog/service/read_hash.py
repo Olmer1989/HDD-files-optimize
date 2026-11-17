@@ -31,24 +31,28 @@ def nohash_info(disk, c=None):
     """«Без хеша» носителя (этап 16): ОДИН проход по его записям без хеша (sha пуст, size > 0; Z/U/X тоже - у них хеш не
     измерен) - всего, фото и видео, по 5 типам, Z/U/X и число в каждой папке вместе с подпапками (для столбца «Без хеша»
     дерева «Дисков и папок»; агрегат в базе не хранится - считается по требованию).
-    -> dict(total, media, by_type=[5], zux, folders={папка: файлов})."""
+    -> dict(total, media, by_type=[5], zux, folders={папка: файлов}, media_folders=[папки фото и видео без хеша для
+    «Досчитать хеш»: родители файлов, вложенная в уже взятую не повторяется], media_root=файлов в корне)."""
     own = c is None
     c = c or ro()
     try:
         ft = hb.fast_folder_type(fine=True)
         direct = collections.Counter()
-        by, total, media, zux = [0] * 5, 0, 0, 0
+        by, total, zux, media_paths = [0] * 5, 0, 0, []
         for path, size, nm, ev in c.execute(f'select path, size, name_lc, ev from files where disk=? and {NOHASH_SQL}',
                                             (disk,)):
             k = ft(path, nm, size)
             by[type5(k)] += 1
             total += 1
-            media += k in (hb.F_PHOTO, hb.F_VIDEO)
+            if k in (hb.F_PHOTO, hb.F_VIDEO):
+                media_paths.append(path)
             zux += ev in (hb.EV_SIZE, hb.EV_USER, hb.EV_STALE)
             direct[hb.parent_of(path)] += 1
     finally:
         if own:
             c.close()
+    media = len(media_paths)
+    media_folders, media_root = hb.scan_folders(media_paths)
     sub = collections.Counter()
     for f, n in direct.items():
         while True:
@@ -56,7 +60,8 @@ def nohash_info(disk, c=None):
             if not f:
                 break
             f = hb.parent_of(f)
-    return dict(total=total, media=media, by_type=by, zux=zux, folders=dict(sub))
+    return dict(total=total, media=media, by_type=by, zux=zux, folders=dict(sub), media_folders=media_folders,
+                media_root=media_root)
 
 
 def disk_hash_info(disk):

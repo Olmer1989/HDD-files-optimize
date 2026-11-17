@@ -1,6 +1,10 @@
-"""RazborPage, «Подготовить задания»: пробный расчёт, сверка оглавления, создание заданий в фоне.
+"""RazborPage, «Начать копирование…»: пробный расчёт, сверка оглавления, окно подтверждения, создание заданий в фоне и
+запуск всего набора через «Задания на копирование».
 
-Шаг А разбивки (17.11.2026): перенесено из razbor_page.py без правки тел (docs/СТРУКТУРА_ПРОГРАММЫ.md)."""
+Шаг А разбивки (17.11.2026): перенесено из razbor_page.py без правки тел (docs/СТРУКТУРА_ПРОГРАММЫ.md).
+18.11.2026 (решение владельца): кнопка «Начать копирование…» вместо «Подготовить задания…»; окно StartDialog вместо
+TextDialog и вопроса «Создать заданий…?»; после подтверждения - новые задания создаются (уже созданные не дублируются),
+затем ВСЕ задания набора (новые и ждущие / прерванные) запускаются по очереди (TasksPage.launch, её проверки те же)."""
 import time
 
 from PySide6.QtWidgets import QDialog, QMessageBox
@@ -8,9 +12,13 @@ from PySide6.QtWidgets import QDialog, QMessageBox
 import disk_ui
 import service as sv
 
+from directions_look import show_num
+from ui.tasks.model_load import load_all, tasks_info
+
 from .common import TITLE, safe
-from .dialogs import TextDialog
-from .texts_tasks import tasks_html
+from .dialog_start import StartDialog
+from .texts_head import short_place
+from .texts_start import WAIT, start_html, start_mode
 
 
 def spec_keys(specs):
@@ -22,7 +30,7 @@ def tasks_check(disk, nums, toc=True):
     """Пробный расчёт заданий направлений nums по сохранённым отметкам, место по каждому диску (service.capacity),
     затем - по порядку, не параллельно - сверка оглавления носителя для новых заданий тех направлений, что помещаются.
     Направление, которому не хватает места хотя бы на одном диске, исключается целиком (ни на 45, ни на 77).
-    -> dict(res, specs, new, short, cap, nums, at, toc)."""
+    -> dict(res, specs, new, short, cap, nums, at, toc, nohash, states, speed)."""
     nums = list(nums)
     res = sv.razbor_tasks(disk, dry=True, only=nums)
     P = res['plan']
@@ -34,6 +42,9 @@ def tasks_check(disk, nums, toc=True):
     out = dict(res=res, specs=specs, new=new, short=short, cap=cap, nums=nums, at=time.strftime('%H:%M:%S'), toc=None)
     # 17.11.2026 (решение владельца): SHA-256 у всех копируемых - последняя проверка по тем же строкам заданий
     out['nohash'] = len({r[1] for s in new for r in s['rows'] if r[3] == 'без хеша'})
+    # 18.11.2026: состояния уже созданных заданий набора и скорость прошлых копирований на их диски (окно подтверждения)
+    out['states'], out['speed'] = tasks_info([s['name'] for s in specs if s.get('exists')],
+                                             sorted({x for s in specs for x in s['targets']}))
     if toc and new:
         folders, root, zones = sv.toc_targets(P, new)
         out['toc'] = sv.toc_check(disk, folders, root, zones)
@@ -68,12 +79,12 @@ def tasks_create(disk, nums, shown):
 
 
 class TasksFlow:
-    """Часть RazborPage («Подготовить задания»); атрибуты - у RazborPage."""
+    """Часть RazborPage («Начать копирование…»); атрибуты - у RazborPage."""
 
     def prepare(self, nums=None):
-        """«Подготовить задания»: nums - направления (None - диск назначения; кнопка ячейки «Копировать на диск»).
+        """«Начать копирование…»: nums - направления (None - диск назначения; кнопка ячейки «Копировать на диск»).
         Сохранённые отметки -> пробный расчёт, место по каждому диску, сверка оглавления носителя (в фоне, по порядку)
-        -> окно -> «Создать» -> снова пробный расчёт и место -> создание."""
+        -> окно подтверждения -> снова пробный расчёт и место -> создание новых -> запуск всего набора."""
         m = self.model
         if m is None or self.writing:
             return
@@ -91,37 +102,51 @@ class TasksFlow:
             return
         disk = self.disk
         self.set_writing(True)
-        self.sum_state.setText('Считаю задания по сохранённым отметкам и сверяю оглавление носителя с описью…')
+        self.sum_state.setText('Считаю, что копировать, по сохранённым отметкам и сверяю оглавление носителя с описью…')
         self.win.bg.run(safe, tasks_check, disk, nums, ok=lambda res: self.show_tasks(disk, nums, res), quiet=True)
+
+    def disk_label(self, x):
+        """«H:» - буква подключённого диска, иначе его номер («HDD45»)."""
+        return next((r.get('letter') for r in self.disk_rows if r['disk'] == x), None) or x
+
+    def start_title(self, disk, val):
+        """«Начать копирование: HDD09 → H: Бэкап фото и видео (А1)»."""
+        P = val['res']['plan']
+        by = {r['disk']: r for r in self.disk_rows}
+        parts = [' и '.join(short_place(by.get(x), x) for x in P.dirs[n].disks if x != disk) + f' ({show_num(n)})'
+                 for n in val['nums'] if n in P.dirs and n not in val['short'] and P.dirs[n].disks]
+        return f'Начать копирование: {disk} → ' + ('; '.join(parts) or 'диск назначения')
 
     def show_tasks(self, disk, nums, res, note=''):
         kind, val = res
         self.set_writing(False)
         self.sum_state.setText('')
         if kind != 'ok':
-            QMessageBox.warning(self, TITLE, 'Задания не посчитаны: ' + (val if kind == 'refused' else
-                                                                       val.strip().splitlines()[-1]))
+            QMessageBox.warning(self, TITLE, 'Не посчитано, что копировать: ' + (val if kind == 'refused' else
+                                                                               val.strip().splitlines()[-1]))
             return
         if val.get('nohash'):
             QMessageBox.warning(self, TITLE, f'У {val["nohash"]} файлов, которые пойдут на диск, нет хеша (SHA-256). '
-                                'Задания не создаются: сначала «Отсканировать эти папки» в ячейке «Копировать на диск».')
+                                'Копирование не начинается: сначала «Посчитать хеш» в ячейке «Копировать на диск».')
             return
-        body, new = tasks_html(val, self.disk_name, note)
         toc = val.get('toc')
-        blocked = toc is not None and (not toc['connected'] or toc['problems'])
         extra = None
-        if blocked and toc['connected']:
+        if toc is not None and toc['connected'] and toc['problems']:
             sub = [p['folder'] for p in toc['problems'] if p['folder'] is not None]
             if sub:
                 extra = (f'Пересканировать эти папки ({len(sub)})…', lambda: self.rescan(disk, sub))
         self.last_tasks = val
-        dlg = TextDialog(self, f'Подготовить задания - {disk}', body,
-                         ok_text=f'Создать задания ({len(new)})' if new and not blocked else None, width=1000, height=640,
-                         extra=extra)
-        if dlg.exec() != QDialog.Accepted or not new or blocked:
+        mode = start_mode(val)
+        dlg = StartDialog(self, self.start_title(disk, val), start_html(val, self.disk_label, note), mode, extra=extra)
+        if dlg.exec() != QDialog.Accepted:
             return
-        if QMessageBox.question(self, TITLE, f'Создать заданий: {len(new)} в «Запускаемые скрипты»?\n\nНичего не '
-                                'копируется и не запускается: запускаете задания вы - в разделе «Задания на копирование».') != QMessageBox.Yes:
+        if mode == 'running':
+            self.win.open_page(disk_ui.TASKS_PAGE)
+            return
+        if mode != 'start':
+            return
+        if not val['new']:                                # все задания набора уже созданы - только запуск
+            self.start_set([s['name'] for s in val['specs']])
             return
         self.set_writing(True)
         self.win.bg.run(safe, tasks_create, disk, nums, spec_keys(val['specs']),
@@ -152,13 +177,28 @@ class TasksFlow:
             self.show_tasks(disk, nums, ('ok', data), note='Пока вы смотрели, отметки, база, место на дисках или '
                                                            'сам носитель изменились: проверьте окно ещё раз.')
             return
-        specs = data['res']['specs']
-        made = [s for s in specs if not s.get('exists')]
-        diff = data.get('differs')
-        msg = (f'Создано заданий: {len(made)}' + (f' (уже были подготовлены раньше: {len(specs) - len(made)})'
-                                                   if len(specs) != len(made) else '') + '.')
-        if diff:
-            msg += '\n\nВНИМАНИЕ: созданный список отличается от подтверждённого (данные изменились в последний момент). ' \
-                   'Проверьте их в «Заданиях на копирование» перед запуском.'
-        if QMessageBox.question(self, TITLE, msg + '\n\nПерейти в «Задания на копирование»?') == QMessageBox.Yes:
+        if data.get('differs'):                           # данные изменились в последний миг - не запускать вслепую
+            QMessageBox.warning(self, TITLE, 'Задания созданы, но список отличается от подтверждённого (данные '
+                                'изменились в последний момент). Копирование не запущено: проверьте задания в «3. '
+                                'Копирование» и запустите их там.')
             self.win.open_page(disk_ui.TASKS_PAGE)
+            return
+        self.start_set([s['name'] for s in data['res']['specs']])
+
+    def start_set(self, names):
+        """Запуск набора names через «Задания на копирование»: свежий список заданий (в фоне), затем ждущие и прерванные
+        задания набора - TasksPage.launch (по очереди, без второго вопроса; её проверки «уже идёт», «перемещение с того
+        же носителя» - те же); открыть «3. Копирование»."""
+        self.sum_state.setText('Запускаю копирование…')
+        self.win.bg.run(load_all, ok=lambda res: self.launch_set(set(names), res))
+
+    def launch_set(self, names, res):
+        self.sum_state.setText('')
+        tp = self.win.page(disk_ui.TASKS_PAGE)
+        tp.render(*res)
+        sel = [r for r in tp.rows if r['task'] in names and r['state'] in WAIT]
+        self.win.open_page(disk_ui.TASKS_PAGE)
+        if not sel:
+            QMessageBox.information(self, TITLE, 'Запускать нечего: задания этого набора уже идут или готовы.')
+            return
+        tp.launch(sel, sequential=True, confirmed=True)

@@ -15,9 +15,10 @@ from .view_tree import TreeView
 from .view_file import FileView
 from .view_buttons import ButtonsView
 from .view_sync import SyncView
+from .view_rehash import REHASH_TIP, RehashView
 
 
-class FileListWindow(TableView, TreeView, FileView, ButtonsView, SyncView, QWidget):
+class FileListWindow(TableView, TreeView, FileView, ButtonsView, SyncView, RehashView, QWidget):
     """Отдельное окно (не вкладка). spec - аргументы service.file_list: kind, disk, folder, num, target, drafts."""
 
     def __init__(self, win, page=None, **spec):
@@ -156,11 +157,15 @@ class FileListWindow(TableView, TreeView, FileView, ButtonsView, SyncView, QWidg
         self.rescan_btn.setToolTip('Папки выделенных файлов (вложенные - вместе с верхней) - в окно пересканирования с '
                                    'выбором типов. Сначала - вопрос с числом папок и файлов.')
         self.rescan_btn.clicked.connect(self.rescan)
+        self.rehash_btn = QPushButton('Досчитать хеш у выбранных…')        # 18.11.2026: только список «без хеша»
+        self.rehash_btn.setToolTip(REHASH_TIP)
+        self.rehash_btn.clicked.connect(self.rehash_selected)
+        self.rehash_btn.setVisible(self.kind == 'nohash')
         self.refresh_btn = QPushButton('Обновить')
         self.refresh_btn.clicked.connect(self.load)
         close = QPushButton('Закрыть')
         close.clicked.connect(self.close)
-        for w in (self.open_btn, self.excel_btn, self.rescan_btn):
+        for w in (self.open_btn, self.excel_btn, self.rescan_btn, self.rehash_btn):
             bl.addWidget(w)
         bl.addStretch()
         bl.addWidget(self.refresh_btn)

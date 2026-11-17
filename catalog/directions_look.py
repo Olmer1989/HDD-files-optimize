@@ -131,6 +131,12 @@ def tag_label(text, look):
     return lab
 
 
+def disk_line(disk, by):
+    """Строка диска без оформления, как в карточке: «H: Бэкап фото и видео — HDD45» (без буквы - «Бэкап — HDD45»)."""
+    r = by.get(disk) or {'disk': disk, 'label': '', 'letter': ''}
+    return ' — '.join(x for x in (disk_ui.disk_place(r) if disk_ui.disk_name(r) else r.get('letter'), disk) if x)
+
+
 def disk_row_html(disk, by, free, writing, copy_no=0):
     """Строка диска в карточке: «I: My Book — HDD55 · свободно 421 ГБ» (подключён) или «My Book — HDD55» и плашка
     «не подключён». Цвет: оранжевый - направление отмечено галочкой; зелёный - нет; неподключённый - бледнее.
@@ -139,9 +145,7 @@ def disk_row_html(disk, by, free, writing, copy_no=0):
     r = by.get(disk) or {'disk': disk, 'label': '', 'letter': ''}
     on = bool(r.get('letter'))
     color, bold = disk_ui.dir_disk_color(on, writing)
-    label = disk_ui.disk_name(r)
-    text = html_esc(' — '.join(x for x in (disk_ui.disk_place(r) if label else r.get('letter'), disk) if x)
-                    + (f' (копия {copy_no})' if copy_no else ''))
+    text = html_esc(disk_line(disk, by) + (f' (копия {copy_no})' if copy_no else ''))
     w = 'bold' if bold else 'normal'
     out = f'<span style="color:{color}; font-weight:{w}">{text}</span>'
     size = disk_ui.tb_text(r.get('total_bytes'))

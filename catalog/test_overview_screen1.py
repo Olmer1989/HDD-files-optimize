@@ -4,12 +4,21 @@
 
 Запуск из папки catalog:  python -m unittest test_overview_screen1
 """
+import os
+import sys
 import unittest
+from pathlib import Path
 
-import directions_look as dl
-import directions_section as ds
-import disk_ui
-from test_directions_page import DirBase, sv     # noqa: F401 - обвязка (временная база, три направления)
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+sys.path.insert(0, str(Path(__file__).resolve().parent))      # запуск и из корня проекта (catalog.test_overview_screen1)
+from PySide6.QtCore import QThreadPool, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+
+import directions_look as dl  # noqa: E402
+import directions_section as ds  # noqa: E402
+import disk_ui  # noqa: E402
+from test_directions_page import QAPP, DirBase, sv, wait     # noqa: F401 - обвязка (временная база, три направления)
 
 BY = {'HDD45': dict(disk='HDD45', label='WD20 - 2 ТБ - Бэкап фото и видео', letter='H:', total_bytes=16_000_900_165_632),
       'HDD78': dict(disk='HDD78', label='WD40 - 4 ТБ - Путешествия', letter='', total_bytes=4_000_787_030_016),
@@ -84,6 +93,73 @@ class ScreenTest(DirBase):
         import app
         dirs = sv.directions()
         self.assertEqual(app.shown_disks(dirs, ['Н3'])[2], 'у А3 диск не назначен')
+
+
+class ContentWindowTest(DirBase):
+    """18.11.2026: таблица «Диски направлений: что на них лежит по базе» - не на «Обзоре», а в окне «Содержимое
+    выбранного диска» (кнопка «Подробнее о содержимом диска…» в карточке с диском)."""
+
+    def windows(self):
+        from disk_content_dialog import DiskContentDialog
+        return [w for w in QApplication.topLevelWidgets() if isinstance(w, DiskContentDialog) and w.isVisible()]
+
+    def tearDown(self):
+        for w in self.windows():
+            w.close()
+        super().tearDown()
+
+    def test_no_table_on_overview(self):
+        import app
+        ov = app.OverviewPage(self.win)
+        ov.refresh()
+        self.assertTrue(wait(lambda: ov.ov is not None and ov.dirs.data is not None), self.win.errors)
+        texts = ' '.join(w.text() for w in ov.findChildren(ds.QLabel))
+        self.assertNotIn('Диски направлений', texts)
+        self.assertIn('Требует внимания', texts)
+        self.assertFalse(hasattr(ov, 'dt'))
+
+    def test_button_only_with_disk(self):
+        s = self.section()
+        for num in ('Н1', 'Н2'):
+            self.assertEqual(s.cards[num].btn_more.text(), 'Подробнее о содержимом диска…')
+        self.assertIsNone(s.cards['Н3'].btn_more)                                   # без диска - кнопки нет
+        self.assertNotIn(ds.MORE_TEXT, [b.text() for b in s.cards['Н3'].findChildren(ds.QPushButton)])
+
+    def test_click_opens_one_window_with_card_disks(self):
+        s = self.section()
+        s.data['by']['HDD91'] = dict(disk='HDD91', label='WD20 - 2 ТБ - Бэкап фото и видео', letter='H:')
+        card = s.cards['Н2']
+        was = card.box.isChecked()
+        QTest.mouseClick(card.btn_more, Qt.LeftButton)
+        self.assertEqual(card.box.isChecked(), was)                                  # галочку не трогает
+        w = s.content['Н2']
+        self.assertEqual(w.windowTitle(), 'Содержимое выбранного диска — H: Бэкап фото и видео — HDD91')
+        self.assertFalse(w.isModal())
+        self.assertTrue(wait(lambda: w.rows), self.win.errors)
+        self.assertEqual([r['disk'] for r in w.rows], ['HDD91'])                     # только диск этой карточки
+        self.assertIn('Числа — по базе', w.checked.text())
+        self.assertIn('Хеш не', w.dt.text())
+        QTest.mouseClick(card.btn_more, Qt.LeftButton)                               # второй щелчок - то же окно
+        self.assertIs(s.content['Н2'], w)
+        self.assertEqual(len(self.windows()), 1)
+        s.cards['Н1'].btn_more.click()                                               # направление на двух дисках
+        w1 = s.content['Н1']
+        self.assertTrue(wait(lambda: w1.rows), self.win.errors)
+        self.assertEqual([r['disk'] for r in w1.rows], ['HDD45', 'HDD77'])
+        self.assertEqual(len(self.windows()), 2)
+
+    def test_close_before_load(self):
+        s = self.section()
+        w = s.show_content('Н1')
+        self.assertEqual(w.wait.text(), 'Считаю…')
+        w.close()                                                                    # ответ фона ещё не пришёл
+        QThreadPool.globalInstance().waitForDone(10000)
+        for _ in range(5):
+            QAPP.processEvents()
+        self.assertEqual(self.win.errors, [])
+        w2 = s.show_content('Н1')                                                    # закрытое - открывается заново
+        self.assertIsNot(w2, w)
+        self.assertTrue(wait(lambda: w2.rows), self.win.errors)
 
 
 if __name__ == '__main__':

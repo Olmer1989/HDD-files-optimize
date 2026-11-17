@@ -10,7 +10,8 @@ from hb_core.directions import R_DIR
 from ui_common import timed
 
 from .common import (CHUNK, C_CHECK, C_FILES, C_GB, C_HAVE, C_NAME, C_OTHER, C_PHOTO, C_VIDEO, EXC_BG, EXC_FG, FILLED,
-                     GRAY_ROLE, MIME, MORE_ROLE, PALE, PART_ROLE, ROLE, SEL_BG, SEP, TAG_ROLE, folders_mime, last)
+                     GRAY_ROLE, MIME, MORE_ROLE, NONE_BG, PALE, PART_ROLE, ROLE, SEL_BG, SEP, TAG_ROLE, folders_mime,
+                     last)
 from .texts_cell import BLUE, EXCEPT, GRAY, ONLY, gb, num, plural
 
 
@@ -221,8 +222,11 @@ class TreeView:
         name = f'{self.disk} (весь носитель)' if not f else last(f)
         hv = None if m.have_sub is None else m.have_sub.get(f)
         r_ = m.route.get(f)
+        on = bool(f and ck and ck['on'])
+        red = on and mode == EXCEPT                       # «Все, кроме выбранных»: выбранные НЕ копируются - красным
+        empty = on and not red and self.nothing_to_copy(f)
         view = (name, mode, tuple(sorted(lk.items())), tuple(sorted(ck.items())) if ck else None, files, size, n, b,
-                m.have_sub is None, tuple(hv) if hv else None, (r_.state, r_.num) if r_ is not None else None)
+                m.have_sub is None, tuple(hv) if hv else None, (r_.state, r_.num) if r_ is not None else None, empty)
         if self.views.get(f) == view and self.items.get(f) is it:
             return False
         self.views[f] = view
@@ -251,9 +255,7 @@ class TreeView:
                 it.setData(C_CHECK, GRAY_ROLE, not ck['checkable'] or bool(ck['gray']))
                 it.setToolTip(C_CHECK, ck['tip'] or ('Снять галочку' if ck['on'] else 'Поставить галочку'))
                 it.setData(C_NAME, TAG_ROLE, ck['tag'] or None)
-            on = bool(f and ck and ck['on'])
-            red = on and mode == EXCEPT                   # «Все, кроме выбранных»: выбранные НЕ копируются - красным
-            bg = QBrush(QColor(EXC_BG if red else SEL_BG)) if on else QBrush()
+            bg = QBrush(QColor(EXC_BG if red else NONE_BG if empty else SEL_BG)) if on else QBrush()
             for c in range(C_CHECK, C_HAVE + 1):
                 it.setBackground(c, bg)
             if lk['dirty'] in ('own', 'drop'):
@@ -291,6 +293,25 @@ class TreeView:
         finally:
             self.painting = False
         return True
+
+    def nothing_to_copy(self, f):
+        """18.11.2026 (решение владельца): в папке с галочкой копировать НЕЧЕГО - всё уже есть на диске назначения или
+        нет файлов выбранного типа: у группы задания её решающей отметки (своей или папки выше) в принятом итоге
+        «копировать» - 0 файлов. Итога ещё нет или группы в нём нет - False (фон зелёный, как раньше)."""
+        P = self.plan[0] if self.plan else None
+        r = self.model.route.get(f)
+        if P is None or not self.dest or r is None or r.mark is None:
+            return False
+        cg = getattr(self, 'copy_groups', None)
+        if cg is None or cg[0] is not P or cg[1] != self.dest:
+            groups = {}
+            for g in P.groups.values():
+                if g['num'] == self.dest and isinstance(g['folder'], str):
+                    k = g['folder'].lower()
+                    groups[k] = groups.get(k, 0) + g['copy'][0]
+            self.copy_groups = (P, self.dest, groups)
+        folder = (r.mark.path or f.split(SEP, 1)[0]).lower()     # отметка всего носителя - группа по папке верхнего уровня
+        return self.copy_groups[2].get(folder) == 0
 
     @timed('Разбор: update_items')
     def update_items(self):

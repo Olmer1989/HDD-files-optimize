@@ -126,7 +126,7 @@ class Stage17AutosaveTest(PageBase):
         self.p.undo()
         self.settle()
         self.assertIsNone(self.p.model.saved_ms.get('Работа'))
-        self.assertFalse(self.p.undo_btn.isEnabled())
+        self.assertEqual(self.p.model.undo_stack, [])                         # кнопки на экране нет (18.11.2026)
 
 
 class Stage17TreeTest(PageBase):

@@ -137,7 +137,7 @@ class ChoiceTest(PageBase):
         self.p.set_dest('Н2')
         self.p.use_choice()
         self.assertEqual(self.p.dest, 'Н1')
-        self.assertIn('В «Обзоре» отмечено ещё: Н2 Работа', self.p.where.text())   # первое по номеру - и сказано
+        self.assertIn('В «Обзоре» отмечено ещё: А2 Работа', self.p.where.text())   # первое по номеру - и сказано
         self.mark(('', 'Н2'))                                                    # сохранённый режим - «всё в Н2»
         dp.save_choice(['Н1'])
         self.p.load_disk(SRC, keep=False)
@@ -168,8 +168,8 @@ class LayoutTest(PageBase):
                          'Накопитель (не подключён) — HDD61 (по журналу сканирования дисков)')   # метки нет - «Накопитель»
         d1 = sv.directions()['Н1']
         # этап 12: направление на двух дисках - коротко, диски не сливаются в одну строку
-        self.assertEqual(rp.dest_text(d1, rows), 'Н1 Семейный архив — H: и HDD77 (две копии)')
-        self.assertIn(f'<span style="color:{rp.ORANGE}"><b>Н1 Семейный архив</b></span>', rp.dest_html(d1, rows))
+        self.assertEqual(rp.dest_text(d1, rows), 'А1 Семейный архив — H: и HDD77 (две копии)')
+        self.assertIn(f'<span style="color:{rp.ORANGE}"><b>А1 Семейный архив</b></span>', rp.dest_html(d1, rows))
         h = rp.head_html(d1, rows, {'HDD45': ('H:', 421 * 1024 ** 3, 2 * 10 ** 12, 4096)})
         # этап 16: «Диск назначения: H: Бэкап фото и видео — HDD45, 2 ТБ · свободно …» - диск вместо направления
         self.assertTrue(h.startswith('Диск назначения — две копии:<br>'), h)
@@ -195,7 +195,7 @@ class LayoutTest(PageBase):
         self.assertEqual(rp.tb_text(1500301910016), '1,5 ТБ')
         o = rp.head_html(d3, [dict(disk='HDD55', label='', letter='I:')], others=[types.SimpleNamespace(num='Н7',
                                                                                                          name='Ещё')])
-        self.assertIn('отмечено ещё: Н7 Ещё', o)
+        self.assertIn('отмечено ещё: А7 Ещё', o)
         for x in (rp.carrier_text(rows[0]), rp.dest_text(d1, rows)):
             self.assertNotIn('ТБ)', x)                                          # ни модели, ни объёма
         # в окне: строки списков по той же схеме, подключённые сверху (в тестах дисков нет - все «не подключён»)
@@ -207,8 +207,8 @@ class LayoutTest(PageBase):
         self.assertTrue(pl('HDD60').endswith('(не подключён)'))
         self.assertIn(rp.carrier_text(by['HDD60']), texts)
         dest = [self.p.dest_box.itemText(i) for i in range(self.p.dest_box.count())]
-        self.assertEqual(dest, ['Н1 Семейный архив — HDD45 и HDD77 (две копии)',
-                                f'{pl("HDD91")} — Н2 Работа — HDD91 (по журналу сканирования дисков)'])  # Н3 без диска
+        self.assertEqual(dest, ['А1 Семейный архив — HDD45 и HDD77 (две копии)',
+                                f'{pl("HDD91")} — А2 Работа — HDD91 (по журналу сканирования дисков)'])  # Н3 без диска
         self.assertIn(rp.ORANGE, self.p.dest_box.current_html())
         self.assertEqual([w.text() for w in (self.p.mode_only, self.p.mode_every, self.p.mode_except)],
                          ['Только выбранные папки', 'Все папки', 'Все, кроме выбранных'])

@@ -8,13 +8,14 @@ from hb_core.razbor_base import COPY_ROOT
 
 from directions_choice import save_choice, section_data
 from directions_look import (CARD_BG, CARD_BORDER, CHECKED_BG, GO_TEXT, OFF, OFF_BADGE, ON, RAZBOR_PAGE, FlowLayout,
-                             disk_row_html, html_esc, kind_tags, show_num, tag_label)
+                             disk_line, disk_row_html, html_esc, kind_tags, show_num, tag_label)
 from directions_dialog import ASSIGN, CARD, DirectionDialog
 
 
 class DirectionCard(QFrame):
     """Одна строка-карточка направления: галочка · имя, описание, диски, «Что копировать:» тегами, плашки «📁 Файлы
-    будут скопированы в папку …» (по одной на диск) · кнопка «Изменить» / «Назначить диск»."""
+    будут скопированы в папку …» (по одной на диск) · кнопка «Изменить» / «Назначить диск», под ней у карточки с
+    диском - «Подробнее о содержимом диска…» (окно disk_content_dialog)."""
 
     def __init__(self, section, d):
         super().__init__()
@@ -82,7 +83,17 @@ class DirectionCard(QFrame):
         self.btn.setToolTip('Имя, описание и «что копировать». Диски здесь не меняются.' if d.disks else
                             'Диск выбирается один раз — при первом назначении.')
         self.btn.clicked.connect(lambda: section.edit(self.num) if self.d.disks else section.assign(self.num))
-        lay.addWidget(self.btn, 0, Qt.AlignTop)
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        right.addWidget(self.btn)
+        self.btn_more = None                 # «Подробнее о содержимом диска…» - только у карточки с диском (18.11.2026)
+        if d.disks:
+            self.btn_more = QPushButton(MORE_TEXT)
+            self.btn_more.setToolTip('Окно: что лежит на диске по базе, какие копии не проверены, что пересканировать.')
+            self.btn_more.clicked.connect(lambda: section.show_content(self.num))
+            right.addWidget(self.btn_more)
+        right.addStretch(1)
+        lay.addLayout(right)
 
     def mousePressEvent(self, e):                              # noqa: N802
         """Щелчок по строке целиком (надписи без ссылок пропускают щелчок сюда; кнопка забирает его себе) - галочка."""
@@ -109,6 +120,7 @@ class DirectionCard(QFrame):
             lab.setText(folder_text(x, data['by'], i if len(self.d.disks) > 1 else 0))
 
 
+MORE_TEXT = 'Подробнее о содержимом диска…'
 FOLDER_CSS = 'color:#37474f; background:#f5f7fa; border:1px solid #b0bec5; border-radius:4px; padding:2px 8px'
 
 
@@ -160,6 +172,7 @@ class DirectionsSection(QFrame):
         super().__init__()
         self.win, self.data, self.filling, self.note = win, None, False, ''
         self.cards = {}                    # номер направления -> DirectionCard
+        self.content = {}                  # номер направления -> открытое окно «Содержимое выбранного диска»
         self.on_choice = None              # «Обзор»: перерисовать нижнюю таблицу дисков (щелчок галочки, перечитывание)
         self.on_saved = None               # «Обзор»: после сохранения в диалоге перечитать всё
         self.setObjectName('dirsection')
@@ -327,3 +340,24 @@ class DirectionsSection(QFrame):
         if d is None or d.disks:
             return
         DirectionDialog(self, self.data, d, mode=ASSIGN).exec()
+
+    # --- окно «Содержимое выбранного диска» ---
+    def show_content(self, num_):
+        """Окно с таблицей дисков этого направления (у направления на нескольких дисках - все его диски). Уже открыто -
+        поднять его, второе не открывать."""
+        d = self.data['dirs'].get(num_) if self.data else None
+        if d is None or not d.disks:
+            return None
+        old = self.content.get(num_)
+        if old is not None and not old.gone:
+            old.show()
+            old.raise_()
+            old.activateWindow()
+            return old
+        from disk_content_dialog import DiskContentDialog
+        line = ', '.join(disk_line(x, self.data['by']) for x in d.disks)
+        dlg = DiskContentDialog(self.win, d.disks, line, self.window())
+        self.content[num_] = dlg
+        dlg.show()
+        dlg.load()
+        return dlg

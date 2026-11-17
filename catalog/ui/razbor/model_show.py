@@ -8,6 +8,8 @@ from hb_core import razbor as rz
 from hb_core.consts import CAT_OF_TYPE, N_TYPES
 from hb_core.directions import R_DIR, R_SKIP, R_UNSET
 
+from directions_look import show_num                 # «Н2» на экране - «А2» (18.11.2026)
+
 from .common import INHERIT, SEP, SKIP_INH, SKIP_OWN, UNSET_BG, dir_colors, last
 
 
@@ -101,7 +103,7 @@ class ShowPart:
             return dict(kind='service', num=None, own=False, dirty=None, tip=c['tip'], bg=None)
         if r.state == R_DIR:
             kind, d = 'dir', self.dirs.get(r.num)
-            head = f'{r.num} {d.label() if d else ""}'.strip()
+            head = f'{show_num(r.num)} {d.label() if d else ""}'.strip()
             if r.moved:
                 head += self.moved_word(r)
             bg = dir_colors(r.num)[0 if own else 1]
@@ -234,6 +236,88 @@ class ShowPart:
                         res[x][0] += n
                         res[x][1] += b
         return {x: tuple(v) for x, v in res.items()}
+
+    def direct_types(self):
+        """Файлы прямо в папке (без подпапок) по 9 типам: {папка: ([n0..n8], [b0..b8])} - из сумм таблицы folders, как в
+        ядре (razbor.planner: «прочие» n3 минус n5..n8, tree['extra']). От отметок не зависит - один раз на загрузку."""
+        got = getattr(self, 'direct_cache', None)
+        if got is not None and got[0] is self.folders:
+            return got[1]
+        extra, z = self.tree.get('extra') or {}, ((0,) * (N_TYPES - 5),) * 2
+        sub = {}
+        for f in self.order:
+            v, ex = self.folders[f], extra.get(f, z)
+            n, b = list(v[2]) + list(ex[0]), list(v[3]) + list(ex[1])
+            n[hb.F_OTHER] -= sum(ex[0])
+            b[hb.F_OTHER] -= sum(ex[1])
+            sub[f] = (n, b)
+        direct = {f: (list(n), list(b)) for f, (n, b) in sub.items()}
+        for f in self.order:
+            p = hb.parent_of(f) if f else None
+            if p in direct:
+                for i in range(N_TYPES):
+                    direct[p][0][i] -= sub[f][0][i]
+                    direct[p][1][i] -= sub[f][1][i]
+        self.direct_cache = (self.folders, direct)
+        return direct
+
+    def not_on_disk(self, num_):
+        """«На HDD09 нет на H:» (18.11.2026, решение владельца) по каждому диску направления num_, кроме самого носителя:
+        файлы ВСЕГО носителя тех типов, что копирует направление (те же типы, «документы рядом» и исключения, что у
+        колонки «Уже есть» и в ядре), без подтверждённой копии с тем же SHA-256 на этом диске (маски razbor_have).
+        «В отмеченных» - папки, идущие в num_ (столько же, сколько «Копировать на H:» в ячейке: туда входят и файлы
+        без хеша - marked_nohash); «в неотмеченных» - остальные файлы с хешем; файлы без хеша в неотмеченных папках -
+        отдельно (nohash): есть ли они на диске, проверить нельзя. Только суммы по папкам, без запроса к базе.
+        -> {диск: dict(marked, marked_nohash, unmarked, nohash - (файлов, байт), folders - {папка: [неотм. n, b,
+        отм. n, b, без хеша n, b, отм. без хеша n, b]} по поддереву)} или None (ещё не посчитано). Кэш - до recalc."""
+        cache = getattr(self, 'have_disk_cache', None)
+        if cache is None:
+            cache = self.have_disk_cache = {}
+        if ('not', num_) not in cache:
+            cache[('not', num_)] = self._not_on_disk(num_)
+        return cache[('not', num_)]
+
+    def _not_on_disk(self, num_):
+        d = self.dirs.get(num_)
+        if self.have is None or d is None or not d.disks or any(x not in self.have_disks for x in d.disks):
+            return None
+        near, direct = self.docs_near_map(), self.direct_types()
+        types_all = [k for k, cat in CAT_OF_TYPE.items() if cat in d.cats]
+        types_far = [k for k in types_all if not (CAT_OF_TYPE[k] == hb.CAT_DOC and d.docs_near)]
+        bits = {x: 1 << self.have_disks.index(x) for x in d.disks if x != self.disk}
+        own = {x: {} for x in bits}
+        for f in self.order:
+            types = types_all if near.get(f) else types_far
+            masks = self.have.get(f) or {}
+            r = self.route.get(f)
+            marked = r is not None and r.state == R_DIR and r.num == num_
+            un = sum(direct[f][0][k] for k in types) - sum(c[k] for c in masks.values() for k in types)
+            ub = sum(direct[f][1][k] for k in types) - sum(c[N_TYPES + k] for c in masks.values() for k in types)
+            for x, bit in bits.items():
+                n = sum(c[k] for mask, c in masks.items() if not mask & bit for k in types)
+                b = sum(c[N_TYPES + k] for mask, c in masks.items() if not mask & bit for k in types)
+                if n or un:
+                    v = own[x].setdefault(f, [0] * 8)
+                    if marked:
+                        v[2:4] = [n + un, b + ub]
+                        v[6:8] = [un, ub]
+                    else:
+                        v[0:2] = [n, b]
+                        v[4:6] = [un, ub]
+        res = {}
+        for x in bits:
+            sub = {}
+            for f in reversed(self.order):                # от глубоких к мелким: сумма по поддереву
+                v, cur = own[x].get(f), sub.get(f)
+                if v:
+                    cur = sub[f] = [a + b for a, b in zip(cur, v)] if cur else list(v)
+                if f and cur:
+                    p = hb.parent_of(f)
+                    sub[p] = [a + b for a, b in zip(sub[p], cur)] if p in sub else list(cur)
+            t = sub.get('', [0] * 8)
+            res[x] = dict(unmarked=(t[0], t[1]), marked=(t[2], t[3]), nohash=(t[4], t[5]), marked_nohash=(t[6], t[7]),
+                          folders=sub)
+        return res
 
     def batch(self):
         """Неизменяемая копия пакета для записи: [(физический путь, решение)] и ключи."""

@@ -5,6 +5,8 @@ from hb_core import razbor as rz
 
 import service as sv
 
+from directions_look import show_num                 # «Н2» на экране - «А2» (18.11.2026)
+
 from .texts_cell import GREEN, ORANGE, RED, esc, gb, num
 
 
@@ -52,7 +54,7 @@ def tasks_html(val, disk_name, note=''):
         d = P.dirs[n]
         bad = '; '.join(f'на {rz.disk_word(x)}: нужно {gb(cap[x]["need"] + cap[x]["reserve"])} ГБ с запасом, свободно '
                         f'{gb(cap[x]["free"])} ГБ' for x in d.disks if cap.get(x, {}).get('state') == 'short')
-        h.append(f'<p style="color:{RED}"><b>{esc(d.num)} {esc(d.name)} не помещается</b> ({esc(bad)}) — заданий для '
+        h.append(f'<p style="color:{RED}"><b>{esc(show_num(d.num))} {esc(d.name)} не помещается</b> ({esc(bad)}) — заданий для '
                  'него не будет (ни на один его диск). Снимите галочки у части папок.</p>')
     if specs:
         h.append('<table cellpadding="3" cellspacing="0" border="1" style="border-collapse:collapse" width="100%">'

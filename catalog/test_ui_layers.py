@@ -18,8 +18,8 @@ from test_modules import imports, top        # noqa: E402
 # Экраны по блокам (шаг А разбивки 17.11.2026, docs/СТРУКТУРА_ПРОГРАММЫ.md): ранги слоёв каждого пакета ui/<экран>
 # (view_*, flow_* - 6). Файл пакета импортирует из пакета только файлы СТРОГО ниже рангом: view_* и flow_* друг друга не
 # импортируют. Новый пакет ui/* без строки здесь - ошибка test_ui_layers.
-UI_RANK = {'razbor': {'texts_cell': 0, 'common': 1, 'texts_tasks': 1, 'texts_head': 2, 'model_marks': 3, 'model_checks': 3,
-                      'model_show': 3, 'model': 4, 'dialogs': 5, 'page': 7},
+UI_RANK = {'razbor': {'texts_cell': 0, 'common': 1, 'texts_tasks': 1, 'texts_start': 1, 'texts_head': 2, 'model_marks': 3, 'model_checks': 3,
+                      'model_show': 3, 'model': 4, 'dialogs': 5, 'dialog_start': 5, 'page': 7},
            'filelist': {'texts_list': 0, 'common': 1, 'model_rows': 2, 'model_table': 3, 'page': 7},
            'tasks': {'common': 0, 'texts_words': 1, 'texts_rows': 2, 'model_journal': 3, 'model_rules': 3,
                      'model_run': 3, 'model_move': 3, 'model_load': 4, 'widgets': 5, 'page': 7},

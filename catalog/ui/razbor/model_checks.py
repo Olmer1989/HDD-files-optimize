@@ -6,6 +6,8 @@ from PySide6.QtCore import Qt
 from hb_core import api as hb
 from hb_core.directions import R_DIR, R_SKIP
 
+from directions_look import show_num                 # «Н2» на экране - «А2» (18.11.2026)
+
 from .common import INHERIT, SEP, SKIP
 
 
@@ -107,12 +109,12 @@ class ChecksPart:
         tag, tip = '', ''
         if own is not None and own.kind == R_DIR and own.num != num:
             d = self.dirs.get(own.num)
-            tag = own.num
-            tip = f'Папка отмечена для «{own.num} {d.name if d else ""}» ({hb.disk_nums(d.disks) if d and d.disks else "диск не назначен"}).'
+            tag = show_num(own.num)                       # 18.11.2026: на экране «А2», в данных «Н2»
+            tip = f'Папка отмечена для «{show_num(own.num)} {d.name if d else ""}» ({hb.disk_nums(d.disks) if d and d.disks else "диск не назначен"}).'
         elif r.state == R_DIR and r.num != num:
             d = self.dirs.get(r.num)
             src = 'всего носителя' if r.mark is not None and r.mark.path == '' else f'папки «{r.mark.path}»' if r.mark else ''
-            tip = f'Идёт в «{r.num} {d.name if d else ""}» (от {src}).'
+            tip = f'Идёт в «{show_num(r.num)} {d.name if d else ""}» (от {src}).'
         if mode == 'except':
             on = r.state == R_SKIP
             own_skip = own is not None and own.kind == R_SKIP

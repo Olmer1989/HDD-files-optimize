@@ -47,6 +47,7 @@ class SelectView:
         self.open_btn.setEnabled(bool(t) and not off)
         self.rescan_btn.setEnabled(bool(t) and not off and len(disks) == 1)
         self.missing_btn.setEnabled(bool(t))
+        self.update_rehash()                              # «Досчитать хеш фото и видео» - по подключению носителя
 
     def selected(self):
         """Выбрана одна папка: «когда измерены хеши» - в фоне; ответ для уже сменившейся папки не показывается."""

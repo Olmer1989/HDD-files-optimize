@@ -3,8 +3,8 @@
 Слои: texts_disks, texts_tree, texts_info -> common -> view_*, flow_folder -> page. view_* и flow_* друг друга не
 импортируют; никто в пакете не импортирует переходник disks_page.py. Пакет без импортов.
 Дерево папок - view_tree, строка сведений над деревом и столбец «Без хеша» - view_info, действия с папкой -
-flow_folder, выбор папок и панель «Выбрано папок» - view_select, таблица «Носители» - view_disks, поиск - view_search,
-рисование полоски состава и плашки решения - view_delegate.
+flow_folder, «Досчитать хеш» фото и видео - flow_rehash, выбор папок и панель «Выбрано папок» - view_select,
+таблица «Носители» - view_disks, поиск - view_search, рисование полоски состава и плашки решения - view_delegate.
 
 Прежняя строка документации disks_page.py:
 

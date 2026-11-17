@@ -19,6 +19,7 @@ class InfoView:
         if res.get('nohash') is not None:
             self.nohash[disk] = res['nohash']
             self.fill_nohash(disk)
+            self.update_rehash()
         if disk != self.disk or self.found:
             return
         r = self.row_of(disk)
@@ -37,6 +38,7 @@ class InfoView:
             self.nohash_busy.discard(disk)
             self.nohash[disk] = res
             self.fill_nohash(disk)
+            self.update_rehash()
         self.win.bg.run(sv.nohash_info, disk, ok=got, quiet=True)
 
     def nohash_cell(self, it):

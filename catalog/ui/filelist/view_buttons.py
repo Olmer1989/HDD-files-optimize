@@ -54,6 +54,7 @@ class ButtonsView:
         self.excel_btn.setEnabled(has and self.model.rowCount() > 0)
         self.rescan_btn.setEnabled(has and bool(self.view.selectionModel().selectedRows())
                                    and bool(getattr(self, 'sel_folders', None)))
+        self.update_rehash_btn()                          # «Досчитать хеш у выбранных…» (список «без хеша»)
 
     def open_explorer(self):
         r = self.current()

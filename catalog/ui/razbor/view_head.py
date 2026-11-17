@@ -13,7 +13,7 @@ import directions_page
 
 from .common import INHERIT, MODE_TEXT, SKIP
 from .texts_cell import EVERY, EXCEPT, GRAY, ONLY, ORANGE, esc, files_word, folders_word, gb
-from .texts_head import MODE_NOTE, dest_html, dest_info_html, dest_text, head_html, legend_html
+from .texts_head import MODE_NOTE, dest_html, dest_info_html, dest_text, head_html
 
 
 class HtmlDelegate(QStyledItemDelegate):
@@ -213,7 +213,6 @@ class HeadView:
         for w in self.mode_btn.values():
             w.blockSignals(False)
         self.mode_hint.setText('• сохраняется…' if '' in m.drafts else '')
-        self.tree_legend.setText(legend_html(mode))
         self.show_head()
 
     def mode_changed(self, k):

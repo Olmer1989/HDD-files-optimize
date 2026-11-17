@@ -20,24 +20,28 @@ from .rescan_run import _scanner, disk_letter
 
 def razbor_tree(disk):
     """Всё для дерева экрана «Разбор носителя» одним вызовом, ничего не пишет: папки носителя из таблицы folders
-    (суммы по поддереву: файлов, байт, число и байты по 5 типам), служебные папки переноса, направления и сохранённые
+    (суммы по поддереву: файлов, байт, число и байты по 5 типам; extra - n5..n8 / b5..b8), служебные папки переноса, направления и сохранённые
     отметки (снимок таблиц под замком - тот же, по которому считает итог), сведения об описи, поколение базы. -> dict."""
     snap = snapshot()
     c = ro()
     try:
         check_disk(c, disk)
-        cols = 'folder, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(5))
-        folders = {}
+        cols = 'folder, files, bytes, ' + ', '.join(f'n{i}, b{i}' for i in range(hb.N_TYPES))
+        folders, extra = {}, {}
         for r in c.execute(f'select {cols} from folders where disk=?', (disk,)):
             folders[r[0]] = (r[1] or 0, r[2] or 0, tuple(r[3 + 2 * i] or 0 for i in range(5)),
                              tuple(r[4 + 2 * i] or 0 for i in range(5)))
+            ex = (tuple(r[3 + 2 * i] or 0 for i in range(5, hb.N_TYPES)),
+                  tuple(r[4 + 2 * i] or 0 for i in range(5, hb.N_TYPES)))
+            if any(ex[0]):
+                extra[r[0]] = ex                   # 18.11.2026: архивы, проекты, музыка, программы (n5..n8) - «нет на H:»
         roots = hb.moved_roots(c, disk)
         st = c.execute('select status, scanned, label from disks where disk=?', (disk,)).fetchone() or ('', None, '')
         issues = c.execute('select count(*) from issues where disk=?', (disk,)).fetchone()[0]
         gen = (c.execute("select value from meta where key='built'").fetchone() or [''])[0]
     finally:
         c.close()
-    return dict(disk=disk, folders=folders, roots=roots, dirs=hb.parse_directions(snap['directions']),
+    return dict(disk=disk, folders=folders, extra=extra, roots=roots, dirs=hb.parse_directions(snap['directions']),
                 rows=hb.mark_rows(disk, snap['decisions']), sig=snap['sig'], built=gen, status=st[0] or '',
                 scanned=st[1], label=st[2] or '', issues=issues)
 

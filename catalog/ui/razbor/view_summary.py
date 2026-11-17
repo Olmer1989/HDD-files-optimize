@@ -38,7 +38,7 @@ class SummaryView:
             if kind == 'ok':
                 self.plan, self.plan_rev = val, snap[1]
                 self.render_summary(*val)
-                self.render_cells()
+                self.update_items()                       # 18.11.2026: розовый фон папок без копирования; и ячейка
                 self.show_head()
                 self.sum_state.setText(f'<span style="color:{GRAY}">Посчитано в {val[3]}.</span>')
                 self.sum_state.setToolTip('Отметки сохраняются сразу; задания строятся из сохранённых.')

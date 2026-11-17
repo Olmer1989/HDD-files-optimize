@@ -223,12 +223,13 @@ def nohash_html(res, fast, label, copy_n, labels=None):
                    else 'файла, который пойдёт')                      # 17.11.2026: число - по просьбе владельца
             h.append(f'<span style="color:{GREEN}">✔ У {who} на {esc(label)}, есть хеш.</span>')
     else:
-        n, m = res['n'], len(res['folders'])
-        h.append(f'<span style="color:{RED}"><b>Без хеша: {files_word(n)}'
-                 + (f' в {num(m)} {plural(m, "папке", "папках", "папках")}' if m else '')
-                 + f'</b> (из того, что пойдёт на {esc(label)})</span>{list_link("nh-list")}'
-                 f'<br><span style="color:{GRAY}">Задания — после того, как у них появится хеш: «Отсканировать эти '
-                 'папки» (только эти папки и только нужные типы файлов).</span>')
+        n, m = res['n'], len(res['folders'])            # 18.11.2026: «✖ У 37 из 128 файлов нет хеша» (решение владельца)
+        h.append(f'<span style="color:{RED}"><b>✖ У {num(n)} из {num(max(n, copy_n))} '
+                 f'{plural(max(n, copy_n), "файла", "файлов", "файлов")} нет хеша</b>'
+                 + (f' (в {num(m)} {plural(m, "папке", "папках", "папках")})' if m else '')
+                 + f'</span>{list_link("nh-list")}'
+                 f'<br><span style="color:{GRAY}">Копирование — после того, как у них появится хеш: «Посчитать хеш» '
+                 '(только эти папки и только нужные типы файлов).</span>')
         if res.get('root'):
             h.append(f'<br><span style="color:{GRAY}">Из них {files_word(res["root"])} прямо в корне носителя — '
                      'пересканирование папок корень не берёт: хеш им даст только полное сканирование носителя.</span>')

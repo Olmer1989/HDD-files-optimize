@@ -18,20 +18,20 @@ class NohashCellTest(PageBase):
         return self.p.nohash_result()
 
     def test_scan_only_these_folders_and_types(self):
-        """«Поход 2010» → 45 и 77: без хеша только описание.doc (документ рядом с фото) - кнопка «Подготовить задания»
-        недоступна, «Отсканировать эти папки (1)» открывает окно с этой папкой и только типом «документы»."""
+        """«Поход 2010» → 45 и 77: без хеша только описание.doc (документ рядом с фото) - кнопка «Начать копирование…»
+        недоступна, «Посчитать хеш (1)» открывает окно с этой папкой и только типом «документы»."""
         self.open()
         self.p.apply(['Поход 2010'], N1)
         nh = self.ready()
         self.assertEqual((nh['n'], nh['folders'], nh['cats']), (1, ['Поход 2010'], [hb.CAT_DOC]))
         cell = self.p.copy_cell
         text = cell.nohash.text()
-        self.assertIn('Без хеша: 1 файл</b>', text.replace(' в 1 папке', ''))
+        self.assertIn('✖ У 1 из 4 файлов нет хеша</b>', text)                   # 18.11.2026 - вид строки владельца
         self.assertIn('в 1 папке', text)
         self.assertFalse(self.p.tasks_btn.isEnabled())
         self.assertIn('Сначала хеш', self.p.tasks_btn.toolTip())
         self.assertTrue(cell.scan_btn.isVisibleTo(cell) and cell.scan_btn.isEnabled())
-        self.assertEqual(cell.scan_btn.text(), 'Отсканировать эти папки (1)…')
+        self.assertEqual(cell.scan_btn.text(), 'Посчитать хеш (1)')
         made = []
 
         class FakeDlg:

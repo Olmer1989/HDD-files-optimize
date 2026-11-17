@@ -171,13 +171,13 @@ def overview(disks=None):
 
 
 def attention(ov, tasks):
-    """«Требует внимания» по видам; пустые группы не включаются. -> [dict(key, title, items)]."""
+    """«Требует внимания» по видам; пустые группы не включаются. -> [dict(key, title, items)]. Группы «Файлы, которых
+    больше нигде нет» нет с 18.11.2026 (решение владельца: вместо неё - строка «нет на H:» в «Разборе носителя»)."""
     groups = []
     bad = [dict(task=t['task'], state=t['state'], done=t['done'], total=t['total'], errors=t['errors'])
            for t in tasks if t['state'] in TASK_ATTENTION or (t['errors'] and t['state'] != 'не запускалось')]
     for key, title, items in (('tasks', 'Задания на копирование с ошибками или прерванные', bad),
                               ('logs', 'Журналы, которые программа не смогла прочитать', list(ov.get('skipped') or [])),
-                              ('unique', 'Файлы, которых больше нигде нет', list(ov.get('unique') or [])),
                               ('warn', 'Прочие предупреждения базы', list(ov.get('warn') or []))):
         if items:
             groups.append(dict(key=key, title=title, items=items))

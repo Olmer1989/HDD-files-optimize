@@ -3,6 +3,7 @@ DisksPage).
 
 Шаг А разбивки (17.11.2026): перенесено из disks_page.py без правки тел (docs/СТРУКТУРА_ПРОГРАММЫ.md)."""
 import service as sv
+from directions_look import show_num                 # «Н1» на экране - «А1» (18.11.2026)
 from overview_page import gb_ru, n_ru
 
 from PySide6.QtCore import Qt
@@ -55,6 +56,9 @@ class TreeView:
             ch.setTextAlignment(k, Qt.AlignRight | Qt.AlignVCenter)
         self.nohash_cell(ch)
         if mark and mark.get('text'):
+            if mark.get('kind') == 'dir':                 # «Н1 Архивный диск №1» -> «А1 …»; в данных - прежний номер
+                num, _, rest = mark['text'].partition(' ')
+                mark = dict(mark, text=f'{show_num(num)} {rest}'.strip())
             ch.setData(T_DEC, MARK_ROLE, mark)
             ch.setToolTip(T_DEC, mark['text'] + ('' if mark.get('own') else f' (от «{mark.get("src")}»)')
                           + '. Сохранённые отметки «Разбора носителя».')

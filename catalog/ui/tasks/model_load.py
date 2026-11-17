@@ -113,3 +113,28 @@ def load_all(root=None, now=None):
         for g in groups:
             g['letter'] = lt.get(g['disk'], '')
     return rows, groups
+
+
+def tasks_info(names, disks, root=None):
+    """Для окна «Начать копирование» (разбор): состояния заданий names и средняя скорость прошлых копирований на каждый
+    диск disks - сумма скопированных байт / сумма времени по ЗАВЕРШЁННЫМ заданиям копирования на этот диск (по их
+    журналам, тот же счёт, что ход задания здесь: progress). -> ({имя: состояние}, {диск: байт/с или None})."""
+    root = Path(root or hb.TASKS)
+    names, acc = set(names), {d: [0, 0] for d in disks}
+    states = {}
+    rows = sv.tasks(root) if root.exists() else []
+    serials = serial_names() if acc else {}
+    for r in rows:
+        if r['task'] in names:
+            states[r['task']] = r['state']
+        if r['kind'] != 'копирование' or r['state'] not in DONE or not acc:
+            continue
+        d = root / r['task']
+        hit = [x for x in task_disks(d, serials, {})['targets'] if x in acc]
+        if hit:
+            p = progress(d, r['kind'])
+            if p['moved_b'] > 0 and p['elapsed'] > 0:
+                for x in hit:
+                    acc[x][0] += p['moved_b']
+                    acc[x][1] += p['elapsed']
+    return states, {d: (b / t if b > 0 and t > 0 else None) for d, (b, t) in acc.items()}

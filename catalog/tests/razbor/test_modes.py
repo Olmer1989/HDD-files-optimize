@@ -125,8 +125,8 @@ class ModesTest(PageBase):
         self.open()
         it = self.item('Работа')
         self.assertEqual(it.checkState(rp.C_CHECK), rp.Qt.Unchecked)
-        self.assertEqual(it.data(rp.C_NAME, rp.TAG_ROLE), 'Н2')                  # мелкая серая метка
-        self.assertIn('Папка отмечена для «Н2 Работа» (91)', it.toolTip(rp.C_NAME))
+        self.assertEqual(it.data(rp.C_NAME, rp.TAG_ROLE), 'А2')                  # мелкая серая метка (на экране «А»)
+        self.assertIn('Папка отмечена для «А2 Работа» (91)', it.toolTip(rp.C_NAME))
         self.assertIn('перейдёт на этот диск', it.toolTip(rp.C_NAME))
         it.setCheckState(rp.C_CHECK, rp.Qt.Checked)                              # перенос - без переспроса
         self.assertEqual(self.p.model.drafts['работа']['verdict'], N1)
@@ -137,7 +137,7 @@ class ModesTest(PageBase):
         self.p.mode_except.setChecked(True)
         ck = self.p.model.check('Смешанная', 'Н1', rp.EXCEPT)
         self.assertFalse(ck['checkable'])
-        self.assertEqual(ck['tag'], 'Н2')
+        self.assertEqual(ck['tag'], 'А2')
         self.assertIn('перетащите', ck['tip'])
         self.assertEqual(self.p.toggle(['Смешанная'], True), 0)
         self.assertEqual(self.p.copy_cell.drop_folders(['Смешанная']), 1)

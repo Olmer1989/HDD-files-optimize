@@ -568,6 +568,12 @@ class OverviewTest(DirBase):
     def table(self, ov):
         return [r['cells'] for r in ov.rows]
 
+    def dialog(self, disks=('HDD45', 'HDD77', 'HDD91')):         # окно «Содержимое выбранного диска» (18.11.2026)
+        w = __import__('disk_content_dialog').DiskContentDialog(self.win, disks, 'тест')
+        w.load()
+        self.assertTrue(wait(lambda: w.checked.text() != ''), self.win.errors)
+        return w
+
     def test_service_counts_direction_disks(self):
         import sqlite3
         with sqlite3.connect(hb.DB) as c:                                            # временная база теста
@@ -585,10 +591,10 @@ class OverviewTest(DirBase):
         self.assertFalse(sv.overview(disks=['HDD99'])['disks_info']['HDD99']['in_base'])   # назначен, описи нет
         self.assertNotIn('main', ov)
         # окно: ничего не отмечено - все диски и приписка; отмечено Н2 - только его диск; Z/U/X красным с подсказкой
-        page = self.page()
+        page = self.dialog()                                                         # окно диска (было - «Обзор»)
         rows = self.table(page)
         self.assertEqual([r[0] for r in rows], ['HDD45', 'HDD77', 'HDD91'])
-        self.assertEqual(page.all_note.text(), 'галочек нет — показаны все')
+        self.assertIn('Числа — по базе', page.checked.text())
         self.assertEqual(app.DISK_HEAD, ['Диск', 'Всего, ГБ', 'при сканировании', 'скопировано программой',
                                          'сверен только размер', 'со слов «Я сделал в Проводнике»',
                                          'хеш устарел (файл изменён)', 'Хеш не считался'])
@@ -623,14 +629,10 @@ class OverviewTest(DirBase):
         self.assertTrue(all(t and t.count('\n') <= 1 for t in tips.values()), tips)
         self.assertIn('«Я сделал в Проводнике»', tips['со слов «Я сделал в Проводнике»'])
         self.assertNotIn('Проводник', tips['сверен только размер'])
-        s = page.dirs
-        s.set_checked('Н2', True)                  # щелчок - сразу
-        self.assertEqual([r[0] for r in self.table(page)], ['HDD91'])
-        self.assertEqual(page.all_note.text(), '')
-        s.set_checked('Н1', True)
-        self.assertEqual([r[0] for r in self.table(page)], ['HDD45', 'HDD77', 'HDD91'])
-        self.assertEqual(page.all_note.text(), '')
-        self.assertNotIn('База собрана', page.text.toPlainText())
+        s = self.section()                         # окно карточки - только её диски
+        self.assertTrue(wait(lambda: [r[0] for r in self.table(s.show_content('Н2'))] == ['HDD91']))   # то же окно
+        self.assertTrue(wait(lambda: [r[0] for r in self.table(s.show_content('Н1'))] == ['HDD45', 'HDD77']))
+        self.assertNotIn('База собрана', self.page().text.toPlainText())
 
     def test_review_fixes(self):
         """Проверка кода этапа 7: отмечено только направление без диска - не «показаны все»; задание «идёт» с
@@ -648,11 +650,9 @@ class OverviewTest(DirBase):
                  dict(task='Т4', state='готово', done=9, total=9, errors=0)]
         g = sv.attention(dict(skipped=[], unique=[], warn=[]), tasks)
         self.assertEqual([t['task'] for t in g[0]['items']], ['Т1'])
-        page = self.page()
         many = {f'HDD{i}': dict(ev={}, gib=0.0, in_base=True, letter='') for i in range(100, 120)}
-        page.ov['disks_info'] = many
-        page.current_dirs = lambda: ({'Н9': type('D', (), dict(num='Н9', disks=tuple(many)))()}, [])
-        page.paint_disks()
+        page = __import__('disk_content_dialog').DiskContentDialog(self.win, tuple(many), 'тест')   # окно диска
+        page.render(dict(disks_info=many, checked='12:00:00'))
         self.assertEqual(len(page.rows), 20)                                         # таблица растёт, страница прокручивается
 
     def test_attention_groups(self):
@@ -692,25 +692,13 @@ class OverviewTest(DirBase):
             self.assertEqual({k: old[k] for k in ('files', 'bytes', 'small', 'nohash')},
                              {k: u[d][k] for k in ('files', 'bytes', 'small', 'nohash')})
         self.assertTrue(sv._unique_from_list('HDD99')['missing'])
+        # 18.11.2026 (решение владельца): группы «Файлы, которых больше нигде нет» в «Требует внимания» нет
+        self.assertNotIn('unique', [g['key'] for g in sv.attention(ov, [])])
         page = self.page()
-        text = page.text.toPlainText()
-        self.assertIn('Файлы, которых больше нигде нет', text)
-        self.assertIn('HDD90 — 2 фото и видео, 0,0 ГБ', text)
-        self.assertIn('Открыть список', text)
-        self.assertIn('мелких картинок', text)
-        self.assertNotIn(str(hb.ANSWERS), page.text.toHtml().replace('href="list:', ''))   # длинного пути в тексте нет
-        self.assertIn('пересоберите базу', app.attention_html([dict(key='unique', title='x',
-                                                                    items=[dict(disk='HDD99', missing=True)])]))
-        opened = []
-        real = os.startfile
-        os.startfile = opened.append
-        try:
-            from PySide6.QtCore import QUrl
-            page.link(QUrl('list:HDD91'))
-            page.link(QUrl('tasks:'))
-        finally:
-            os.startfile = real
-        self.assertEqual(opened, [u['HDD91']['list']])
+        self.assertNotIn('больше нигде нет', page.text.toPlainText())
+        self.assertNotIn('Открыть список', page.text.toPlainText())
+        from PySide6.QtCore import QUrl
+        page.link(QUrl('tasks:'))
         self.assertEqual(self.win.opened, ['Задания на копирование'])
 
     def test_disk_column_not_cut(self):
@@ -744,7 +732,7 @@ class OverviewTest(DirBase):
             def show_disk(self, d):
                 shown.append(d)
         self.win.page = lambda name: Disks()
-        page = self.page()
+        page = self.dialog()
         rows = self.table(page)
         i91 = [r[0] for r in rows].index('HDD91')
         dt = page.dt
@@ -757,11 +745,10 @@ class OverviewTest(DirBase):
         self.assertTrue(rows[i91][app.C_NOHASH].startswith('1'))
         self.assertEqual(page.rows[0]['red'], {6})                                   # HDD45: X - красным
         self.assertIn('HDD45</b>: у 1 файла хеш устарел — файл изменён после подсчёта', page.todo.text())
-        b.click()
-        self.assertEqual(self.win.opened[-1], 'Диски и папки')
-        self.assertEqual(shown, ['HDD91'])
         page.todo.linkActivated.emit('rescan:HDD45')                                 # «Перейти» под таблицей
-        self.assertEqual(shown, ['HDD91', 'HDD45'])
+        self.assertEqual((self.win.opened[-1], shown, page.isVisible()), ('Диски и папки', ['HDD45'], False))
+        self.dialog().dt.buttons['HDD91'].click()                                    # окно закрывается
+        self.assertEqual(shown, ['HDD45', 'HDD91'])
 
 class DisksServiceTest(DirBase):
     """«Диски и папки» (этап 10): решение владельца плашкой - действующая отметка разбора; «чего нет на дисках

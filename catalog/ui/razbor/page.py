@@ -56,7 +56,8 @@ I: My Book (WD 2 ТБ)»); «Выберите носитель»; «Диск н�
 (тоже сохраняется). Зелёная плашка - «Диск назначения: H: Бэкап фото и видео — HDD45, 16 ТБ · свободно …» (head_html);
 строки «Диск назначения» нет (диск - из «Обзора», шаг 1; список скрыт). В ячейке - «Показать список» у «копировать»,
 «уже есть», «не подходит по типу» (окно filelist_window). Внизу - «Пересчитать хеши спорных файлов (N)» (N в фоне,
-0 - неактивна), «Показать список», «Файлы только на этом носителе…» и строка «что такое спорные».
+0 - неактивна), «Показать список» и строка «что такое спорные» (18.11.2026: кнопки «Файлы только на этом носителе…»
+нет - вместо неё строка «На HDD09 нет на H: …» над «Что копировать с носителя», view_missing).
 Пути папок нигде не обрезаются по пробелам (« Перемещение перед Индонезией - временное»).
 
 Шаг А разбивки (17.11.2026): методы страницы перенесены без правки тел в части view_* и flow_* этого пакета;
@@ -76,18 +77,19 @@ from .flow_contested import ContestedFlow
 from .flow_nohash import NohashFlow
 from .flow_tasks import TasksFlow
 from .texts_cell import BLUE, EVERY, EXCEPT, GRAY, ONLY, ORANGE
-from .texts_head import carrier_text, legend_html
+from .texts_head import carrier_text
 from .view_carrier import CarrierView
 from .view_cell import Cell, CellView
 from .view_checks import ChecksView
 from .view_head import HeadView, RichCombo
 from .view_list import ListView
+from .view_missing import MissingView
 from .view_summary import SummaryView
 from .view_tree import DragTree, TreeDelegate, TreeView
 
 
 class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryView, AutosaveFlow, TasksFlow, ListView,
-                 ContestedFlow, NohashFlow, QWidget):
+                 ContestedFlow, NohashFlow, MissingView, QWidget):
     marks_changed = Signal(int)                           # этап 17: отметки изменились (ревизия) - окну «Список файлов»
     saving_changed = Signal(bool)                         # идёт / закончилась запись отметок
     def __init__(self, win):
@@ -154,6 +156,14 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         self.dest_info = QLabel('')
         self.dest_info.setParent(self)
         self.dest_info.hide()
+        # 18.11.2026 (решение владельца): «На HDD09 нет на H: …» - над «Что копировать с носителя» (view_missing)
+        self.missing = QLabel('')
+        self.missing.setWordWrap(True)
+        self.missing.setTextFormat(Qt.RichText)
+        self.missing.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.missing.linkActivated.connect(self.missing_link)
+        self.missing.hide()
+        form.addWidget(self.missing, 3, 1)
         # «Что копировать с носителя»: три отдельные кнопки с промежутками (вариант 1), на ширину поля
         modes = QWidget()
         ml = QHBoxLayout(modes)
@@ -165,7 +175,7 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         self.mode_only.setToolTip('Копируются только папки с галочкой. Остальное остаётся на носителе (или идёт туда, '
                                   'куда отмечен весь носитель).')
         self.mode_every.setToolTip('Весь носитель - на этот диск. Исключения («не копировать») снимаются; папки, '
-                                   'отмеченные для другого диска, остаются за ним (метка «Н2»).')
+                                   'отмеченные для другого диска, остаются за ним (метка «А2»).')
         self.mode_except.setToolTip('Весь носитель - на этот диск, кроме папок с галочкой: галочка здесь значит '
                                     '«не копировать» (такие папки - красным).')
         self.mode_group = QButtonGroup(self)
@@ -220,7 +230,7 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         for c in range(C_FILES, C_HAVE + 1):                 # числа - по ширине (строк немного: дерево ленивое)
             hd.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         tips = {C_CHECK: 'Галочка - папка выбрана для диска назначения (в режиме «Все, кроме выбранных» - исключена).',
-                C_NAME: 'Зелёный фон - выбранные папки. Наведите мышь на папку - подсказка. Перетащите папку в ячейку '
+                C_NAME: 'Зелёный фон - выбранные папки; розовый - выбрана, но копировать нечего. Наведите мышь на папку - подсказка. Перетащите папку в ячейку '
                         '«Копировать на диск» справа.',
                 C_PHOTO: 'Число фото в папке с подпапками', C_VIDEO: 'Число видео в папке с подпапками',
                 C_OTHER: 'Документы, прочие файлы и мусор (Thumbs.db и т. п.)',
@@ -235,12 +245,7 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         self.tree.itemExpanded.connect(self.expand)
         self.tree.itemClicked.connect(self.more_clicked)       # «ещё N папок — показать» (этап 17)
         self.tree.itemChanged.connect(self.item_changed)
-        l2.addWidget(self.tree, 1)
-        legend = QLabel(legend_html(ONLY))
-        self.tree_legend = legend
-        legend.setWordWrap(True)
-        legend.setStyleSheet('font-size:8pt; color:#616161')
-        l2.addWidget(legend)
+        l2.addWidget(self.tree, 1)                        # 18.11.2026: строки-легенды под деревом нет (решение владельца)
         split.addWidget(g2)
         right = QWidget()
         l3 = QVBoxLayout(right)
@@ -274,10 +279,8 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         self.blink.setInterval(500)
         self.blink.timeout.connect(self.blink_busy)
         self.views = {}                                    # этап 17: показанный вид строки дерева (путь -> кортеж)
-        # этап 16: «Сохранить отметки» и «Отменить все несохранённые» убраны - отметки сохраняются сразу
-        self.undo_btn = QPushButton('Отменить последнее')
-        self.undo_btn.setToolTip('Вернуть отметки, какими они были до последнего действия (это тоже сохраняется сразу).')
-        self.undo_btn.clicked.connect(self.undo)
+        # этап 16: «Сохранить отметки» и «Отменить все несохранённые» убраны - отметки сохраняются сразу;
+        # 18.11.2026: кнопки «Отменить последнее» на экране нет (решение владельца; шаг отмены в модели - self.undo)
         # 17.11.2026: не главное место - «без хеша» того, что пойдёт на диск, теперь в ячейке; здесь - весь носитель
         self.contested_btn = QPushButton('Спорные по всему носителю…')
         self.contested_btn.setFlat(True)
@@ -290,14 +293,9 @@ class RazborPage(CarrierView, TreeView, HeadView, ChecksView, CellView, SummaryV
         self.contested_list_btn.setToolTip('Спорные файлы поштучно: папка, имя, тип, размер, дата, на каком диске и '
                                            'почему спорный.')
         self.contested_list_btn.clicked.connect(lambda: self.show_list('contested'))
-        self.unique_btn = QPushButton('Файлы только на этом носителе…')
-        self.unique_btn.setToolTip('Файлы выделенной папки (или всего носителя), подтверждённая копия которых по SHA-256 '
-                                   'есть только здесь.')
-        self.unique_btn.clicked.connect(lambda: self.show_list('unique'))
-        self.tasks_btn = self.copy_cell.btn                # «Подготовить задания» - в ячейке «Копировать на диск»
-        bar.addWidget(self.undo_btn)
+        self.tasks_btn = self.copy_cell.btn                # «Начать копирование…» - в ячейке «Копировать на диск»
         bar.addStretch()
-        for w in (self.unique_btn, self.contested_btn, self.contested_list_btn):
+        for w in (self.contested_btn, self.contested_list_btn):
             bar.addWidget(w)
         self.contested_note = QLabel(CONTESTED_NOTE)
         self.contested_note.setWordWrap(True)

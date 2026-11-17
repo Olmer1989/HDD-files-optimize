@@ -34,7 +34,9 @@ class RunFlow:
             return
         self.launch(sel, sequential)
 
-    def launch(self, sel, sequential=False):
+    def launch(self, sel, sequential=False, confirmed=False):
+        """Запуск заданий sel. confirmed - владелец уже подтвердил запуск в окне «Начать копирование» (разбор): вопроса
+        «Запустить?» нет; проверки «уже идёт» и «перемещение с того же носителя» - те же."""
         busy = [r for r in sel if r['state'] == 'идёт']
         if busy:
             self.say('Уже идут: ' + ', '.join(f'«{r["task"]}»' for r in busy) + '. Их повторно не запускаю.')
@@ -49,7 +51,9 @@ class RunFlow:
         running = [r for r in self.rows if r['state'] == 'идёт']
         clash = conflicts(sel + running)
         names = '\n'.join(f'  • {r["task"]} ({r["kind"]}, {r.get("disks", "")})' for r in sel)
-        if len(sel) > 1 and not sequential:
+        if confirmed:
+            pass
+        elif len(sel) > 1 and not sequential:
             text = f'Запустить {len(sel)} задания(й) сразу, каждое в своём окне?\n\n{names}'
             if clash:
                 text += ('\n\nВнимание: одни и те же диски у нескольких заданий —\n' + '\n'.join(clash) +

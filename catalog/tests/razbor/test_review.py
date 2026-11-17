@@ -126,10 +126,8 @@ class Round3Test(PageBase):
         self.assertEqual(sub.background(rp.C_NAME).color().name(), rp.EXC_BG)  # вместе с родителем - тоже красный фон
         greens = [f for f, x in self.p.items.items() if x.background(rp.C_NAME).color().name() == rp.SEL_BG]
         self.assertEqual(greens, [])                                             # зелёного в этом режиме нет
-        self.assertIn('красный фон', self.p.tree_legend.text())
-        self.assertNotIn('зелёный фон', self.p.tree_legend.text())
+        self.assertFalse(hasattr(self.p, 'tree_legend'))                         # строки-легенды нет (18.11.2026)
         self.p.mode_only.setChecked(True)
-        self.assertIn('зелёный фон', self.p.tree_legend.text())
         self.settle()
 
     def test_busy_label_while_recount(self):

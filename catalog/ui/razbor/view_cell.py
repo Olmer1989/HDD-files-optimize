@@ -9,6 +9,7 @@ from hb_core import razbor as rz
 from hb_core.directions import R_DIR
 
 import disk_ui
+from directions_look import show_num
 from ui_common import timed
 import service as sv
 
@@ -16,6 +17,8 @@ from .common import (BLOCK_LOOK, BUSY_CSS, C_NAME, DEBOUNCE_MS, DISKS_WORDS, HEA
                      mime_folders)
 from .texts_cell import ORANGE, RED, cell_numbers, dest_cell_html, disk_block_html, esc, files_word, nohash_html
 from .texts_head import copies_word, hdds, short_place
+
+START_TEXT = 'Начать копирование…'                # 18.11.2026 (решение владельца; прежде «Подготовить задания…»)
 
 
 class Cell(QFrame):
@@ -64,7 +67,7 @@ class Cell(QFrame):
         self.blocks = []                                  # [[диск, QFrame, QLabel, состояние]]
         self.blocks_box.hide()
         lay.addWidget(self.blocks_box)
-        # «Без хеша» (17.11.2026): только то, что пойдёт на диск; кнопка «Отсканировать эти папки» - рядом с заданиями
+        # «Без хеша» (17.11.2026): только то, что пойдёт на диск; кнопка «Посчитать хеш (N)» - слева от «Начать копирование…»
         self.nohash = QLabel('')
         self.nohash.setWordWrap(True)
         self.nohash.setTextFormat(Qt.RichText)
@@ -77,11 +80,11 @@ class Cell(QFrame):
         if drop:
             row = QHBoxLayout()
             row.addStretch(1)
-            self.scan_btn = QPushButton('Отсканировать эти папки…')
+            self.scan_btn = QPushButton('Посчитать хеш')
             self.scan_btn.clicked.connect(lambda: page.scan_nohash())
             self.scan_btn.hide()
             row.addWidget(self.scan_btn)
-            self.btn = QPushButton('Подготовить задания…')
+            self.btn = QPushButton(START_TEXT)
             self.btn.clicked.connect(lambda: page.prepare())
             row.addWidget(self.btn)
             lay.addLayout(row)
@@ -226,20 +229,21 @@ class CellView:
         can = (d is not None and plan is not None and not plan.errors and state != 'short' and not self.writing
                and any(plan.group_state(g) == rz.G_COPY for g, x in plan.groups.items() if x['num'] == d.num))
         c.btn.setEnabled(can and hash_ok)
-        c.btn.setText('Подготовить задания…')
+        c.btn.setText(START_TEXT)
         if d is None:
             tip = ''
         elif can and not hash_ok:
-            tip = ('Сначала хеш: у ' + files_word(nh['n']) + ', которые пойдут на диск, его нет - «Отсканировать эти '
-                   'папки».' if nh and 'n' in nh else 'Проверяю, у всех ли файлов, которые пойдут на диск, есть хеш…')
+            tip = ('Сначала хеш: у ' + files_word(nh['n']) + ', которые пойдут на диск, его нет - нажмите «Посчитать '
+                   'хеш» слева.' if nh and 'n' in nh else 'Проверяю, у всех ли файлов, которые пойдут на диск, есть хеш…')
         elif state == 'short':
             tip = 'Не помещается: снимите галочки у части папок.'
         elif not can and plan is not None:
             tip = 'Копировать нечего: поставьте галочки у папок (задания строятся по сохранённым отметкам).'
         else:
-            tip = (f'Задания на копирование для «{d.num} {d.name}» по сохранённым отметкам; перед созданием - сверка '
-                   'оглавления носителя и показ.')
+            tip = (f'Копирование «{show_num(d.num)} {d.name}» по сохранённым отметкам: сначала сверка оглавления '
+                   'носителя и окно подтверждения (что, куда, место, время).')
         c.btn.setToolTip(tip)
+        self.render_missing()                             # 18.11.2026: «нет на H:» - вместе с ячейкой
 
     def render_nohash(self, d, plan):
         """Строки «без хеша» и кнопка «Отсканировать эти папки» (17.11.2026). -> (хеш у всех копируемых, ответ).
@@ -263,10 +267,10 @@ class CellView:
         show = bool(nh and nh.get('n') and nh.get('folders'))
         c.scan_btn.setVisible(show)
         if show:
-            c.scan_btn.setText(f'Отсканировать эти папки ({len(nh["folders"])})…')
-            c.scan_btn.setToolTip('Пересканировать только папки с файлами без хеша, которые пойдут на диск, и только '
-                                  'их типы файлов: ' + ', '.join(nh['cats']) + '. Сначала окно покажет, сколько '
-                                  'прочитать.')
+            c.scan_btn.setText(f'Посчитать хеш ({nh["n"]})')
+            c.scan_btn.setToolTip(f'Пересканировать с хешем только папки с файлами без хеша, которые пойдут на диск '
+                                  f'({len(nh["folders"])}), и только их типы файлов: ' + ', '.join(nh['cats']) +
+                                  '. Сначала окно покажет, сколько прочитать.')
         c.scan_btn.setEnabled(show and not self.writing)
         return ok, nh
 
@@ -338,8 +342,6 @@ class CellView:
 
     def update_buttons(self):
         busy = self.writing or self.model is None
-        self.undo_btn.setEnabled(bool(self.model and self.model.undo_stack) and not busy)
-        self.unique_btn.setEnabled(not busy)
         self.contested_btn.setEnabled(not busy)          # 17.11.2026: без числа - окно и список ищут спорные сами
         self.contested_list_btn.setEnabled(not busy)
         if self.model is not None:

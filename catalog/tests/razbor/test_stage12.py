@@ -111,7 +111,7 @@ class Stage12Test(PageBase):
         self.assertIn('Копия 2 — Накопитель (HDD99): подключите диск', info)
         h = rp.head_html(d, rows)
         self.assertIn('Накопитель — HDD99', h)
-        self.assertEqual(rp.dest_text(d, rows), 'Н9 Проба — H: и HDD99 (две копии)')
+        self.assertEqual(rp.dest_text(d, rows), 'А9 Проба — H: и HDD99 (две копии)')
         self.assertEqual(rp.disk_ui.disk_place('HDD99'), 'Накопитель')            # строка - через as_row
 
     def test_blocks_follow_state(self):

@@ -16,10 +16,11 @@ from .view_info import InfoView
 from .view_tree import TreeView
 from .view_select import SelectView
 from .flow_folder import FolderFlow
+from .flow_rehash import RehashFlow
 from .view_search import SearchView
 
 
-class DisksPage(DisksView, InfoView, TreeView, SelectView, FolderFlow, SearchView, QWidget):
+class DisksPage(DisksView, InfoView, TreeView, SelectView, FolderFlow, RehashFlow, SearchView, QWidget):
     """«Диски и папки» (16.11.2026, «всё оставляем, но красиво»): поиск, носители, папки выбранного носителя с составом,
     решением владельца и панелью действий. Действия берут носитель из самой строки (найденные папки - с разных дисков)."""
     HEAD = ['Диск', 'Подключён', 'Свободно', 'Файлов', 'ГБ', 'Сканирование']
@@ -86,7 +87,13 @@ class DisksPage(DisksView, InfoView, TreeView, SelectView, FolderFlow, SearchVie
         self.hash_lab.setWordWrap(True)
         self.hash_lab.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
         self.hash_lab.linkActivated.connect(lambda _h: self.show_nohash(self.disk, ''))
-        ll.addWidget(self.hash_lab)
+        hl = QHBoxLayout()
+        hl.addWidget(self.hash_lab, 1)
+        self.rehash_btn = QPushButton('Досчитать хеш фото и видео…')    # 18.11.2026: окно пересканирования, «Фото»+«Видео»
+        self.rehash_btn.clicked.connect(self.rehash_media)
+        self.rehash_btn.hide()
+        hl.addWidget(self.rehash_btn, 0, Qt.AlignTop)
+        ll.addLayout(hl)
         legend = QLabel('Полоска под именем — состав папки: ' + ' '.join(
             f'<span style="background:{c}">&nbsp;&nbsp;&nbsp;</span>&nbsp;{n}&nbsp;&nbsp;' for n, c in
             zip(TYPE_NAMES, TYPE_COLORS)) + ' · столбцы типов — в ГБ; «Без хеша» — файлов без SHA-256 (щелчок по '
@@ -110,6 +117,8 @@ class DisksPage(DisksView, InfoView, TreeView, SelectView, FolderFlow, SearchVie
         self.tree.itemSelectionChanged.connect(self.selected)
         self.tree.itemChanged.connect(self.item_changed)
         self.tree.itemClicked.connect(self.item_clicked)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)               # правый щелчок: «Досчитать хеш в этой папке…»
+        self.tree.customContextMenuRequested.connect(self.tree_menu)
         self.tree.headerItem().setToolTip(T_NOHASH, 'Файлов без хеша (SHA-256) в папке вместе с подпапками (размер больше '
                                                     'нуля). Щелчок по числу - их список.')
         ll.addWidget(self.tree, 1)
