@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication                  # noqa: E402
 
 import hashbase as hb                                       # noqa: E402
 from tests.sv_patch import sv, sv_patch                    # noqa: E402 - service и подмена его имён (все подмодули)
-import tasks_page as tp                                     # noqa: E402
+import tasks_page as tp, ui.tasks.flow_run as flow_run, ui.tasks.model_load as model_load, ui.tasks.view_table as view_table  # noqa: E401,E402,E501
 from hb_cmd import mvlist as mv                             # noqa: E402
 from hb_core import razbor as rz                            # noqa: E402
 from test_hashbase import LOG_HEAD, NS, S, make_disk        # noqa: E402
@@ -309,9 +309,9 @@ class PartialCopyTest(MoveBase):
     def page_rows(self):
         with sv_patch('running_scripts', return_value=[]), \
                 sv_patch('volumes', return_value={}), \
-                mock.patch.object(tp, 'serial_names', return_value={'AAAA0060': SRC, 'AAAA0045': 'HDD45',
-                                                                    'AAAA0077': 'HDD77', 'AAAA0091': 'HDD91'}), \
-                mock.patch.object(tp, 'disk_labels', return_value={'HDD45': 'Бэкап фото и видео', 'HDD77': 'Путешествия'}):
+                mock.patch.object(model_load, 'serial_names', return_value={'AAAA0060': SRC, 'AAAA0045': 'HDD45',
+                                                                            'AAAA0077': 'HDD77', 'AAAA0091': 'HDD91'}), \
+                mock.patch.object(model_load, 'disk_labels', return_value={'HDD45': 'Бэкап фото и видео', 'HDD77': 'Путешествия'}):
             return tp.load(hb.TASKS)
 
 
@@ -1039,7 +1039,7 @@ class TasksPageV3Test(unittest.TestCase):
             return 0, 'Папка задания: C:\\x\\HDD17 — Работа 2019 — Работа и Сафари — перемещение'
         page.show_text = lambda title, text, ok=None: shown.append(ok) or True
         page.start_file = calls.append
-        with mock.patch.object(tp, 'run_hb', fake_run), mock.patch.object(tp, 'load_all', lambda *a, **k: (rows, [])):
+        with mock.patch.object(flow_run, 'run_hb', fake_run), mock.patch.object(view_table, 'load_all', lambda *a, **k: (rows, [])):
             page.on_offer(page.offers[0], 'Переместить')
         self.assertEqual(calls[0], ('mvlist', '--razbor', 'HDD17 — Работа 2019 — Работа и Сафари', '--dry'))
         self.assertEqual(shown[0], 'Создать и запустить (40 файлов)')

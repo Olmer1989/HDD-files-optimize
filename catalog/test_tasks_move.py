@@ -22,6 +22,7 @@ import hashbase as hb                                       # noqa: E402
 import service as sv                                        # noqa: E402
 from tests.sv_patch import sv_patch                        # noqa: E402 - подмена имён service во всех подмодулях
 import tasks_page as tp                                     # noqa: E402
+from ui.tasks import model_load                             # noqa: E402 - подмены там, где имя используется
 from hb_cmd import mvlist as mv                             # noqa: E402
 from test_hashbase import LOG_HEAD, NS, S, Base, make_disk  # noqa: E402
 
@@ -272,7 +273,7 @@ class TasksPageTest(unittest.TestCase):
         with sv_patch('running_scripts', return_value=[f'powershell -File "{self.root / r}\\Копировать.ps1"'
                                                                     for r in running]), \
                 sv_patch('volumes', return_value={'S78': 'L:'}), \
-                mock.patch.object(tp, 'serial_names', return_value={'S58': 'HDD58', 'S78': 'HDD78'}):
+                mock.patch.object(model_load, 'serial_names', return_value={'S58': 'HDD58', 'S78': 'HDD78'}):
             return self._load(self.root, now=now)
 
     def test_progress_and_eta_from_journal(self):

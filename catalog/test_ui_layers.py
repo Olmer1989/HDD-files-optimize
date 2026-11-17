@@ -20,9 +20,11 @@ from test_modules import imports, top        # noqa: E402
 # импортируют. Новый пакет ui/* без строки здесь - ошибка test_ui_layers.
 UI_RANK = {'razbor': {'texts_cell': 0, 'common': 1, 'texts_tasks': 1, 'texts_head': 2, 'model_marks': 3, 'model_checks': 3,
                       'model_show': 3, 'model': 4, 'dialogs': 5, 'page': 7},
-           'filelist': {'texts_list': 0, 'common': 1, 'model_rows': 2, 'model_table': 3, 'page': 7}}
+           'filelist': {'texts_list': 0, 'common': 1, 'model_rows': 2, 'model_table': 3, 'page': 7},
+           'tasks': {'common': 0, 'texts_words': 1, 'texts_rows': 2, 'model_journal': 3, 'model_rules': 3,
+                     'model_run': 3, 'model_move': 3, 'model_load': 4, 'widgets': 5, 'page': 7}}
 SHIMS = {'razbor_page': 60, 'razbor_cell': 60, 'test_razbor_page': 60,          # переходники шага А: прежние имена,
-         'filelist_window': 60}                                                 # до 60 строк
+         'filelist_window': 60, 'tasks_page': 60}                               # до 60 строк
 
 
 def ui_packages(root=CAT):
@@ -147,7 +149,7 @@ def find_cycle(g):
     return None
 
 
-SHIM_MODS = {'razbor_page', 'razbor_cell', 'filelist_window'}
+SHIM_MODS = {'razbor_page', 'razbor_cell', 'filelist_window', 'tasks_page'}
 # Имена модулей до разбивки (без «__…»): переходник обязан отдавать их все (test_shims_keep_old_names).
 SHIM_NAMES = {
     'filelist_window': '''
@@ -178,6 +180,19 @@ SHIM_NAMES = {
         legend_html letters list_link mime_folders num place place_html plate_html plural row_html rz safe
         short_place spec_keys stay_numbers sv sv_log tasks_check tasks_create tasks_dry tasks_html tb_text time
         timed total_of traceback vol
+    ''',
+    'tasks_page': '''
+        AMBER BAD_STATES COPY_META DONE GREY HASH_WORD INTRO MIN_BYTES MIN_SEC MOVE_EMPTY MOVE_NOTE Path
+        QAbstractItemView QColor QDialog QDialogButtonBox QFont QFrame QGroupBox QHBoxLayout QHeaderView
+        QLabel QMessageBox QPlainTextEdit QPushButton QScrollArea QSizePolicy QTableWidget
+        QTableWidgetItem QTimer QToolButton QVBoxLayout QWidget Qt RED RUN_NOTE STATE_COLOR StepsBar
+        TITLE TasksPage TextDialog V3_META _CACHE _DRIVE_RE _LABELS _SERIALS _TIME_RE _cell _chip_style
+        _date _file_key _folder_word _letters _loc _meta _num _on_disks _overlap _read_log _retry
+        _size_words _small _table _target_words _targets_of _where bp can_move checkable conflicts cpg
+        disk_labels disk_letters disk_long disks_words done_rows errors_tip fmt_ago fmt_eta gb
+        hash_words hb html json latest_manifest_groups load load_all member_word move_blocks move_items
+        move_line n os progress queue_cmd r1_of re run_all_set run_hb serial_names state_text subprocess
+        summary sv task_disks time what_where
     ''',
 }
 
@@ -303,18 +318,23 @@ class UiLayersTest(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_shims_keep_old_names(self):
-        """Переходники отдают все имена прежних модулей (до разбивки: filelist_window - 91, razbor_page - 175)."""
-        code = ('import json, filelist_window as f, razbor_page as r; '
-                'print(json.dumps([sorted(vars(f)), sorted(vars(r))]))')
+        """Переходники отдают все имена прежних модулей (до разбивки: filelist_window - 91, razbor_page - 175,
+        tasks_page - 107)."""
+        code = ('import json, filelist_window as f, razbor_page as r, tasks_page as t; '
+                'own = [f"{m.__name__}.{k}" for m in (f, r, t) for k, v in vars(m).items() '
+                'if callable(v) and getattr(v, "__module__", None) == m.__name__]; '      # своё в переходнике - нельзя:
+                'print(json.dumps(own)); '                                                # только те же объекты ui/*
+                'print(json.dumps([sorted(vars(f)), sorted(vars(r)), sorted(vars(t))]))')
         env = dict(os.environ, QT_QPA_PLATFORM='offscreen')
         p = subprocess.run([sys.executable, '-X', 'utf8', '-c', code], cwd=str(CAT), env=env, capture_output=True,
                            text=True, encoding='utf-8', timeout=120)
         self.assertEqual(p.returncode, 0, p.stderr)
         import json
         now = json.loads(p.stdout.splitlines()[-1])
+        self.assertEqual(json.loads(p.stdout.splitlines()[-2]), [], 'переходник определяет свои функции/классы')
         for (name, old), have in zip(SHIM_NAMES.items(), now):
             old = old.split()
-            self.assertEqual(len(old), {'filelist_window': 91, 'razbor_page': 175}[name])
+            self.assertEqual(len(old), {'filelist_window': 91, 'razbor_page': 175, 'tasks_page': 107}[name])
             self.assertEqual(sorted(set(old) - set(have)), [], f'{name}.py потерял прежние имена')
 
     def test_tests_do_not_patch_shim_names(self):
