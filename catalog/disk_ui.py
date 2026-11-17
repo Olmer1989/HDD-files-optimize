@@ -135,3 +135,13 @@ def style_disk(set_data, connected, assigned):
     f.setBold(bold)
     set_data(Qt.FontRole, f)
     set_data(Qt.ForegroundRole, QBrush(QColor(color)))
+
+
+def tb_text(b):
+    """Объём диска «как на наклейке» - десятичные ТБ: 16 000 900 165 632 байт -> «16 ТБ», 2 ТБ -> «2 ТБ», 500 ГБ."""
+    if not b:
+        return ''
+    if b >= 1e12:
+        v = b / 1e12
+        return f'{v:.0f} ТБ' if v >= 9.95 or abs(v - round(v)) < 0.05 else f'{v:.1f} ТБ'.replace('.', ',')
+    return f'{b / 1e9:.0f} ГБ'

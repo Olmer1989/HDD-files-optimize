@@ -4,6 +4,7 @@
 from hb_core import api as hb
 
 import disk_ui
+from disk_ui import tb_text   # перенесена в disk_ui (17.11.2026); имя здесь - для прежних импортов
 
 from .common import EXC_BG, EXC_FG, JOURNAL, PALE, SEL_BG
 from .texts_cell import BLUE, EVERY, EXCEPT, GRAY, GREEN, ONLY, ORANGE, esc, gb
@@ -82,16 +83,6 @@ def total_of(x, rows, space=None):
         return space[x][2]
     r = next((r for r in rows if r['disk'] == x), None)
     return r.get('total_bytes') if r else None
-
-
-def tb_text(b):
-    """Объём диска «как на наклейке» - десятичные ТБ: 16 000 900 165 632 байт -> «16 ТБ», 2 ТБ -> «2 ТБ», 500 ГБ."""
-    if not b:
-        return ''
-    if b >= 1e12:
-        v = b / 1e12
-        return f'{v:.0f} ТБ' if v >= 9.95 or abs(v - round(v)) < 0.05 else f'{v:.1f} ТБ'.replace('.', ',')
-    return f'{b / 1e9:.0f} ГБ'
 
 
 def disk_head(x, rows, space=None):

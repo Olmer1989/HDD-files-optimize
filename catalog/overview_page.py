@@ -75,7 +75,7 @@ def n_ru(n):
 def shown_disks(dirs, checked):
     """Нижняя таблица «Обзора»: диски отмеченных направлений по порядку; ничего не отмечено - диски всех направлений,
     у которых есть диск. Отмеченное направление без диска (в окне его отметить нельзя, но файл выбора могли поправить
-    или диск сняли командой) - в приписку «у Н… диск не назначен». -> (диски, показаны ли все, приписка)."""
+    или диск сняли командой) - в приписку «у А… диск не назначен». -> (диски, показаны ли все, приписка)."""
     want = set(checked)
     marked = [d for n, d in dirs.items() if n in want]
     every = not marked
@@ -84,7 +84,8 @@ def shown_disks(dirs, checked):
     if every:
         note = 'галочек нет — показаны все' if disks else ''
     else:
-        note = '; '.join(f'у {d.num} диск не назначен' for d in marked if not d.disks)
+        from directions_look import show_num        # «Н1» на экране - «А1» (17.11.2026)
+        note = '; '.join(f'у {show_num(d.num)} диск не назначен' for d in marked if not d.disks)
     return disks, every, note
 
 

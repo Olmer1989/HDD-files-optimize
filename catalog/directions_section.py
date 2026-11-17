@@ -4,15 +4,17 @@ import disk_ui
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from hb_core.razbor_base import COPY_ROOT
+
 from directions_choice import save_choice, section_data
 from directions_look import (CARD_BG, CARD_BORDER, CHECKED_BG, GO_TEXT, OFF, OFF_BADGE, ON, RAZBOR_PAGE, FlowLayout,
-                             disk_row_html, html_esc, kind_tags, tag_label)
+                             disk_row_html, html_esc, kind_tags, show_num, tag_label)
 from directions_dialog import ASSIGN, CARD, DirectionDialog
 
 
 class DirectionCard(QFrame):
-    """Одна строка-карточка направления: галочка · имя, описание, диски, «Что копировать:» тегами, папка на носителе ·
-    кнопка «Изменить» / «Назначить диск»."""
+    """Одна строка-карточка направления: галочка · имя, описание, диски, «Что копировать:» тегами, плашки «📁 Файлы
+    будут скопированы в папку …» (по одной на диск) · кнопка «Изменить» / «Назначить диск»."""
 
     def __init__(self, section, d):
         super().__init__()
@@ -33,7 +35,7 @@ class DirectionCard(QFrame):
             self.setToolTip('Сначала назначьте направлению диск («Назначить диск»).')
         mid = QVBoxLayout()
         mid.setSpacing(4)
-        self.name = QLabel(f'<b>{html_esc(d.num)} {html_esc(d.name)}</b>')
+        self.name = QLabel(f'<b>{html_esc(show_num(d.num))} {html_esc(d.name)}</b>')
         self.name.setWordWrap(True)
         f = self.name.font()
         f.setPointSizeF(f.pointSizeF() + 1)
@@ -65,15 +67,14 @@ class DirectionCard(QFrame):
             s.setStyleSheet('color:#777; font-size:8pt')
             kl.addWidget(s)
         mid.addWidget(kinds)
-        folder = d.folder()
-        self.folder = None
-        if folder:
-            self.folder = QLabel(f'📁 На носителе: «{folder}»')
-            self.folder.setStyleSheet('color:#37474f; background:#f5f7fa; border:1px solid #b0bec5; border-radius:4px; '
-                                      'padding:2px 8px')
-            self.folder.setToolTip('Так называется папка на носителе, куда переносятся уже скопированные папки.')
+        self.folders = []                  # плашка на каждый диск направления; текст - в paint() (нужна буква диска)
+        for _ in d.disks:
+            lab = QLabel('')
+            lab.setStyleSheet(FOLDER_CSS)
+            lab.setToolTip('Сюда на архивном диске попадут файлы; внутри — папка с именем носителя')
+            self.folders.append(lab)
             row = QHBoxLayout()
-            row.addWidget(self.folder)
+            row.addWidget(lab)
             row.addStretch()
             mid.addLayout(row)
         lay.addLayout(mid, 1)
@@ -104,13 +105,42 @@ class DirectionCard(QFrame):
             many = len(self.d.disks) > 1                    # «(копия 1/2)» - только у направления на нескольких дисках
             self.disks.setText('<br>'.join(disk_row_html(x, data['by'], data['free'], writing, i if many else 0)
                                            for i, x in enumerate(self.d.disks, 1)))
+        for i, (x, lab) in enumerate(zip(self.d.disks, self.folders), 1):
+            lab.setText(folder_text(x, data['by'], i if len(self.d.disks) > 1 else 0))
 
 
-TITLE_TEXT = 'Выберите диск, на который будем копировать'
+FOLDER_CSS = 'color:#37474f; background:#f5f7fa; border:1px solid #b0bec5; border-radius:4px; padding:2px 8px'
+
+
+def folder_text(disk, by, copy_no=0):
+    """Плашка под дисками: подключён - «📁 Файлы будут скопированы в папку H:\\ПЕРЕНОС с других дисков»; не подключён -
+    «… на диск HDD78 в папку «ПЕРЕНОС с других дисков»». copy_no - «(копия N)» у направления на нескольких дисках."""
+    letter = ((by.get(disk) or {}).get('letter') or '').rstrip('\\').rstrip(':')
+    tail = f' (копия {copy_no})' if copy_no else ''
+    if letter:
+        return f'📁 Файлы будут скопированы в папку {letter}:\\{COPY_ROOT}{tail}'
+    return f'📁 Файлы будут скопированы на диск {disk} в папку «{COPY_ROOT}»{tail}'
+
+
+TITLE_TEXT = 'Выберите Архивный диск для наполнения его файлами'
 SUB_TEXT = ('Отметьте галочкой одно или несколько направлений. У каждого направления свой диск: туда попадут файлы '
-            'с носителя.')
+            'с носителя.')                 # 17.11.2026: с экрана убрано; имя оставлено для прежних импортов
+ADD_TEXT = '+ Добавить архивный диск…'
+ADD_CSS = ('QPushButton { background:#e3f2fd; border:1px solid #1e88e5; color:#0d47a1; font-weight:bold; '
+           'border-radius:6px; padding:2px 12px; } QPushButton:hover { background:#bbdefb; }')
 NONE_TEXT = 'Диск не выбран'
 SECTION_CSS = 'QFrame#dirsection { background:#fbfcfd; border:1px solid #c5ced8; border-radius:8px; }'
+
+
+def add_height():
+    """Высота кнопки «+ Добавить архивный диск…» - в 1,5 раза больше прежней мелкой (8pt, поля 2px 8px): замер на месте,
+    чтобы на любом экране и шрифте соотношение было тем же."""
+    old = QPushButton('+ Добавить направление…')
+    old.setStyleSheet('QPushButton { font-size:8pt; color:#37474f; padding:2px 8px; }')
+    old.ensurePolished()
+    h = round(old.sizeHint().height() * 1.5)
+    old.deleteLater()
+    return h
 
 
 def legend_html():
@@ -122,8 +152,8 @@ def legend_html():
 
 
 class DirectionsSection(QFrame):
-    """Карточка «Выберите диск, на который будем копировать» (этап 11, 16.11.2026): заголовок и пояснение, справа
-    мелкая «+ Добавить направление…»; строки-карточки направлений (щелчок по строке - галочка); легенда цветов под
+    """Карточка «Выберите Архивный диск для наполнения его файлами» (этап 11, 16.11.2026; 17.11.2026 - без пояснения):
+    заголовок, справа голубая «+ Добавить архивный диск…»; строки-карточки направлений (щелчок по строке - галочка); легенда цветов под
     списком; внизу «Копируем на: …» / «Диск не выбран» и «Дальше: выбрать папки на носителе →»."""
 
     def __init__(self, win):
@@ -146,16 +176,13 @@ class DirectionsSection(QFrame):
         self.title.setWordWrap(True)
         self.title.setStyleSheet('color:#1f2933; background:transparent; border:none')
         top.addWidget(self.title, 1)
-        self.b_add = QPushButton('+ Добавить направление…')
-        self.b_add.setToolTip('Новое направление: имя, что собирается, что копировать и диск.')
-        self.b_add.setStyleSheet('QPushButton { font-size:8pt; color:#37474f; padding:2px 8px; }')
+        self.b_add = QPushButton(ADD_TEXT)
+        self.b_add.setToolTip('Новый архивный диск: имя, что собирается, что копировать и диск.')
+        self.b_add.setMinimumHeight(add_height())
+        self.b_add.setStyleSheet(ADD_CSS)
         self.b_add.clicked.connect(self.add)
         top.addWidget(self.b_add, 0, Qt.AlignTop)
         lay.addLayout(top)
-        self.sub = QLabel(SUB_TEXT)
-        self.sub.setWordWrap(True)
-        self.sub.setStyleSheet('color:#455a64; background:transparent; border:none')
-        lay.addWidget(self.sub)
         lay.addSpacing(4)
         self.list = QVBoxLayout()
         self.list.setSpacing(6)

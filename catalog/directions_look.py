@@ -134,7 +134,8 @@ def tag_label(text, look):
 def disk_row_html(disk, by, free, writing, copy_no=0):
     """Строка диска в карточке: «I: My Book — HDD55 · свободно 421 ГБ» (подключён) или «My Book — HDD55» и плашка
     «не подключён». Цвет: оранжевый - направление отмечено галочкой; зелёный - нет; неподключённый - бледнее.
-    copy_no - номер копии у направления с несколькими дисками (этап 12): «… — HDD45 (копия 1) · свободно …»."""
+    copy_no - номер копии у направления с несколькими дисками (этап 12): «… — HDD45 (копия 1) · свободно …».
+    17.11.2026: после имени - «· ёмкость диска 16 ТБ», если у строки диска есть total_bytes."""
     r = by.get(disk) or {'disk': disk, 'label': '', 'letter': ''}
     on = bool(r.get('letter'))
     color, bold = disk_ui.dir_disk_color(on, writing)
@@ -143,12 +144,23 @@ def disk_row_html(disk, by, free, writing, copy_no=0):
                     + (f' (копия {copy_no})' if copy_no else ''))
     w = 'bold' if bold else 'normal'
     out = f'<span style="color:{color}; font-weight:{w}">{text}</span>'
+    size = disk_ui.tb_text(r.get('total_bytes'))
+    if size:
+        out += f' <span style="color:#555">· ёмкость диска {html_esc(size)}</span>'
     if on:
         out += f' <span style="color:#555">· свободно {gb(free[disk])} ГБ</span>' if disk in free else ''
     else:
         bg, fg, _ = OFF_BADGE
         out += f' &nbsp;<span style="background:{bg}; color:{fg}">&nbsp;не подключён&nbsp;</span>'
     return out
+
+
+def show_num(num):
+    """Номер направления для экрана «Обзор»: «Н1» -> «А1» (архивный диск; 17.11.2026). В данных номер прежний."""
+    s = str(num or '')
+    if len(s) > 1 and s[0] in 'НнHh' and s[1:].isdigit():
+        return 'А' + s[1:]
+    return num
 
 
 def html_esc(x):

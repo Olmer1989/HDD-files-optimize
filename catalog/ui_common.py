@@ -195,6 +195,7 @@ STEP_RAZBOR = 1                                    # «2. Что копируе�
 NEED_DISK = 'Сначала отметьте диск: галочка у направления в «Обзоре» («1. Куда копируем»).'
 STEP_NOW = ('#e3f2fd', '#1e88e5', '#0d47a1')       # фон, рамка, текст текущего шага
 STEP_OTHER = ('#f1f3f5', '#d0d7de', '#5f6b76')
+STEP_TALLER = 1.3                                  # плашка шага выше прежней (замечание владельца 17.11.2026)
 
 
 class StepPlate(QFrame):
@@ -207,13 +208,15 @@ class StepPlate(QFrame):
         self.current = i == bar.current
         self.setObjectName('step')
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 6, 12, 6)
+        lay.setContentsMargins(12, 10, 12, 10)              # 17.11.2026: плашка на 30 % выше (было 6 сверху и снизу)
         self.label = QLabel(f'<b>{bold}</b> — {small}')
         self.label.setWordWrap(True)
         self.label.setTextFormat(Qt.RichText)
         lay.addWidget(self.label)
         bg, border, fg = STEP_NOW if self.current else STEP_OTHER
         width = 2 if self.current else 1
+        line = self.label.heightForWidth(10000)              # текст в одну строку
+        self.setMinimumHeight(round((line + 12 + 2 * width) * STEP_TALLER))   # прежняя высота в одну строку × 1,3
         self.setStyleSheet(f'QFrame#step {{ background:{bg}; border:{width}px solid {border}; border-radius:6px; }}'
                            f'QFrame#step QLabel {{ color:{fg}; background:transparent; border:none; }}')
         if self.current:

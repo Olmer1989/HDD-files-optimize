@@ -170,12 +170,12 @@ class DescriptionCoreTest(DirBase):
 class SectionTest(DirBase):
     def test_table_and_overview(self):
         """Четвёртый круг: направления - строками-карточками; описание - только если есть; диски строками; «Что
-        копировать:» тегами; плашка «На носителе»; кнопка «Изменить» / «Назначить диск» в строке."""
+        копировать:» тегами; плашки «📁 Файлы будут скопированы…»; кнопка «Изменить» / «Назначить диск» в строке."""
         sv.direction_save(num='Н1', desc='семейные фото и видео всех лет')
         s = self.section()
         self.assertEqual(list(s.cards), ['Н1', 'Н2', 'Н3'])
         c1, c3 = s.cards['Н1'], s.cards['Н3']
-        self.assertIn('Н1 Семейный архив', c1.name.text())
+        self.assertIn('А1 Семейный архив', c1.name.text())                         # «Н1» на экране - «А1»
         self.assertEqual(c1.desc.text(), 'семейные фото и видео всех лет')
         self.assertTrue(c1.desc.isVisibleTo(c1))
         self.assertFalse(c3.desc.isVisibleTo(c3))                                    # описания нет - строки нет
@@ -186,14 +186,14 @@ class SectionTest(DirBase):
         self.assertEqual(c1.tags, ['Фото', 'Видео', dp.NEAR_TEXT])                   # каждая категория - тегом
         self.assertEqual(s.cards['Н2'].tags, ['Все файлы'])                           # «Все файлы» - серым тегом
         self.assertEqual(s.cards['Н2'].small, 'кроме программ и временных')
-        self.assertIn('«Скопировано на Семейный архив (45 и 77)»', c1.folder.text())
-        self.assertIsNone(c3.folder)                                                 # без диска имени папки нет
+        self.assertEqual(len(c1.folders), 2)                                         # плашка на каждый диск
+        self.assertEqual(c3.folders, [])                                             # без диска плашки нет
         self.assertIn('диск не назначен', c3.disks.text())
         self.assertFalse(c3.box.isEnabled())                                         # без диска - галочки нет
         self.assertEqual(c3.btn.text(), 'Назначить диск')                            # кнопка - в строке
         self.assertEqual(c1.btn.text(), 'Изменить')
         self.assertFalse(hasattr(s, 'b_edit') or hasattr(s, 'b_disk'))               # общих кнопок под списком нет
-        self.assertIn('Добавить направление', s.b_add.text())
+        self.assertIn('Добавить архивный диск', s.b_add.text())
         self.assertEqual(dp.kind_tags('что-то странное')[0][0][1], 'red')
         ov = app.OverviewPage(self.win)                                              # секция стоит в начале «Обзора»
         self.assertIsInstance(ov.dirs, dp.DirectionsSection)
@@ -247,13 +247,12 @@ class SectionTest(DirBase):
         self.assertEqual(dp.load_choice(), [])
 
     def test_card_head_row_click_target_and_next(self):
-        """Этап 11: карточка «Выберите диск…»; щелчок по строке целиком ставит галочку; «Копируем на» / «Диск не
+        """Этап 11: карточка «Выберите Архивный диск…»; щелчок по строке целиком ставит галочку; «Копируем на» / «Диск не
         выбран»; «Дальше» неактивна без выбора и открывает «Разбор носителя»."""
         from PySide6.QtTest import QTest
         s = self.section()
-        self.assertEqual(s.title.text(), 'Выберите диск, на который будем копировать')
-        self.assertIn('Отметьте галочкой одно или несколько направлений', s.sub.text())
-        self.assertIn('свой диск: туда попадут файлы с носителя', s.sub.text())
+        self.assertEqual(s.title.text(), 'Выберите Архивный диск для наполнения его файлами')
+        self.assertFalse(hasattr(s, 'sub'))                                          # пояснения под заголовком нет
         self.assertIn('выбран для копирования', s.legend.text())
         self.assertIn('подключите перед копированием', s.legend.text())
         self.assertEqual(s.b_go.text(), 'Дальше: выбрать папки на носителе →')
@@ -288,7 +287,7 @@ class SectionTest(DirBase):
 
     def test_row_click_on_child_labels(self):
         """Настоящий щелчок мышью по дочерним меткам строки (имя, строка дисков с RichText, тег, описание, плашка
-        «На носителе») доходит до строки и переключает галочку."""
+        «📁 Файлы будут скопированы…») доходит до строки и переключает галочку."""
         from PySide6.QtTest import QTest
         s = self.section()
         s.resize(1200, 900)
@@ -296,7 +295,7 @@ class SectionTest(DirBase):
         QAPP.processEvents()
         c1 = s.cards['Н1']
         tag = next(x for x in c1.findChildren(dp.QLabel) if x.objectName() == 'tag')
-        for w in (c1.name, c1.disks, tag, c1.desc, c1.folder):
+        for w in (c1.name, c1.disks, tag, c1.desc, c1.folders[0]):
             before = c1.box.isChecked()
             QTest.mouseClick(w, Qt.LeftButton)
             self.assertEqual(c1.box.isChecked(), not before, w.text())
@@ -638,8 +637,8 @@ class OverviewTest(DirBase):
         ошибками - в группе ошибок; высота таблицы дисков - не больше 8 строк."""
         dirs = sv.directions()
         self.assertEqual(app.shown_disks(dirs, []), (['HDD45', 'HDD77', 'HDD91'], True, 'галочек нет — показаны все'))
-        self.assertEqual(app.shown_disks(dirs, ['Н3']), ([], False, 'у Н3 диск не назначен'))
-        self.assertEqual(app.shown_disks(dirs, ['Н2', 'Н3']), (['HDD91'], False, 'у Н3 диск не назначен'))
+        self.assertEqual(app.shown_disks(dirs, ['Н3']), ([], False, 'у А3 диск не назначен'))
+        self.assertEqual(app.shown_disks(dirs, ['Н2', 'Н3']), (['HDD91'], False, 'у А3 диск не назначен'))
         self.assertEqual(app.shown_disks(dirs, ['Н2']), (['HDD91'], False, ''))
         s = self.section()                                                           # в окне без диска не отметить
         self.assertFalse(s.cards['Н3'].box.isEnabled())
