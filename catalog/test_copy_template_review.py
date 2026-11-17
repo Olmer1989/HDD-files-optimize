@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import service as sv                                         # noqa: E402  (отпечаток задания, версия шаблона)
+from hb_core.paths import copy_template, template_parts      # noqa: E402  (шаблон 2.8 - главный и части)
 
 TEMPLATE = Path(__file__).resolve().parent.parent / 'Каталог дисков' / '_ШАБЛОН копирования' / 'Копировать.ps1'
 DEST = 'ПЕРЕНОС с других дисков'
@@ -29,7 +30,7 @@ class TemplateReview(unittest.TestCase):
         self.task = self.tmp / 'task'; self.task.mkdir()
         self.src = self.tmp / 'src'; (self.src / 'A').mkdir(parents=True)
         self.dst = self.tmp / 'dst'; self.dst.mkdir()
-        shutil.copy2(TEMPLATE, self.task / TEMPLATE.name)
+        copy_template(TEMPLATE.parent, self.task, TEMPLATE.name, extra=())     # главный и части (шаблон 2.8)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -176,10 +177,12 @@ class Template24(unittest.TestCase):
 
     def test_version_line_and_no_pause_guard(self):
         lines = TEMPLATE.read_text(encoding='utf-8-sig').splitlines()
-        self.assertIn('версия 2.7', lines[0])
-        self.assertEqual(sv.copy_template_version(TEMPLATE.parent), (2, 7))
-        self.assertTrue(sv.copy_template_version(TEMPLATE.parent) >= (2, 4))     # очередь: 2.7 - как 2.4
-        for v in ('2.4', '2.5', '2.6'):
+        self.assertIn('версия 2.8', lines[0])
+        self.assertEqual(sv.copy_template_version(TEMPLATE.parent), (2, 8))
+        self.assertTrue(sv.copy_template_version(TEMPLATE.parent) >= (2, 4))     # очередь: 2.8 - как 2.4
+        for name, _ in template_parts(TEMPLATE):                                  # части (2.8): пауз в них нет
+            self.assertNotIn('Read-Host', (TEMPLATE.parent / name).read_text(encoding='utf-8-sig'), name)
+        for v in ('2.4', '2.5', '2.6', '2.7'):
             old = TEMPLATE.parent / f'Копировать - версия {v}.ps1.txt'
             self.assertIn(f'версия {v}', old.read_text(encoding='utf-8-sig').splitlines()[0])
         for i, x in enumerate(lines):

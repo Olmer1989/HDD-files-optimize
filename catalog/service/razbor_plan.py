@@ -170,8 +170,7 @@ def razbor_tasks(disk, dry=True, only=None):
                 f.write(f'{disk}\t{s["serials"][disk]}' + (f'\t{s["sub"]}' if s.get('sub') else '') + '\n')
                 for d in s['targets']:
                     f.write(f'{d}\t{s["serials"][d]}\n')
-            for name in ('Копировать.ps1', 'Запустить.cmd'):
-                shutil.copy2(hb.TEMPLATE / name, t / name)
+            hb.copy_template(hb.TEMPLATE, t, 'Копировать.ps1')      # главный, Запустить.cmd и части (шаблон 2.8)
             _write_json(t / 'разбор.json', {
                 'носитель': disk, 'ключ': s['key'], 'папка': s['folder'], 'направление': s['num'],
                 'имя направления': s['direction'], 'обязательные диски': s['disks'], 'цели': s['targets'],

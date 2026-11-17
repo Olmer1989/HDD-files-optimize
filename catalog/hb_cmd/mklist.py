@@ -2,7 +2,6 @@
 # Перенесено из hashbase.py механически 15.11.2026 (разбивка на модули); логика не менялась.
 import collections
 import io
-import shutil
 import sys
 import build_pilot as bp
 from hb_core import paths
@@ -122,8 +121,7 @@ def cmd_mklist(a):
         f.write(f'{src_name}\t{serials.get(a.disk, "НЕТ_СЕРИЙНОГО_НОМЕРА")}' + (f'\t{src_folder}' if src_folder else '') + '\n')
         for d in a.to:
             f.write(f'{d}\t{serials.get(d, "НЕТ_СЕРИЙНОГО_НОМЕРА")}\n')
-    for name in ('Копировать.ps1', 'Запустить.cmd'):
-        shutil.copy2(paths.TEMPLATE / name, task / name)
+    paths.copy_template(paths.TEMPLATE, task, 'Копировать.ps1')      # главный, Запустить.cmd и части (2.8)
     out(f'Папка задачи: {task}')
     for t in a.to:
         out(f'  на {t}: {stat[t][0]} файлов, {gb(stat[t][1])} ГБ -> ПЕРЕНОС с других дисков\\{src_name}\\<тот же путь>'

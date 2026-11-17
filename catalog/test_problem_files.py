@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hb_core.consts import copy_ok                           # noqa: E402  (разбор строк журнала сборкой)
+from hb_core.paths import copy_template                      # noqa: E402  (шаблон 2.8 - главный и части)
 
 BASE = Path(__file__).resolve().parent.parent / 'Каталог дисков'
 COPY_TPL = BASE / '_ШАБЛОН копирования' / 'Копировать.ps1'
@@ -56,7 +57,7 @@ class CopyProblems(unittest.TestCase):
         self.task = self.tmp / 'task'; self.task.mkdir()
         self.src = str(self.tmp / 'src'); self.dst = str(self.tmp / 'dst')
         os.makedirs(self.src); os.makedirs(self.dst)
-        shutil.copy2(COPY_TPL, self.task / COPY_TPL.name)
+        copy_template(COPY_TPL.parent, self.task, COPY_TPL.name, extra=())     # главный и части (шаблон 2.8)
 
     def tearDown(self):
         subprocess.run(['cmd', '/c', 'rd', '/s', '/q', L(self.tmp)], capture_output=True)

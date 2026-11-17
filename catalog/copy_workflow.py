@@ -295,7 +295,8 @@ def prepare(hb, a):
         for e in pending.values():
             f.write('\t'.join(map(str,(e['target'], e['source'], e['size'], 'семейный архив', e['sha'] or '')))+'\n')
     (task/'тома.tsv').write_text(''.join(f'{d}\t{serials[d]}' + (f'\t{destination[d]}' if d != disk else '') + '\n' for d in (disk,)+MAIN),encoding='utf-8-sig')
-    shutil.copy2(hb.TEMPLATE/'Копировать.ps1', task/'Копировать.ps1')
+    from hb_core.paths import copy_template      # здесь, не наверху: этот файл копируется в задание как Проверить.py
+    copy_template(hb.TEMPLATE, task, 'Копировать.ps1', extra=())      # главный и части (шаблон 2.8)
     write_launchers(task)
     report(task, plan)
     print('ПАПКА:',task)
@@ -363,6 +364,7 @@ def verify(task, roots_override=None, preflight=False):
     roots=roots_override or volumes(plan['serials'])
     if preflight and not (task/'Копировать.ps1').is_file():
         raise RuntimeError('В комплекте нет Копировать.ps1')
+    # части шаблона 2.8 (*.psm1) проверяет сам Копировать.ps1: нет части или она изменена - не начнёт, код 5
     logs=successful_logs(task)
     results=[];errors=[];cache={}
     for i,item in enumerate(plan['items']):

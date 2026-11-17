@@ -96,8 +96,7 @@ def retry_copy_task(name):
         for r in rows:
             f.write('\t'.join(r) + '\n')
     shutil.copy2(t / 'тома.tsv', stage / 'тома.tsv')
-    for fn in ('Копировать.ps1', 'Запустить.cmd'):
-        shutil.copy2(hb.TEMPLATE / fn, stage / fn)
+    hb.copy_template(hb.TEMPLATE, stage, 'Копировать.ps1')      # главный, Запустить.cmd и части (шаблон 2.8)
     _write_json(stage / 'разбор.json', dict(meta, повтор=t.name, **{'дата повтора': time.strftime('%d.%m.%Y %H:%M')}))
     os.replace(stage, hb.TASKS / new)
     size = 0

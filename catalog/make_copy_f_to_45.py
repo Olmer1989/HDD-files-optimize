@@ -3,7 +3,6 @@ import csv
 import hashlib
 import json
 from pathlib import Path
-import shutil
 
 ROOT=Path(__file__).resolve().parents[1]
 OUT=ROOT/'Каталог дисков/F - подготовленное HDD17 на HDD45'
@@ -42,9 +41,8 @@ def main():
     fserial=next(s.split('\t')[1] for s in volumes if s.startswith('HDD45\t'))
     OUT.mkdir(exist_ok=False)
     template=ROOT/'Каталог дисков/_ШАБЛОН копирования'
-    for name in ('Копировать.ps1','Запустить.cmd'):
-        shutil.copy2(template/name,OUT/name)
-        assert (template/name).read_bytes()==(OUT/name).read_bytes()
+    from hb_core.paths import copy_template      # шаблон 2.8 - из частей: главный, Запустить.cmd и части
+    copy_template(template, OUT, 'Копировать.ps1')      # байты сверяет сам
     (OUT/'тома.tsv').write_text(f'HDD17\t{fserial}\t{PREFIX}\nHDD45\t{matches[0]}\n',encoding='utf-8-sig')
     with (OUT/'список.tsv').open('w',encoding='utf-8-sig',newline='') as f:
         csv.writer(f,delimiter='\t',lineterminator='\n').writerows(rows)

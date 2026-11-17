@@ -46,9 +46,8 @@ def main():
                 hashes[path] = row[0]
     OUT.mkdir(exist_ok=False)
     template = ROOT / 'Каталог дисков' / '_ШАБЛОН копирования'
-    for name in ('Копировать.ps1', 'Запустить.cmd'):
-        shutil.copy2(template / name, OUT / name)
-        assert hashlib.sha256((template / name).read_bytes()).digest() == hashlib.sha256((OUT / name).read_bytes()).digest()
+    from hb_core.paths import copy_template      # шаблон 2.8 - из частей: главный, Запустить.cmd и части
+    copy_template(template, OUT, 'Копировать.ps1')      # байты сверяет сам
     shutil.copy2(OLD / 'тома.tsv', OUT / 'тома.tsv')
     with (OUT / 'список.tsv').open('w', encoding='utf-8', newline='') as f:
         writer = csv.writer(f, delimiter='\t', lineterminator='\n')

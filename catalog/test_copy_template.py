@@ -3,6 +3,10 @@ import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hb_core.paths import copy_template  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +27,7 @@ def main():
             with p.open('wb') as f:
                 f.write(b'begin');f.seek(size-3);f.write(b'end')
             expected[rel]=digest(p)
-        (task/'Копировать.ps1').write_bytes(template.read_bytes())
+        copy_template(template.parent, task, template.name, extra=())  # главный и части (шаблон 2.8)
         pfx=prefix.replace('/','\\')
         (task/'тома.tsv').write_text(f'HDD17\tTESTSRC\t{pfx}\nHDD45\tTESTDST\n',encoding='utf-8-sig')
         (task/'список.tsv').write_text(''.join('HDD45\t'+rel.replace('/','\\')+f'\t{size}\ttest\t{expected[rel]}\n' for rel,size in files),encoding='utf-8-sig')

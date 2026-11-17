@@ -726,7 +726,7 @@ class CleanDestTest(MoveBase):
         self.quiet(hb.cmd_rebuild, NS())
 
     def run_copy(self, task, t77):
-        shutil.copy2(COPY_TPL, hb.TASKS / task / 'Копировать.ps1')
+        hb.copy_template(COPY_TPL.parent, hb.TASKS / task, COPY_TPL.name, extra=())     # главный и части (2.8)
         t77.mkdir(parents=True, exist_ok=True)
         p = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                             str(hb.TASKS / task / 'Копировать.ps1'), '-TestRoots', f'{SRC}={self.disk};HDD77={t77}'],
