@@ -272,8 +272,8 @@ class DisksPageTest(unittest.TestCase):
         self.assertEqual((foto.text(app.T_NOHASH), other.text(app.T_NOHASH), empty.text(app.T_NOHASH)), ('2', '1', '—'))
         self.assertEqual(empty.foreground(app.T_NOHASH).color().name(), '#bdbdbd')
         opened = []
-        import filelist_window
-        with mock.patch.object(filelist_window, 'open_list', lambda win, **kw: opened.append(kw)):
+        from ui.filelist import page as filelist_page          # подмена там, где имя используется (disks_page)
+        with mock.patch.object(filelist_page, 'open_list', lambda win, **kw: opened.append(kw)):
             self.page.item_clicked(foto, app.T_NOHASH)
             self.page.item_clicked(empty, app.T_NOHASH)                                # ноль - не ссылка
             self.page.item_clicked(foto, app.T_GB)                                     # другой столбец - ничего

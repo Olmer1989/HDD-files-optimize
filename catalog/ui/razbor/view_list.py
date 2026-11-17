@@ -13,7 +13,7 @@ class ListView:
 
     def show_list(self, href):
         """«Показать список» ячейки (copy:<диск> / have / type) и кнопки «спорные» / «уникальные»."""
-        import filelist_window
+        from ui.filelist import page as filelist_window
         m = self.model
         if m is None or not self.disk:
             return None

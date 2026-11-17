@@ -8,6 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tests.razbor.base import *                          # noqa: E402,F401,F403 - общая основа
+from PySide6.QtWidgets import QFileDialog                 # noqa: E402 - окно сохранения подменяется у класса
+from ui.filelist import model_rows, view_buttons         # noqa: E402 - подмены там, где имя используется
 
 
 class FileModelTest(unittest.TestCase):
@@ -99,7 +101,7 @@ class FileModelTest(unittest.TestCase):
         fw.save_table(str(tmp / 'a.xlsx'), heads, data)
         ws = load_workbook(tmp / 'a.xlsx').active
         self.assertEqual([[c.value for c in r] for r in ws.iter_rows()], [heads] + data)
-        with mock.patch.object(fw, 'XLSX_MAX', 1), self.assertRaises(sv.Refused):
+        with mock.patch.object(model_rows, 'XLSX_MAX', 1), self.assertRaises(sv.Refused):
             fw.save_table(str(tmp / 'b.xlsx'), heads, data)
 
 
@@ -113,8 +115,8 @@ class FileWindowTest(PageBase):
         self.fw = fw
         self.fw_asked = []
         self.fw_answer = rp.QMessageBox.Yes
-        self.fwp = [mock.patch.object(fw.QMessageBox, 'information', lambda *a, **k: self.fw_asked.append(a[2])),
-                    mock.patch.object(fw.QMessageBox, 'question',
+        self.fwp = [mock.patch.object(QMessageBox, 'information', lambda *a, **k: self.fw_asked.append(a[2])),
+                    mock.patch.object(QMessageBox, 'question',
                                       lambda *a, **k: self.fw_asked.append(a[2]) or self.fw_answer)]
         for x in self.fwp:
             x.start()
@@ -153,15 +155,15 @@ class FileWindowTest(PageBase):
         import tempfile
         from openpyxl import load_workbook
         out = Path(tempfile.mkdtemp(prefix='filelist_')) / 'список.xlsx'
-        with mock.patch.object(self.fw.QFileDialog, 'getSaveFileName', lambda *a, **k: (str(out), '')):
+        with mock.patch.object(QFileDialog, 'getSaveFileName', lambda *a, **k: (str(out), '')):
             w.save_excel()
         self.assertTrue(wait(lambda: out.exists() and w.state.text().startswith('Сохранено'), 30), w.state.text())
         ws = load_workbook(out).active
         self.assertEqual([c.value for c in next(ws.iter_rows())][:3], ['Где лежит', 'Имя', 'Тип'])
         self.assertEqual(ws.max_row, 2)
         out2 = out.with_suffix('.csv')
-        with mock.patch.object(self.fw, 'XLSX_MAX', 0), \
-                mock.patch.object(self.fw.QFileDialog, 'getSaveFileName', lambda *a, **k: (str(out2), '')):
+        with mock.patch.object(view_buttons, 'XLSX_MAX', 0), mock.patch.object(model_rows, 'XLSX_MAX', 0), \
+                mock.patch.object(QFileDialog, 'getSaveFileName', lambda *a, **k: (str(out2), '')):
             w.save_excel()                                                       # больше листа Excel - вопрос и CSV
         self.assertTrue(wait(lambda: out2.exists() and w.state.text().startswith('Сохранено'), 30), w.state.text())
         self.assertTrue(any('больше, чем помещается на лист Excel' in x for x in self.fw_asked), self.fw_asked)
@@ -194,7 +196,7 @@ class FileWindowTest(PageBase):
         (root / r[1] / r[2]).write_bytes(b'x')
         calls = []
         with mock.patch.object(sv, 'disk_letter', lambda d: str(root)), \
-                mock.patch.object(self.fw.subprocess, 'Popen', lambda cmd, *a, **k: calls.append(cmd)):
+                mock.patch('subprocess.Popen', lambda cmd, *a, **k: calls.append(cmd)):
             w.open_explorer()
             self.assertTrue(wait(lambda: calls, 10))
         self.assertEqual(calls[0], f'explorer /select,"{root}\\{r[1]}\\{r[2]}"')

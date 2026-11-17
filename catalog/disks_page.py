@@ -448,7 +448,7 @@ class DisksPage(QWidget):
         """Окно «Список файлов» - файлы без хеша папки (весь носитель - '')."""
         if not disk:
             return None
-        import filelist_window
+        from ui.filelist import page as filelist_window
         return filelist_window.open_list(self.win, kind='nohash', disk=disk, folder=path)
 
     def load(self, item):
