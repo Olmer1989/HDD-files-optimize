@@ -539,6 +539,7 @@ class FileListWindow(QWidget):
         self.state.setStyleSheet('color:#555')
         self.state.setWordWrap(True)
         self.file_line = QLabel('')                        # этап 18: «Файл: …» / «Копия: …» выделенной строки
+        self.file_line.setTextFormat(Qt.PlainText)                  # путь показывается буквально (& и т. п.)
         self.file_line.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.file_line.setWordWrap(True)
         self.file_line.setStyleSheet('color:#263238')
@@ -550,8 +551,9 @@ class FileListWindow(QWidget):
         self.sel_timer = QTimer(self)
         self.sel_timer.setSingleShot(True)
         self.sel_timer.timeout.connect(self.count_selected)
-        self.view.selectionModel().selectionChanged.connect(lambda *_: self.sel_timer.start(250))
+        self.view.selectionModel().selectionChanged.connect(lambda *_: (self.sel_timer.start(250), self.show_file_line()))
         self.view.selectionModel().currentChanged.connect(lambda *_: self.show_file_line())
+        self.model.modelReset.connect(self.show_file_line)           # фильтр, сортировка, новый список - строка гаснет
         self.sel_folders = []
         self.reload_timer = QTimer(self)
         self.reload_timer.setSingleShot(True)
@@ -595,7 +597,6 @@ class FileListWindow(QWidget):
         self.model.letters = {r['disk']: r['letter'] for r in self.disk_rows if r.get('letter')}
         self.model.set_rows(self.kind, val['model_rows'])
         self.carrier.setText(self.carrier_text())
-        self.show_file_line()
         self.set_widths()
         self.stale.hide()
         self.title.setText(self.title_text())
@@ -625,7 +626,7 @@ class FileListWindow(QWidget):
         """Строка под таблицей: «Файл: <полный путь>» и (у списка «уже есть») «Копия: <полный путь>» - текущей строки;
         текст выделяется мышью."""
         ix = self.view.currentIndex()
-        if not ix.isValid() or ix.row() >= self.model.rowCount():
+        if not ix.isValid() or ix.row() >= self.model.rowCount() or not self.view.selectionModel().isSelected(ix):
             self.file_line.setText('')
             return
         r = self.model.row(ix.row())
@@ -714,8 +715,7 @@ class FileListWindow(QWidget):
             self.ftree.blockSignals(False)
             self.painting = False
         self.refresh_checks()
-        self.expand_marked()
-        self.refresh_checks()
+        self.expand_marked()                                # каждый f_fill сам обновляет галочки
 
     def f_fill(self, item, start=0):
         p = item.data(0, F_ROLE)

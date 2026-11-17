@@ -60,7 +60,6 @@ I: My Book (WD 2 ТБ)»); «Выберите носитель»; «Диск н�
 Пути папок нигде не обрезаются по пробелам (« Перемещение перед Индонезией - временное»).
 """
 import collections
-import html
 import json
 import time
 import traceback
@@ -79,6 +78,9 @@ from hb_core.consts import CAT_OF_TYPE, COPIED_PREFIX, N_TYPES
 from hb_core.directions import R_DIR, R_NONE, R_SKIP, R_UNSET
 import directions_page
 import disk_ui
+from razbor_cell import (BLUE, BLUE2, EVERY, EXCEPT, GRAY, GREEN, LINK, ONLY, ORANGE, PLATE, RED, SKIP_TEXT,
+                         cell_numbers, copy_color, dest_cell_html, disk_block_html, esc, files_word, folders_word,
+                         gb, list_link, num, plate_html, plural, row_html, vol)  # noqa: F401 - этап 18: ячейка вынесена
 from ui_common import StepsBar, timed
 import service as sv
 
@@ -94,12 +96,10 @@ CHUNK = 500                                               # этап 17: дет�
 FLUSH_WAIT_MS = 5000                                      # перед закрытием: идущую запись ждём не дольше
 C_CHECK, C_NAME, C_FILES, C_GB, C_PHOTO, C_VIDEO, C_OTHER, C_HAVE = range(8)
 HEAD = ['', 'Папка', 'Файлов', 'ГБ', 'Фото', 'Видео', 'Прочее', 'Уже есть']
-ONLY, EVERY, EXCEPT = 'only', 'all', 'except'             # режимы для диска назначения
 MODE_TEXT = {ONLY: 'Только выбранные папки', EVERY: 'Все папки', EXCEPT: 'Все, кроме выбранных'}
 SEL_BG, PALE = '#c8e6c9', '#9e9e9e'                        # один зелёный фон для выбранных; бледный текст унаследованных
 HEAD_BG = '#e8f5e9'
 JOURNAL = 'по журналу сканирования дисков'
-GRAY, BLUE, BLUE2, ORANGE, RED, GREEN = '#757575', '#1565c0', '#5c6bc0', '#e65100', '#c62828', '#2e7d32'
 INHERIT, SKIP = hb.MARK_INHERIT, hb.MARK_SKIP
 DEBOUNCE_MS = 600
 UNDO_MAX = 50
@@ -107,7 +107,6 @@ AUTOSAVE_MS = 0                                           # этап 16: отм�
 CONTESTED_MS = 700                                        # число спорных - после того, как выделение устоялось
 CONTESTED_NOTE = ('Спорные — файлы, чью копию нельзя проверить по SHA-256: без хеша на этом носителе, тёзки без хеша '
                   '(то же имя и размер) и непроверенные копии на 45 и 77. Пересчёт хешей снимает сомнение.')
-LINK = 'color:#1565c0'
 MIME = 'application/x-arhiv-diskov-folders'               # перетаскивание папок из дерева в ячейки
 # Цвет направления - по номеру (Н1 синий, Н2 зелёный, Н3 фиолетовый, …): (своя отметка, унаследованная, рамка ячейки)
 PALETTE = [('#90caf9', '#e3f2fd', '#1e88e5'), ('#a5d6a7', '#e8f5e9', '#43a047'), ('#ce93d8', '#f3e5f5', '#8e24aa'),
@@ -134,18 +133,6 @@ def dir_colors(num):
     return PALETTE[(hb.num_key(num) - 1) % len(PALETTE)] if num else PALETTE[0]
 
 
-def num(n):
-    return f'{n or 0:,}'.replace(',', ' ')
-
-
-def gb(b):
-    return f'{(b or 0) / hb.GIB:,.1f}'.replace(',', ' ').replace('.', ',')
-
-
-def esc(x):
-    return html.escape(str(x))
-
-
 def last(path):
     return path.rsplit(SEP, 1)[-1] if path else ''
 
@@ -159,23 +146,6 @@ def safe(fn, *a):
         return 'refused', str(e)
     except Exception:                                      # noqa: BLE001
         return 'error', traceback.format_exc()
-
-
-def plural(n, one, few, many):
-    n = abs(n or 0)
-    if n % 10 == 1 and n % 100 != 11:
-        return one
-    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        return few
-    return many
-
-
-def folders_word(n):
-    return f'{num(n)} {plural(n, "папка", "папки", "папок")}'
-
-
-def files_word(n):
-    return f'{num(n)} {plural(n, "файл", "файла", "файлов")}'
 
 
 # ---------- тексты носителей и дисков назначения (этап 8) ----------
@@ -2283,14 +2253,14 @@ class RazborPage(QWidget):
             c.body.setText(html_)
             blocks = []
             if many and plan is not None:
-                cp = plan.part_a.get((rz.O_COPY, d.num), (0, 0))
-                hv = plan.part_a.get((rz.O_HAVE, d.num), (0, 0))
-                total = (cp[0] + hv[0], cp[1] + hv[1])
+                v = cell_numbers(d, plan)                     # те же числа, что у общей части ячейки
+                total = (v['copy'][0] + v['have'][0], v['copy'][1] + v['have'][1])
                 have = m.have_on_disk(d.num)
                 for i, x in enumerate(d.disks, 1):
                     cx = cap.get(x) or dict(state='none', files=0, bytes=0, free=None, queued=[0, 0, 0])
                     blocks.append((x,) + disk_block_html(i, x, cx, plan, total, have and have.get(x),
-                                                         disk_ui.disk_place(by.get(x) or x), label(x), hv[0]))
+                                                         disk_ui.disk_place(by.get(x) or x), label(x), v['have'][0],
+                                                         v['skip'][0]))
             c.set_blocks(blocks)
             if state == 'short':
                 c.paint(RED, SHORT_BG, state)
@@ -2964,162 +2934,6 @@ def short_place(row, disk):
     title = disk_ui.disk_title(row) or disk
     title = title.rsplit(' (', 1)[0] if title.endswith(')') else title
     return f'{row["letter"]} {title}' if row.get('letter') else f'{title} (не подключён)'
-
-
-def list_link(kind, x=''):
-    """Ссылка «Показать» (этапы 16, 18) - окно «Список файлов»: copy:<диск> / have / type."""
-    return f' <a href="{kind}:{esc(x)}" style="{LINK}">Показать</a>'
-
-
-def vol(b):
-    """Объём для ячейки (этап 18): от 0,1 ГБ - в ГБ, меньше - в МБ, совсем малое - в КБ (ГБ, МБ - как везде в окне,
-    по 1024)."""
-    b = b or 0
-    if not b:
-        return '0 ГБ'
-    if b >= 0.1 * hb.GIB:
-        return f'{gb(b)} ГБ'
-    if b >= 0.1 * 1024 ** 2:
-        return f'{b / 1024 ** 2:,.1f} МБ'.replace(',', ' ').replace('.', ',')
-    return f'{max(1, round(b / 1024))} КБ'
-
-
-SKIP_TEXT = 'Файлов другого типа, которые не выбраны в настройках копирования на Диск Назначения'   # правка владельца
-PLATE = {'red': ('#ffebee', RED), 'green': ('#e8f5e9', GREEN), 'orange': ('#fff3e0', ORANGE)}
-
-
-def cell_numbers(d, P):
-    """Числа ячейки (этап 18) по плану ядра: копировать, уже есть, не копируются по типу (с мусором отмеченных папок) -
-    каждый файл ровно в одной; отмечено = их сумма. -> dict(copy, have, skip, total) - (файлов, байт)."""
-    cp = tuple(P.part_a.get((rz.O_COPY, d.num), (0, 0)))
-    hv = tuple(P.part_a.get((rz.O_HAVE, d.num), (0, 0)))
-    tp = P.part_a.get((rz.O_TYPE, d.num), (0, 0))
-    jk = P.junk_dir.get(d.num, (0, 0)) if hasattr(P, 'junk_dir') else (0, 0)
-    skip = (tp[0] + jk[0], tp[1] + jk[1])
-    return dict(copy=cp, have=hv, skip=skip, total=(cp[0] + hv[0] + skip[0], cp[1] + hv[1] + skip[1]))
-
-
-def row_html(text, v, link='', color=None, bold=False):
-    """Строка таблицы ячейки: подпись · файлов · объём · «Показать» (только у ненулевой)."""
-    style = f' style="color:{color}"' if color else ''
-    t = f'<b>{esc(text)}</b>' if bold else esc(text)
-    return (f'<tr><td{style}>{t}</td><td align="right"{style}>{files_word(v[0])}</td>'
-            f'<td align="right"{style}><b>{vol(v[1])}</b></td><td>{link if v[0] else ""}</td></tr>')
-
-
-def plate_html(label, c, n_copy, n_have, n_skip):
-    """Плашка итога по диску (этап 18, правки владельца): «Копировать нечего: все файлы выбранного в настройках типа уже
-    есть на H:» - красная (цвет нуля в строке «Копировать»); «Поместится: нужно X, свободно Y» - зелёная; «Не
-    помещается…» - красная; «Место не проверено: H: не подключён» - оранжевая. -> (html, состояние)."""
-    if not n_copy:
-        if n_have:
-            text, kind = f'Копировать нечего: все файлы выбранного в настройках типа уже есть на {label}', 'red'
-        elif n_skip:
-            text, kind = 'Копировать нечего: отмеченные файлы не подходят по типу', 'red'
-        else:
-            return '', 'none'
-        state = 'none'
-    elif c['state'] == 'short':
-        text, kind, state = (f'Не помещается: нужно {vol(c["need"] + c["reserve"])} (с запасом {vol(c["reserve"])}), '
-                             f'свободно {vol(c["free"])}'), 'red', 'short'
-    elif c['state'] == 'unknown':
-        text, kind, state = f'Место не проверено: {label} не подключён', 'orange', 'unknown'
-    elif c['state'] == 'none':
-        return '', 'none'
-    else:
-        text, kind, state = (f'Поместится: нужно {vol(c["need"] + c["reserve"])}, свободно {vol(c["free"])}', 'green',
-                             'ok')
-    bg, fg = PLATE[kind]
-    q = (f'<br><span style="color:{GRAY}; font-size:8pt">в очереди на этот диск ещё {num(c["queued"][0])} незапущенных '
-         f'заданий других носителей, {vol(c["queued"][1])} (учтено)</span>' if n_copy and c.get('queued', [0])[0] else '')
-    return (f'<table width="100%" cellpadding="5" cellspacing="0"><tr><td bgcolor="{bg}"><span style="color:{fg}">'
-            f'<b>{esc(text)}</b></span>{q}</td></tr></table>'), state
-
-
-def copy_color(n):
-    return GREEN if n else RED                           # правка владельца: 0 - красным, больше 0 - зелёным
-
-
-def dest_cell_html(d, P, cap, mode, sel, exc, place_fn, split=False):
-    """Ячейка «Копировать на диск …» (этап 18, макет владельца): «Отмечено: N папок · M файлов · X» - ВСЕ файлы
-    отмеченных папок (копировать + уже есть + не копируются по типу, из плана ядра: каждый файл в одной строке);
-    таблица из трёх строк (сумма = «Отмечено»); плашка итога. split=True (направление на нескольких дисках) - общее
-    «Отмечено» и общая серая строка; «Копировать»/«Уже есть» и плашка - в блоках дисков (disk_block_html). place_fn(x) -
-    короткое имя диска («H:» или «HDD45»). -> (html, состояние 'short' / 'unknown' / 'ok' / 'none')."""
-    if P is None:
-        return '', 'normal'                              # до первого итога - только плашка «Идёт пересчёт…»
-    v = cell_numbers(d, P)
-    total = v['total']
-    if mode == EVERY:
-        what = 'Отмечено: весь носитель'
-    elif mode == EXCEPT:
-        what = 'Отмечено: весь носитель' + (f', кроме {num(exc)} {plural(exc, "папки", "папок", "папок")}' if exc else '')
-    else:
-        what = f'Отмечено {folders_word(sel)}'
-    if mode == ONLY and not sel and not total[0]:
-        return (f'<span style="font-size:12pt"><b>Ничего не отмечено — поставьте галочки у папок</b></span><br>'
-                f'<span style="color:{GRAY}">или перетащите папки сюда.</span>'), 'none'
-    h = [f'<span style="font-size:12pt"><b>{what} · {files_word(total[0])} · {vol(total[1])}</b></span>',
-         '<table cellpadding="3" cellspacing="0" width="100%">']
-    state = 'none'
-    if not split:
-        x = d.disks[0]
-        label = place_fn(x)
-        h.append(row_html(f'Копировать на {label}', v['copy'], list_link('copy', x), copy_color(v['copy'][0]), True))
-        h.append(row_html(f'Уже есть на {label}', v['have'], list_link('have')))
-    h.append(row_html(SKIP_TEXT, v['skip'], list_link('type'), GRAY))
-    h.append('</table>')
-    if not split:
-        c = cap.get(x) or dict(state='none', files=0, bytes=0, free=None, queued=[0, 0, 0])
-        if P is not None and x == P.disk:
-            h.append(f'<span style="color:{GRAY}">Это сам носитель — на него не копируется.</span>')
-        else:
-            plate, state = plate_html(label, c, v['copy'][0], v['have'][0], v['skip'][0])
-            h.append(plate)
-    else:
-        for x in d.disks:
-            c = cap.get(x) or dict(state='none')
-            if c['state'] == 'short':
-                state = 'short'
-            elif c['state'] == 'unknown' and state != 'short':
-                state = 'unknown'
-            elif c['state'] == 'ok' and state == 'none':
-                state = 'ok'
-    return ''.join(h), state
-
-
-def where_html(c):
-    """Строка места на диске по service.capacity (прежняя форма; ячейка с этапа 18 - plate_html)."""
-    if c['state'] == 'short':
-        return (f'<b style="color:{RED}">не помещается: нужно {gb(c["need"] + c["reserve"])} ГБ (с запасом '
-                f'{gb(c["reserve"])} ГБ), свободно {gb(c["free"])} ГБ</b>')
-    if c['state'] == 'unknown':
-        return f'<span style="color:{ORANGE}">место не проверено (диск не подключён)</span>'
-    return f'<span style="color:{GREEN}">помещается: свободно {gb(c["free"])} ГБ</span>'
-
-
-def disk_block_html(i, x, c, P, total, have, name, label=None, have_all=None):
-    """Блок одного диска направления на нескольких дисках (этапы 12, 18): «Копия 1 — H: Бэкап фото и видео (HDD45)»;
-    «Уже есть на H:» - Model.have_on_disk (тот же SHA-256 подтверждён на этом диске); «Копировать на H:» = (копировать +
-    уже есть направления) - уже есть на H: (total - их сумма); своя плашка. have=None - ещё считается. have_all -
-    «уже есть» на всех дисках направления: «Показать» у «Уже есть» - только когда список совпадает с числом.
-    -> (html, состояние блока 'short' / 'unknown' / 'ok' / 'none')."""
-    label = label or x
-    h = [f'<span style="font-size:11pt"><b>Копия {i} — {esc(name)} ({esc(x)})</b></span>']
-    if P is not None and x == P.disk:
-        h.append(f'<br><span style="color:{GRAY}">Это сам носитель — на него не копируется.</span>')
-        return ''.join(h), 'none'
-    if have is None:
-        h.append(f'<br><span style="color:{GRAY}">Уже есть на {esc(label)}: считаю…</span>')
-        return ''.join(h), c.get('state', 'none') if c.get('state') != 'ok' else 'ok'
-    cp = (total[0] - have[0], total[1] - have[1])
-    h.append('<table cellpadding="3" cellspacing="0" width="100%">')
-    h.append(row_html(f'Копировать на {label}', cp, list_link('copy', x), copy_color(cp[0]), True))
-    h.append(row_html(f'Уже есть на {label}', have, list_link('have') if have_all == have[0] else ''))
-    h.append('</table>')
-    plate, state = plate_html(label, c, cp[0], have[0], 0)
-    h.append(plate)
-    return ''.join(h), state
 
 
 STAY_NONE = (rz.O_SKIP, rz.O_UNSET, rz.O_NONE, rz.O_JUNK)     # не копируется никуда (общие категории плана)

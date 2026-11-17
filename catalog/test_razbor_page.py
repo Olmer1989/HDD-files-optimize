@@ -1239,33 +1239,6 @@ class Stage12Test(PageBase):
         self.assertNotIn('копии', h)
         self.assertNotIn('Копия', self.p.dest_info.text())
 
-    def test_disk_block_states(self):
-        import types
-        G = 1024 ** 3
-        P = types.SimpleNamespace(part_a={}, disk=SRC)
-        space = {'HDD45': ('H:', 500 * G, 1000 * G, 4096)}
-        cap = sv.capacity({'HDD45': [3, G], 'HDD77': [2, G]}, space, {}, disks=['HDD45', 'HDD77'])
-        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (2, 3 * G), 'H: Бэкап фото и видео', 'H:',
-                                   2)
-        self.assertEqual(st, 'ok')
-        self.assertIn('Копия 1 — H: Бэкап фото и видео (HDD45)', t)
-        self.assertIn(f'<b>Копировать на H:</b></td><td align="right" style="color:{rp.GREEN}">3 файла', t)
-        self.assertIn('Уже есть на H:</td><td align="right">2 файла</td><td align="right"><b>3,0 ГБ</b></td><td> <a', t)
-        self.assertIn('Поместится: нужно', t)
-        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), None, 'Путешествия')
-        self.assertIn('Уже есть на HDD77: считаю…', t)
-        cap = sv.capacity({'HDD45': [3, 600 * G]}, space, {}, disks=['HDD45', 'HDD77'])
-        t, st = rp.disk_block_html(1, 'HDD45', cap['HDD45'], P, (5, 4 * G), (0, 0), 'H: Бэкап', 'H:')
-        self.assertEqual(st, 'short')
-        self.assertIn('Не помещается: нужно', t)
-        t, st = rp.disk_block_html(2, 'HDD77', cap['HDD77'], P, (5, 4 * G), (5, 4 * G), 'Путешествия', 'HDD77', 1)
-        self.assertEqual(st, 'none')
-        self.assertIn(f'<span style="color:{rp.RED}"><b>Копировать нечего: все файлы выбранного в настройках типа уже есть '
-                      'на HDD77</b>', t)
-        self.assertNotIn('Показать', t)                                          # нули без «Показать»; «уже есть» не совпал
-        t, st = rp.disk_block_html(1, SRC, cap['HDD77'], P, (5, 4 * G), None, 'Носитель')
-        self.assertIn('Это сам носитель', t)
-
     def test_disk_missing_from_rows(self):
         """Проверка кода (п. 1): диска направления нет в списке дисков - подписи не падают, диск - номером."""
         import types

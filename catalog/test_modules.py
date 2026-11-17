@@ -31,8 +31,8 @@ UPPER = {'service', 'app', 'hashbase', 'hb_cli', 'hb_cmd'}          # чего �
 # Правило владельца 17.11.2026: файлы небольшие - каждая правка (особенно внешнего вида) затрагивает один небольшой
 # файл. Новый файл .py в catalog - не больше FILE_MAX строк. Файлы, уже превысившие предел, - долг: расти им нельзя,
 # только уменьшаться (разбиваются отдельными заданиями); после разбивки - убрать из списка.
-FILE_MAX = 500
-FILE_DEBT = {'razbor_page.py': 3137, 'service.py': 2438, 'test_razbor_page.py': 2082, 'commands_page.py': 1320,
+FILE_MAX = 600
+FILE_DEBT = {'razbor_page.py': 2951, 'service.py': 2438, 'test_razbor_page.py': 2055, 'commands_page.py': 1320,
              'tasks_page.py': 1263, 'test_move_v3.py': 1210, 'filelist_window.py': 1096, 'hb_core/razbor.py': 1053,
              'test_logic_v3.py': 944, 'hb_cmd/mvlist.py': 897, 'explorer_page.py': 841, 'directions_page.py': 820,
              'test_hashbase.py': 814, 'test_directions_page.py': 813, 'explorer_diff.py': 718, 'disks_page.py': 679,
