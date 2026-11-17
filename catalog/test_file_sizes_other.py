@@ -19,7 +19,7 @@ from hb_core.paths import copy_template, part_sha, template_parts, template_prob
 FILE_MAX = 600
 PART_MAX = 400             # части шаблона созданы под цель 400 - так и держим
 # Долг: уже больше предела. Расти нельзя, только уменьшаться; после разбивки - убрать из списка.
-FILE_DEBT = {'scanner/portable.py': 1234}
+FILE_DEBT = {'scanner/portable.py': 846}
 COPY_TPL = ROOT / 'Каталог дисков' / '_ШАБЛОН копирования'
 MAIN = 'Копировать.ps1'
 

@@ -23,6 +23,17 @@ from hash_files import hash_one, signature, ReadFailure
 from winpath import safe_relative, source_path   # noqa: F401 (safe_relative - для тестов и прежних вызовов)
 import rescan
 
+# Moved verbatim to portable_base.py and portable_jobs.py; imported back so that portable.<name> keeps working.
+from portable_base import (  # noqa: F401
+    _NEW_VIDEO, MEDIA_OLD, VIDEO_OLD, POLICY_V1, POLICY_V2, POLICY_V3, POLICY, POLICY_TEXT,
+    MAX_DEVICE_ERRORS_IN_ROW, FILE_WINERRORS, DEVICE_WINERRORS, error_kind, policy_version, ID_PATTERN, KIND_TITLES,
+    media_kind, id_number, check_disk_id, REQUIRED_EXPORTS, OPTIONAL_EXPORTS, utc, write_json, duration, Rate, lock,
+    check_letter)
+from portable_jobs import (  # noqa: F401
+    identity_text, JOB_ID, INDEX_NAME, capacity, disk_folder_name, disk_folder, results_root,
+    find_jobs, read_json, LEGACY_READ_ERROR, unread_count, job_row, write_index, append_run, is_partial_job,
+    prior_sources, checksum, export, export_all, verified_count, hash_types_of)
+
 # VERSION is the job format/algorithm. It is unchanged, so jobs started by
 # 1.0.x continue with this program. APP_VERSION is the program release.
 VERSION = '1.0.0'
@@ -34,84 +45,6 @@ APP_VERSION = '1.6.2'   # 1.6.2 (17.11.2026): файлы CON.jpg, «a.», «b »
 STOP_FILE = None
 PROGRESS_FILE = None
 JOB_LOG = None
-# POLICY_V1 must stay byte-for-byte equal to the policy stored by 1.0.x jobs.
-# Versions 1 and 2 did not treat .m2t and .dv as video; their stored policies keep the old lists.
-_NEW_VIDEO = {'.m2t', '.dv'}
-MEDIA_OLD, VIDEO_OLD = sorted(set(MEDIA) - _NEW_VIDEO), sorted(set(VIDEO) - _NEW_VIDEO)
-POLICY_V1 = {'algorithm': 'sha256', 'min_bytes': MIN_BYTES,
-             'media_extensions': MEDIA_OLD, 'excluded_dirs': sorted(EXCLUDED_DIRS)}
-POLICY_V2 = {'version': 2, 'algorithm': 'sha256', 'thresholds_bytes': THRESHOLDS_V2,
-             'camera_image_extensions': sorted(CAMERA_IMAGES), 'video_extensions': VIDEO_OLD,
-             'media_extensions': MEDIA_OLD, 'excluded_dirs': sorted(EXCLUDED_DIRS)}
-# Version 3 (1.5.0): .m2t and .dv are video too (any size). Older jobs are upgraded by a top-up pass.
-POLICY_V3 = {**POLICY_V2, 'version': 3, 'video_extensions': sorted(VIDEO), 'media_extensions': sorted(MEDIA)}
-POLICY = POLICY_V3  # for new jobs
-POLICY_TEXT = 'фото JPEG/HEIC от 50 КБ, прочие изображения и RAW от 150 КБ, видео любого размера (в том числе .m2t, .dv)'
-
-# An unreadable file is skipped; only these signs of a failing disk stop the scan.
-MAX_DEVICE_ERRORS_IN_ROW = 5
-# Windows codes that concern one file, not the device: access denied, sharing and
-# lock violations, file cannot be accessed by the system, file or path not found.
-FILE_WINERRORS = {2, 3, 5, 32, 33, 1920}
-# Windows codes of a damaged or failing medium: not ready, CRC error, seek error,
-# sector not found, read fault, general failure, hardware and I/O device errors.
-DEVICE_WINERRORS = {21, 23, 25, 27, 30, 31, 483, 1117, 1167}
-
-def error_kind(exc):
-    """'file' — this file only (access, changed since inventory); 'device' — read failure.
-
-    A read that fails after the file was opened is a device error unless Windows
-    names a file-level cause: Python reports a CRC error there as "Permission denied".
-    """
-    code = getattr(exc, 'windows_code', None) or getattr(exc, 'winerror', None)
-    if code in DEVICE_WINERRORS:
-        return 'device'
-    if isinstance(exc, ReadFailure):
-        return 'file' if code in FILE_WINERRORS else 'device'
-    if isinstance(exc, (RuntimeError, ValueError, PermissionError, FileNotFoundError)):   # ValueError: путь (1.6.2)
-        return 'file'
-    return 'file' if code in FILE_WINERRORS else 'device'
-
-def policy_version(policy):
-    if policy == POLICY_V3:
-        return 3
-    if policy == POLICY_V2:
-        return 2
-    if policy == POLICY_V1:
-        return 1
-    return None
-# Two kinds of media, each with its own numbering: disks HDD03…, and USB flash
-# drives and memory cards Flash01…. A flash medium is identified by its volume
-# (serial and size): a card reader reports its own serial for every card.
-ID_PATTERN = r'(?:HDD|Flash)[0-9]{2,}'
-KIND_TITLES = {'disk': 'Диски HDD и SSD', 'flash': 'Флешки и карты памяти'}
-
-def media_kind(disk_id):
-    return 'flash' if str(disk_id).startswith('Flash') else 'disk'
-
-def id_number(disk_id):
-    digits = re.sub('^(HDD|Flash)', '', str(disk_id))
-    return int(digits) if digits.isdigit() else 0
-
-def check_disk_id(disk_id):
-    if not re.fullmatch(ID_PATTERN, disk_id):
-        raise ValueError('Номер носителя — HDD03, HDD04… для дисков или Flash01, Flash02… для флешек и карт')
-    if media_kind(disk_id) == 'disk' and id_number(disk_id) < 3:
-        raise ValueError('HDD01 и HDD02 уже заняты; назначьте HDD03 или больше')
-    if media_kind(disk_id) == 'flash' and id_number(disk_id) < 1:
-        raise ValueError('Номера флешек начинаются с Flash01')
-    return disk_id
-
-REQUIRED_EXPORTS = ['job.json', 'result.json', 'inventory_summary.json', 'inventory.sqlite', 'hashes.sqlite']
-OPTIONAL_EXPORTS = ['runs.jsonl', 'log.txt']  # absent in exports made by 1.0.x
-
-def utc():
-    return datetime.now(timezone.utc).isoformat()
-
-def write_json(path, value):
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
-    temporary.replace(path)
 
 def say(message, to_file=True):
     """Print for the window/console and keep a permanent copy inside the job folder."""
@@ -122,34 +55,6 @@ def say(message, to_file=True):
                 handle.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S ') + message + '\n')
         except OSError:
             pass  # the log is a convenience; results are kept in the databases
-
-def duration(seconds):
-    if seconds is None:
-        return 'оценивается…'
-    seconds = int(seconds)
-    if seconds < 60:
-        return 'меньше минуты'
-    hours, minutes = divmod(seconds // 60, 60)
-    return f'{hours} ч {minutes:02d} мин' if hours else f'{minutes} мин'
-
-class Rate:
-    """Read speed over a sliding window. Files go from small to large, so an
-    early forecast is pessimistic and becomes shorter as large files start."""
-    def __init__(self, window=600, minimum=30):
-        self.window, self.minimum, self.samples = window, minimum, deque()
-
-    def add(self, now, read_bytes):
-        self.samples.append((now, read_bytes))
-        while len(self.samples) > 2 and now - self.samples[0][0] > self.window:
-            self.samples.popleft()
-
-    def value(self):
-        if len(self.samples) < 2:
-            return None
-        (t0, b0), (t1, b1) = self.samples[0], self.samples[-1]
-        if t1 - t0 < self.minimum or b1 <= b0:
-            return None
-        return (b1 - b0) / (t1 - t0)
 
 def publish(state):
     if not PROGRESS_FILE:
@@ -168,31 +73,6 @@ def awake():
         yield
     finally:
         kernel.SetThreadExecutionState(0x80000000)
-
-@contextmanager
-def lock(path):
-    # Windows byte lock is released by the OS even after a crash.
-    import msvcrt
-    with path.open('a+b') as handle:
-        handle.seek(0)
-        if not handle.read(1):
-            handle.write(b'0'); handle.flush()
-        handle.seek(0)
-        try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
-            raise RuntimeError('This job is already running')
-        try:
-            yield
-        finally:
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-
-def check_letter(letter):
-    letter = letter.rstrip(':\\').upper()
-    if not re.fullmatch('[A-Z]', letter):
-        raise ValueError('Expected one drive letter')
-    return letter
 
 def inspect(letter, kind='disk'):
     letter = check_letter(letter)
@@ -285,201 +165,12 @@ def describe(letter):
         info['volume_serial_error'] = str(exc)
     return info
 
-def identity_text(disk_id, info):
-    def gb(value):
-        return f'{value / 1e9:,.1f} ГБ'.replace(',', ' ') if isinstance(value, (int, float)) else '?'
-    kind = info.get('media_type') if info.get('media_type') in ('HDD', 'SSD', 'SCM') else 'тип HDD/SSD не сообщён'
-    if media_kind(disk_id) == 'flash':
-        kind = 'флешка или карта памяти'
-    signature_mbr = info.get('mbr_signature')
-    signature_mbr = f'{signature_mbr:08X}' if isinstance(signature_mbr, int) and signature_mbr else '—'
-    lines = [
-        f'Носитель {disk_id}: {info.get("model", "?")} · серийный номер {info.get("hardware_serial", "?")} · '
-        f'{gb(info.get("physical_bytes"))} · {kind} · подключение {info.get("bus_type", "?")}',
-        f'Том: метка «{info.get("volume_label", "")}» · серийный номер тома {info.get("volume_serial", "?")} · '
-        f'{info.get("filesystem", "?")} · {gb(info.get("volume_bytes"))} · буква {info.get("letter")}: (буква временная)',
-        f'Метки на самом диске: разметка {info.get("partition_style", "?")} · GUID раздела {info.get("partition_guid") or "—"} · '
-        f'GUID диска {info.get("disk_guid") or "—"} · подпись MBR {signature_mbr}',
-        f'Компьютер: {info.get("computer") or "?"} · прошивка {info.get("firmware") or "?"} · состояние {info.get("health") or "?"}',
-    ]
-    if info.get('describe_error'):
-        lines.append('Не удалось получить часть сведений Windows: ' + info['describe_error'])
-    return lines
-
-# Uniform results layout, the same on every computer:
-#   <results root>/<HDDxx|Flashxx - model - capacity - label>/<job_id>/
-#   <results root>/Реестр дисков.md and .csv, rebuilt after each scan/import.
-JOB_ID = re.compile(ID_PATTERN + r'_[0-9a-f]{32}')
-INDEX_NAME = 'Реестр дисков'
-
-def capacity(size):
-    if not size:
-        return 'размер неизвестен'
-    if size >= 1e12:
-        return f'{size / 1e12:.1f}'.replace('.0', '').replace('.', ',') + ' ТБ'
-    return f'{round(size / 1e9)} ГБ'
-
-def disk_folder_name(disk_id, record):
-    parts = [disk_id, (record.get('model') or 'модель неизвестна').strip(), capacity(record.get('physical_bytes') or record.get('volume_bytes'))]
-    if (record.get('label_at_registration') or '').strip():
-        parts.append(record['label_at_registration'].strip())
-    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', ' - '.join(parts)).strip(' .')
-    return name[:120].rstrip(' .')
-
-def disk_folder(root, disk_id, record):
-    # The folder of an already known disk is reused even if its label changed.
-    if root.is_dir():
-        for child in sorted(root.iterdir()):
-            if child.is_dir() and child.name.startswith(disk_id + ' - '):
-                return child
-    return root / disk_folder_name(disk_id, record)
-
-def results_root(job):
-    return job.parent.parent if job.parent.name.startswith(job.name.split('_')[0] + ' - ') else job.parent
-
-def find_jobs(root):
-    found = []
-    if not root.is_dir():
-        return found
-    for child in sorted(root.iterdir()):
-        if not child.is_dir() or child.name.startswith('_'):
-            continue  # _Входящие, _Архив… are not part of the catalogue
-        for folder in [child, *sorted(p for p in child.iterdir() if p.is_dir())]:
-            if (folder / 'job.json').is_file():
-                found.append(folder)
-    return found
-
-def read_json(path, default=None):
-    try:
-        return json.loads(path.read_text(encoding='utf-8'))
-    except (OSError, ValueError):
-        return default
-
-# Versions up to 1.3.1 recorded a damaged sector as this text: the error came from
-# reading an opened file, so unlike a refused open it carries no file name.
-LEGACY_READ_ERROR = '[Errno 13] Permission denied'
-
-def unread_count(job, damaged_only=False):
-    """Skipped files of a job: status 'error' — file-level cause, 'damaged' — read error of the medium."""
-    condition = "status='damaged' or (status='error' and error=?)" if damaged_only else "status in ('error','damaged')"
-    try:
-        with closing(sqlite3.connect((job / 'hashes.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
-            return db.execute(f'select count(*) from hashes where {condition}',
-                              (LEGACY_READ_ERROR,) if damaged_only else ()).fetchone()[0]
-    except sqlite3.Error:
-        return 0
-
-def job_row(job, root):
-    manifest = read_json(job / 'job.json', {})
-    record = manifest.get('record', {})
-    result = read_json(job / 'result.json', {})
-    summary = read_json(job / 'inventory_summary.json', {})
-    identity = dict(manifest.get('identity_at_registration') or {})
-    last_run = {}
-    if (job / 'runs.jsonl').exists():
-        for line in (job / 'runs.jsonl').read_text(encoding='utf-8').splitlines():
-            event = json.loads(line)
-            if event.get('identity'):
-                identity.update({k: v for k, v in event['identity'].items() if v not in (None, '')})
-            last_run = event if event.get('event') in ('start', 'finish') else last_run
-    status = result.get('status', 'running')
-    marker = identity.get('partition_guid') or identity.get('disk_guid')
-    if not marker and isinstance(identity.get('mbr_signature'), int) and identity['mbr_signature']:
-        marker = f'MBR {identity["mbr_signature"]:08X}'
-    return {
-        'Номер': manifest.get('disk_id', '?'),
-        'Вид носителя': KIND_TITLES[media_kind(manifest.get('disk_id', ''))], 'Модель': record.get('model', ''), 'Ёмкость': capacity(record.get('physical_bytes') or record.get('volume_bytes')),
-        'Метка тома': record.get('label_at_registration', ''), 'Серийный номер устройства': record.get('hardware_serial', ''),
-        'Серийный номер тома': record.get('volume_serial', ''), 'Метка на диске (GUID/MBR)': marker or '',
-        'Тип': identity.get('media_type') if identity.get('media_type') in ('HDD', 'SSD') else '',
-        'Подключение': identity.get('bus_type', ''), 'Последняя буква': identity.get('letter', ''),
-        'Компьютер': identity.get('computer', ''), 'Состояние': status,
-        'Файлов на диске': summary.get('files', ''), 'Занято файлами, ГБ': round(summary['bytes'] / 1e9, 1) if summary.get('bytes') else '',
-        'Фото/видео с хешем': result.get('selected_files', ''),
-        'Их объём, ГБ': round(result['selected_bytes'] / 1e9, 1) if result.get('selected_bytes') else '',
-        'Ошибок описи': summary.get('errors', ''),
-        'Не прочитано': unread_count(job),
-        'Из них — повреждения диска': unread_count(job, damaged_only=True),
-        'Правила': {3: 'v3', 2: 'v2 — добор .m2t/.dv', 1: 'v1 — нужен добор'}.get(policy_version(manifest.get('policy')), 'другие'),
-        'Дата': (last_run.get('utc') or manifest.get('created_utc', ''))[:10],
-        'Папка': str(job.relative_to(root)),
-    }
-
-def write_index(root):
-    import csv
-    rows = [job_row(job, root) for job in find_jobs(root)]
-    rows.sort(key=lambda r: (media_kind(r['Номер']) == 'flash', id_number(r['Номер']), r['Дата']))
-    warnings = []
-    by_id, by_serial = {}, {}
-    for r in rows:
-        by_id.setdefault(r['Номер'], set()).add((r['Серийный номер устройства'], r['Серийный номер тома']))
-        by_serial.setdefault((r['Серийный номер устройства'], r['Серийный номер тома']), set()).add(r['Номер'])
-    warnings += [f'Номер {k} назначен разным носителям — нужно разобраться вручную.' for k, v in by_id.items() if len(v) > 1]
-    warnings += [f'Один носитель (серийный номер {k[0] or "—"}, том {k[1]}) записан под номерами {", ".join(sorted(v))}.'
-                 for k, v in by_serial.items() if len(v) > 1]
-    damaged_disks = [f'{r["Номер"]} ({r["Из них — повреждения диска"]})' for r in rows if r['Из них — повреждения диска']]
-    if damaged_disks:
-        warnings.append('ПОВРЕЖДЕНИЯ НОСИТЕЛЯ — файлы не читаются из-за ошибок самого диска (CRC, сектор не найден), '
-                        'в скобках — сколько: ' + ', '.join(damaged_disks) + '. Проверьте SMART (например, '
-                        'CrystalDiskInfo), не сканируйте такой носитель повторно без необходимости и в первую '
-                        'очередь перенесите с него данные. Список файлов — в log.txt задания.')
-    unread_disks = [f'{r["Номер"]} ({r["Не прочитано"] - r["Из них — повреждения диска"]})' for r in rows
-                    if r['Не прочитано'] > r['Из них — повреждения диска']]
-    if unread_disks:
-        warnings.append('Есть непрочитанные файлы (в скобках — сколько): ' + ', '.join(unread_disks) +
-                        '. Причины — в log.txt задания. Исправьте доступ и продолжите сканирование: '
-                        'дочитаются только эти файлы.')
-    old_rules = sorted({r['Номер'] for r in rows if r['Правила'] != 'v2'})
-    if old_rules:
-        warnings.append(f'Сканированы по старым правилам (всё от 1 МиБ): {", ".join(old_rules)}. Подключите диск и нажмите '
-                        '«Начать сканирование» — программа предложит продолжить и дочитает только мелкие фото и видео.')
-    columns = list(rows[0]) if rows else ['Номер']
-    temporary = root / (INDEX_NAME + '.csv.tmp')
-    with temporary.open('w', encoding='utf-8-sig', newline='') as handle:
-        writer = csv.DictWriter(handle, columns, delimiter=';')
-        writer.writeheader(); writer.writerows(rows)
-    temporary.replace(root / (INDEX_NAME + '.csv'))
-    status_text = {'complete': 'завершён', 'complete_with_inventory_errors': 'завершён, есть недоступные папки',
-                   'complete_with_unread_files': 'завершён, есть непрочитанные файлы',
-                   'interrupted': 'остановлен', 'error': 'ошибка', 'running': 'не завершён'}
-    short = ['Номер', 'Модель', 'Ёмкость', 'Метка тома', 'Тип', 'Подключение', 'Состояние', 'Правила', 'Не прочитано', 'Фото/видео с хешем', 'Их объём, ГБ', 'Дата', 'Папка']
-    lines = [f'# {INDEX_NAME}', '', f'Создан автоматически {datetime.now():%d.%m.%Y %H:%M}. Не редактировать вручную: '
-             'файл пересоздаётся после каждого сканирования и импорта. Полные сведения, включая серийные номера, — в '
-             f'«{INDEX_NAME}.csv» (открывается в Excel).', '',
-             f'Заданий: {len(rows)} · дисков: {len({r["Номер"] for r in rows if media_kind(r["Номер"]) == "disk"})} · '
-             f'флешек и карт: {len({r["Номер"] for r in rows if media_kind(r["Номер"]) == "flash"})} · фото/видео с хешем: '
-             + f'{sum(r["Фото/видео с хешем"] or 0 for r in rows):,}'.replace(',', ' ') + ' файлов, '
-             + f'{sum(r["Их объём, ГБ"] or 0 for r in rows):,.1f}'.replace(',', ' ') + ' ГБ', '']
-    if warnings:
-        lines += ['## Требует внимания', '', *[f'- {w}' for w in warnings], '']
-    for kind, title in KIND_TITLES.items():
-        group = [r for r in rows if media_kind(r['Номер']) == kind]
-        if not group:
-            continue
-        lines += [f'## {title}', '', '| ' + ' | '.join(short) + ' |', '|' + '---|' * len(short)]
-        for r in group:
-            damaged = r['Из них — повреждения диска']
-            values = {**r, 'Состояние': status_text.get(r['Состояние'], r['Состояние']), 'Папка': r['Папка'].replace('\\', '/')}
-            if damaged:
-                values['Состояние'] += '; ПОВРЕЖДЕНИЯ ДИСКА — см. «Требует внимания»'
-                values['Не прочитано'] = f'{r["Не прочитано"]} (повреждения: {damaged})'
-            lines.append('| ' + ' | '.join(str(values[c]).replace('|', '/') for c in short) + ' |')
-        lines.append('')
-    temporary = root / (INDEX_NAME + '.md.tmp')
-    temporary.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    temporary.replace(root / (INDEX_NAME + '.md'))
-    return rows
-
 def refresh_index(root):
     try:
         write_index(root)
         say(f'Реестр дисков обновлён: {root / (INDEX_NAME + ".md")}', to_file=False)
     except (OSError, ValueError, KeyError) as exc:
         say(f'Реестр дисков не обновлён (результаты сохранены): {exc}', to_file=False)
-
-def append_run(job, event):
-    with (job / 'runs.jsonl').open('a', encoding='utf-8') as handle:
-        handle.write(json.dumps(event, ensure_ascii=False) + '\n')
 
 def process(job):
     global JOB_LOG
@@ -686,13 +377,6 @@ def process(job):
                 print(json.dumps(report, ensure_ascii=False, indent=2))
     refresh_index(results_root(job))
     return 0 if report['status'].startswith('complete') else 2
-
-def is_partial_job(manifest):
-    return str(manifest.get('scan_scope') or '').lower() == 'partial'
-
-def prior_sources(manifest):
-    """Previous jobs of this disk fixed at job creation (rescan.find_sources), oldest first."""
-    return [{**s, 'dir': Path(s['dir'])} for s in manifest.get('prior_sources') or []]
 
 def run_partial(job, manifest, root, check, run_id, base_state, physical, started):
     """Selected folders of a disk (1.4.0). The inventory of the folders is made anew on every run; a file is read
@@ -949,64 +633,6 @@ def require_separate_output(job, root):
     if job.resolve().drive.upper() == Path(root).drive.upper():
         raise RuntimeError('Results must not be stored on the source volume')
 
-def checksum(path):
-    with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-def export(job, destination, name=None):
-    with lock(job / 'worker.lock'):
-        result = json.loads((job / 'result.json').read_text(encoding='utf-8'))
-        if not result['status'].startswith('complete'):
-            raise RuntimeError('Only completed jobs can be exported')
-        names = REQUIRED_EXPORTS + [n for n in OPTIONAL_EXPORTS if (job / n).exists()]
-        folder = destination / (name or job.name)
-        folder.mkdir(parents=True, exist_ok=False)
-        hashes = {}
-        for name in names:
-            original = checksum(job / name)
-            shutil.copy2(job / name, folder / name)
-            hashes[name] = checksum(folder / name)
-            if hashes[name] != original:
-                raise RuntimeError('Export copy checksum mismatch: ' + name)
-        write_json(folder / 'checksums.json', hashes)
-        print('Exported:', folder)
-
-def export_all(root, destination):
-    """Export every completed job of a results folder; unchanged exports are skipped."""
-    done = skipped = failed = 0
-    for job in find_jobs(root):
-        status = read_json(job / 'result.json', {}).get('status', '')
-        if not status.startswith('complete'):
-            print(f'Пропущено (сканирование не завершено): {job.name}')
-            skipped += 1
-            continue
-        try:
-            names = REQUIRED_EXPORTS + [n for n in OPTIONAL_EXPORTS if (job / n).exists()]
-            target = destination / job.name
-            if target.exists():
-                saved = read_json(target / 'checksums.json', {})
-                if set(saved) == set(names) and all(checksum(job / n) == saved[n] for n in names):
-                    print(f'Уже на флешке, без изменений: {job.name}')
-                    skipped += 1
-                    continue
-                # Updated since the previous export (e.g. a top-up pass): a new copy beside it.
-                export(job, destination, f'{job.name}_{datetime.now():%Y%m%d_%H%M%S}')
-            else:
-                export(job, destination)
-            done += 1
-        except (OSError, RuntimeError, ValueError) as exc:
-            print(f'ОШИБКА экспорта {job.name}: {exc}', file=sys.stderr)
-            failed += 1
-    print(f'Экспорт: выгружено {done}, пропущено {skipped}, ошибок {failed}')
-    return 2 if failed else 0
-
-def verified_count(folder):
-    try:
-        with closing(sqlite3.connect((folder / 'hashes.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
-            return db.execute("select count(*) from hashes where status='verified'").fetchone()[0]
-    except sqlite3.Error:
-        return -1
-
 def import_any(folder, destination):
     """Import one exported job, or every exported job inside a folder (a whole USB stick)."""
     folders = [folder] if (folder / 'checksums.json').exists() else sorted(p for p in folder.iterdir() if (p / 'checksums.json').exists())
@@ -1062,20 +688,6 @@ def import_result(folder, destination, refresh=True):
 
 def source_root(letter):
     return check_letter(letter) + ':\\'
-
-def hash_types_of(args):
-    """'all' (хеш у всех обычных файлов, как до 1.6.0) или {'mode': 'only'|'skip', 'ext': [...]} по ключам
-    --hash-ext / --hash-skip-ext. Список расширений собирает окно каталога из правила «что копировать»."""
-    only, skip = getattr(args, 'hash_ext', None), getattr(args, 'hash_skip_ext', None)
-    if only is None and skip is None:
-        return 'all'
-    mode, text = ('only', only) if only is not None else ('skip', skip)
-    ext = rescan.parse_ext(text)
-    names = rescan.parse_list(getattr(args, 'hash_skip_names', None))
-    path_re = getattr(args, 'hash_skip_path_re', None) or ''
-    if mode == 'skip' and not ext and not names and not path_re:
-        return 'all'                     # пропускать нечего - это все типы
-    return {'mode': mode, 'ext': sorted(ext), 'junk_names': names, 'junk_path_re': path_re}
 
 def start_partial(args, record, output):
     """New job of selected folders: identity checked against the previous full inventory of this disk ID."""
