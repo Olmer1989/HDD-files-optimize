@@ -24,7 +24,7 @@ class CloseGuard(QObject):
             return False
         p = self.page
         if p.writing:
-            QMessageBox.information(p.win, TITLE, 'Идёт создание заданий («Разбор носителя»). Дождитесь окончания.')
+            QMessageBox.information(p.win, TITLE, 'Идёт создание заданий (вкладка «Выбор источников»). Дождитесь окончания.')
             ev.ignore()
             return True
         if not p.flush_now('Закрыть окно без сохранения? Они пропадут.'):   # этап 16: отметки дописываются сразу

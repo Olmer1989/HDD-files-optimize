@@ -61,7 +61,7 @@ class TreeView:
                 mark = dict(mark, text=f'{show_num(num)} {rest}'.strip())
             ch.setData(T_DEC, MARK_ROLE, mark)
             ch.setToolTip(T_DEC, mark['text'] + ('' if mark.get('own') else f' (от «{mark.get("src")}»)')
-                          + '. Сохранённые отметки «Разбора носителя».')
+                          + '. Сохранённые отметки вкладки «Выбор источников».')
         else:
             ch.setText(T_DEC, '—')
             ch.setForeground(T_DEC, QColor('#bdbdbd'))

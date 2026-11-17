@@ -125,7 +125,7 @@ class TasksTest(PageBase):
         # 18.11.2026: без вопроса «Создано заданий…» - набор сразу запускается по очереди, открыт «3. Копирование»
         self.assertTrue(wait(lambda: self.started), self.asked)
         self.assertEqual([Path(x).name for x in self.started], ['очередь заданий.cmd'])
-        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания на копирование'))
+        self.assertIs(self.w.stack.currentWidget(), self.w.page('Копирование'))
         self.assertFalse(any(x.startswith('Создано заданий') for x in self.asked), self.asked)
 
     def test_list_changed_before_create_is_shown_again(self):
@@ -252,7 +252,7 @@ class CapacityTest(PageBase):
         self.assertIn('Снимите галочки у части папок', self.dialogs[0])
         self.assertTrue(wait(lambda: self.started), self.asked)                 # Н2 - запущено (окно не открылось)
         self.assertEqual([Path(x).parent.name for x in self.started], [f'{SRC} — Работа — Работа'])
-        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания на копирование'))
+        self.assertIs(self.w.stack.currentWidget(), self.w.page('Копирование'))
 
 
 class TocTest(PageBase):

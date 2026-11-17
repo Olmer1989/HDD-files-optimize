@@ -162,6 +162,6 @@ def start_html(val, label, note=''):
     nod = sorted({g['direction'] for g in states if g['state'] == rz.G_NODISK})
     if nod:
         h.append(f'<p style="color:{GRAY}">Направление без диска — копирования не будет: {esc(", ".join(nod))}. '
-                 'Назначьте диск в «Обзоре».</p>')
+                 'Назначьте диск на вкладке «Назначить Архивный диск».</p>')
     h.append(f'<p style="color:{GRAY}; font-size:9pt">{FOOT}</p>')
     return ''.join(h)

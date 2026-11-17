@@ -14,7 +14,7 @@ from test_tasks_move import OK, copy_log                   # noqa: E402
 from ui.razbor import texts_start                          # noqa: E402
 from ui.tasks import model_load                            # noqa: E402
 
-TASKS = 'Задания на копирование'
+TASKS = 'Копирование'
 G = 1024 ** 3
 SPACE = {'HDD45': ('F:', 500 * G, 2000 * G, 4096), 'HDD77': ('G:', 300 * G, 1000 * G, 4096)}
 

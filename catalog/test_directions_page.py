@@ -46,7 +46,7 @@ class FakeWin(QWidget):
         super().__init__()
         self.bg = app.Background(self)
         self.errors, self.opened = [], []
-        self.pages = [('Обзор', None)]
+        self.pages = [('Назначить Архивный диск', None)]
 
     def show_error(self, text):
         self.errors.append(text)
@@ -670,7 +670,7 @@ class OverviewTest(DirBase):
         self.assertEqual([t['task'] for t in g[0]['items']], ['Т1', 'Т2', 'Т6'])
         html = app.attention_html(g)
         self.assertIn('Задания на копирование с ошибками или прерванные', html)
-        self.assertIn('Открыть Задания на копирование', html)
+        self.assertIn('Открыть вкладку «Копирование»', html)
         self.assertIn('«Т1» — готово с ошибками: сделано 5 из 5, ошибок 2', html)
         self.assertIn('«Т6» — состояние неизвестно', html)
         self.assertIn('href="tasks:"', html)
@@ -699,7 +699,7 @@ class OverviewTest(DirBase):
         self.assertNotIn('Открыть список', page.text.toPlainText())
         from PySide6.QtCore import QUrl
         page.link(QUrl('tasks:'))
-        self.assertEqual(self.win.opened, ['Задания на копирование'])
+        self.assertEqual(self.win.opened, ['Копирование'])
 
     def test_disk_column_not_cut(self):
         """Замечание 4 (16.11.2026): столбец «Диск» шире - «HDD55 · I:» не обрезается (и «(нет описи)» тоже)."""

@@ -26,12 +26,12 @@ class SyncView:
         m = p.model if p.model is not None and p.disk == self.disk else None
         num = self.spec.get('num')
         if p.saving or p.writing:
-            self.marks_note.setText('Идёт запись отметок в «Разборе носителя» — галочки ненадолго неактивны.')
+            self.marks_note.setText('Идёт запись отметок на вкладке «Выбор источников» — галочки ненадолго неактивны.')
         elif not ok:
-            self.marks_note.setText('Галочки неактивны: в «Разборе носителя» сейчас другой носитель или диск назначения.')
+            self.marks_note.setText('Галочки неактивны: на вкладке «Выбор источников» сейчас другой носитель или диск назначения.')
         else:
-            self.marks_note.setText('Галочка снята — папка не копируется (сохраняется сразу; «Отменить последнее» — в '
-                                    '«Разборе носителя»). Щелчок по имени — показать файлы папки.')
+            self.marks_note.setText('Галочка снята — папка не копируется (сохраняется сразу; «Отменить последнее» — на вкладке '
+                                    '«Выбор источников»). Щелчок по имени — показать файлы папки.')
         part = m.partial(num) if m is not None else {}
         self.painting = True
         was = self.ftree.signalsBlocked()

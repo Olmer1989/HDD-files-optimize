@@ -5,7 +5,7 @@ import disk_ui
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtWidgets import QLabel, QLayout
 
-RAZBOR_PAGE = 'Разбор носителя'
+RAZBOR_PAGE = 'Выбор источников'
 KINDS = (hb.KIND_MEDIA, hb.KIND_ALL)
 # галочки «Что копировать»: категория ядра -> подпись окна
 CAT_LABELS = ((hb.CAT_PHOTO, 'Фото'), (hb.CAT_VIDEO, 'Видео'), (hb.CAT_DOC, 'Документы (Word, Excel, PDF, тексты)'),

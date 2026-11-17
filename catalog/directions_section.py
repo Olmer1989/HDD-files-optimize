@@ -296,13 +296,13 @@ class DirectionsSection(QFrame):
         nums = self.checked()
         if not self.has_razbor():
             self.b_go.setEnabled(False)
-            self.b_go.setToolTip('Экран «Разбор носителя» ещё не готов.')
+            self.b_go.setToolTip('Вкладка «Выбор источников» ещё не готова.')
         elif not nums:
             self.b_go.setEnabled(False)
             self.b_go.setToolTip('Сначала отметьте галочкой хотя бы одно направление.')
         else:
             self.b_go.setEnabled(True)
-            self.b_go.setToolTip('Откроется «Разбор носителя»: там отмечают папки, которые копировать.')
+            self.b_go.setToolTip('Откроется вкладка «Выбор источников»: там отмечают папки, которые копировать.')
         dirs = self.data['dirs'] if self.data else {}
         names = [dirs[n].name for n in nums if n in dirs]
         if names:

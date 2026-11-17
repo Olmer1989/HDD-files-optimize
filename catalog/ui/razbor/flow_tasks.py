@@ -91,7 +91,7 @@ class TasksFlow:
         if nums is None:
             nums = [self.dest] if self.dest else []
             if not nums:
-                QMessageBox.information(self, TITLE, 'Диска назначения нет: назначьте диск направлению в «Обзоре».')
+                QMessageBox.information(self, TITLE, 'Диска назначения нет: назначьте диск направлению на вкладке «Назначить Архивный диск».')
                 return
         nums = list(nums)
         if m.drafts or self.saving:                       # этап 16: задания - из сохранённых; сначала дописать отметки

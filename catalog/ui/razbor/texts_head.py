@@ -108,16 +108,16 @@ def head_html(d, rows, space=None, others=()):
     Направление на нескольких дисках - строка на каждый диск. others - другие направления, отмеченные в «Обзоре»."""
     if d is None:
         return (f'<span style="color:{ORANGE}">Диска назначения нет: ни у одного направления не назначен диск.</span> '
-                '<span style="font-size:10pt; font-weight:normal">Назначьте диск в «Обзоре» → «Направления».</span>')
+                '<span style="font-size:10pt; font-weight:normal">Назначьте диск на вкладке «Назначить Архивный диск» → «Направления».</span>')
     if len(d.disks) > 1:
         h = (f'Диск назначения — {copies_word(len(d.disks))}:<br>'
              '<span style="font-size:12pt">' + '<br>'.join(disk_head(x, rows, space) for x in d.disks) + '</span>')
     else:
         h = 'Диск назначения: ' + disk_head(d.disks[0], rows, space)
     if others:
-        h += ('<br><span style="font-size:9pt; font-weight:normal; color:#37474f">В «Обзоре» отмечено ещё: '
+        h += ('<br><span style="font-size:9pt; font-weight:normal; color:#37474f">На вкладке «Назначить Архивный диск» отмечено ещё: '
               + esc(', '.join(f'{show_num(o.num)} {o.name}' for o in others)) +
-              ' — здесь используется первое по номеру; сменить диск — в «Обзоре», шаг 1.</span>')
+              ' — здесь используется первое по номеру; сменить диск — на вкладке «Назначить Архивный диск».</span>')
     return h
 
 

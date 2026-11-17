@@ -73,8 +73,8 @@ class Window(QMainWindow):
         self.resize(1250, 800)
         self.bg = Background(self)
         self.updating, self.sig = False, None
-        self.pages = [('Обзор', OverviewPage(self)),
-                      ('Разбор носителя', __import__('razbor_page').RazborPage(self)),
+        self.pages = [('Назначить Архивный диск', OverviewPage(self)),
+                      ('Выбор источников', __import__('razbor_page').RazborPage(self)),
                       (disk_ui.TASKS_PAGE, __import__('ui.tasks.page', fromlist=['TasksPage']).TasksPage(self)),
                       ('Диски и папки', DisksPage(self)),
                       ('Я сделал в Проводнике', explorer_page.ExplorerPage(self)),

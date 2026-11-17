@@ -143,7 +143,7 @@ class DisksPage(DisksView, InfoView, TreeView, SelectView, FolderFlow, RehashFlo
         self.rescan_btn.clicked.connect(self.rescan)
         self.missing_btn = QPushButton('Чего нет на дисках направления')
         self.missing_btn.setToolTip('Каких файлов выбранных папок (по SHA-256) нет на дисках направлений, отмеченных '
-                                    'галочкой в «Обзоре».')
+                                    'галочкой на вкладке «Назначить Архивный диск».')
         self.missing_btn.clicked.connect(self.presence)
         for w in (self.open_btn, self.rescan_btn, self.missing_btn):
             row.addWidget(w)

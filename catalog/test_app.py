@@ -61,10 +61,10 @@ class WindowTest(Base):
         self.assertNotIn('База собрана', ov.text.toPlainText())                # второй круг: она - в подвале окна
         self.assertNotIn('Задание 1', ov.text.toPlainText())                   # «Ждут запуска» убрано из «Обзора»
         names = [self.w.nav.item(i).text() for i in range(self.w.nav.count())]
-        self.assertIn('Задания на копирование', names)                          # третий круг «Обзора»
+        self.assertIn('Копирование', names)                          # третий круг «Обзора»
         self.assertNotIn('Задания', names)
-        self.w.open_page('Задания на копирование')
-        tasks = self.w.page('Задания на копирование')
+        self.w.open_page('Копирование')
+        tasks = self.w.page('Копирование')
         self.assertTrue(wait(lambda: tasks.t.rowCount() == 1))
         self.assertTrue(self.w.footer.text().startswith('База собрана '), self.w.footer.text())   # подвал окна
         self.assertIn(': носителей 4, файлов ', self.w.footer.text())
@@ -185,18 +185,18 @@ class StepsTest(WindowTest):
     def test_steps_on_three_pages(self):
         from PySide6.QtTest import QTest
         import ui_common
-        names = ['Обзор', 'Разбор носителя', disk_ui.TASKS_PAGE]
+        names = ['Назначить Архивный диск', 'Выбор источников', disk_ui.TASKS_PAGE]
         for i, name in enumerate(names):
             bar = self.w.page(name).steps
             self.assertIsInstance(bar, ui_common.StepsBar)
             self.assertEqual(bar.current, i)
             self.assertEqual([p.current for p in bar.plates], [j == i for j in range(3)])
-        texts = [p.label.text() for p in self.w.page('Обзор').steps.plates]
-        self.assertIn('1. Куда копируем', texts[0])
+        texts = [p.label.text() for p in self.w.page('Назначить Архивный диск').steps.plates]
+        self.assertIn('Назначить Архивный диск', texts[0])
         self.assertIn('выберите диск', texts[0])
-        self.assertIn('2. Что копируем', texts[1])
+        self.assertIn('Выбор источников', texts[1])
         self.assertIn('папки на носителе', texts[1])
-        self.assertIn('3. Копирование', texts[2])
+        self.assertIn('Копирование', texts[2])
         self.assertIn('запуск заданий', texts[2])
         for name in ('Диски и папки', 'Я сделал в Проводнике', 'Команды'):        # на других вкладках шагов нет
             self.assertEqual(self.w.page(name).findChildren(ui_common.StepsBar), [])
@@ -204,7 +204,7 @@ class StepsTest(WindowTest):
         self.w.resize(1400, 900)
         self.w.show()
         QAPP.processEvents()
-        ov = self.w.page('Обзор')
+        ov = self.w.page('Назначить Архивный диск')
         import directions_page
         # «2. Что копируем» - как «Дальше: выбрать папки на носителе»: без отмеченного диска не переходит
         with mock.patch.object(directions_page, 'chosen', return_value=[]):
@@ -213,14 +213,14 @@ class StepsTest(WindowTest):
         self.assertTrue(self.w.statusBar().currentMessage().startswith('Сначала отметьте диск'))
         self.assertTrue(ov.steps.last_hint.startswith('Сначала отметьте диск'))
         used = []
-        rz_page = self.w.page('Разбор носителя')
+        rz_page = self.w.page('Выбор источников')
         with mock.patch.object(directions_page, 'chosen', return_value=['Н3']), \
                 mock.patch.object(rz_page, 'use_choice', lambda: used.append(1)):
             QTest.mouseClick(ov.steps.plates[1].label, Qt.LeftButton)           # щелчок мышью по тексту плашки
-        self.assertEqual(self.w.nav.currentRow(), names_all.index('Разбор носителя'))
+        self.assertEqual(self.w.nav.currentRow(), names_all.index('Выбор источников'))
         self.assertEqual(used, [1])                                             # выбор - в списки «Разбора»
         self.w.page(disk_ui.TASKS_PAGE).steps.open(1)                           # и с «Заданий» - так же (уже там - ничего)
-        QTest.mouseClick(self.w.page('Разбор носителя').steps.plates[2], Qt.LeftButton)   # по самой плашке
+        QTest.mouseClick(self.w.page('Выбор источников').steps.plates[2], Qt.LeftButton)   # по самой плашке
         self.assertEqual(self.w.nav.currentRow(), names_all.index(disk_ui.TASKS_PAGE))
         self.w.page(disk_ui.TASKS_PAGE).steps.open(2)                            # текущий шаг - ничего
         self.assertEqual(self.w.nav.currentRow(), names_all.index(disk_ui.TASKS_PAGE))
@@ -352,9 +352,9 @@ class CommandsTest(WindowTest):
         self.run_cmd('mklist create', write=True)
         self.assertTrue((hb.TASKS / 'Новое задание').is_dir(), '\n'.join(self.cp.lines))
         self.assertIn('Создано задание', self.asked[-1])
-        self.assertIn('Задания на копирование', self.asked[-1])
-        self.assertIs(self.w.stack.currentWidget(), self.w.page('Задания на копирование'))
-        tasks = self.w.page('Задания на копирование')
+        self.assertIn('Копирование', self.asked[-1])
+        self.assertIs(self.w.stack.currentWidget(), self.w.page('Копирование'))
+        tasks = self.w.page('Копирование')
         self.assertTrue(wait(lambda: any(r['task'] == 'Новое задание' for r in tasks.rows)))
 
 

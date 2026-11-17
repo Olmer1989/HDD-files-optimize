@@ -71,7 +71,7 @@ def attention_html(groups):
                 out.append(f'<li>{h.escape(str(x))}</li>')
         out.append('</ul>')
         if g['key'] == 'tasks':
-            out.append('<p style="margin-top:0"><a href="tasks:">Открыть Задания на копирование</a></p>')
+            out.append('<p style="margin-top:0"><a href="tasks:">Открыть вкладку «Копирование»</a></p>')
     return ''.join(out)
 
 
@@ -130,7 +130,7 @@ class OverviewPage(QWidget):
         top = QHBoxLayout()
         self.btn = QPushButton('Обновить')
         self.btn.clicked.connect(self.refresh)
-        title = QLabel('Обзор')
+        title = QLabel('Назначить Архивный диск')
         f = title.font()
         f.setPointSizeF(f.pointSizeF() + 4)
         f.setBold(True)

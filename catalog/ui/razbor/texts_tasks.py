@@ -96,7 +96,7 @@ def tasks_html(val, disk_name, note=''):
     blocked = toc is not None and (not toc['connected'] or toc['problems'])
     if new and not blocked:
         h.append(f'<p style="color:gray">Будет создано заданий: {len(new)} в «Запускаемые скрипты». Ничего не копируется '
-                 'и не запускается; запуск - в разделе «Задания на копирование».</p>')
+                 'и не запускается; запуск - на вкладке «Копирование».</p>')
     elif specs and not new:
         h.append('<p>Все задания уже подготовлены раньше - новых нет.</p>')
     return ''.join(h), new

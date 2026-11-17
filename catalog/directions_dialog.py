@@ -129,7 +129,7 @@ class DirectionDialog(QDialog):
         self.card.setVisible(self.mode != ASSIGN)
         if self.mode == CARD and cur is not None:
             info = QLabel(f'Диски направления: {", ".join(cur.disks)}. Здесь они не меняются.' if cur.disks else
-                          'Диск не назначен — назначить его можно кнопкой «Назначить диск…» в «Обзоре».')
+                          'Диск не назначен — назначить его можно кнопкой «Назначить диск…» на вкладке «Назначить Архивный диск».')
             info.setStyleSheet('color:#555')
             lay.addWidget(info)
         # диски - только у нового направления и при первом назначении

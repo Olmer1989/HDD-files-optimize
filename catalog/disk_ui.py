@@ -7,7 +7,7 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 
-TASKS_PAGE = 'Задания на копирование'     # имя раздела окна (меню слева); переходы - open_page(TASKS_PAGE)
+TASKS_PAGE = 'Копирование'     # имя раздела окна (меню слева); переходы - open_page(TASKS_PAGE)
 ON_COLOR, OFF_COLOR = QColor('#1b5e20'), QColor('#8a8a8a')
 # Диски направлений (этап 5, 15.11.2026): назначенный направлению диск - оранжевый, это важнее «подключён»
 # (подключённость видна ещё жирным шрифтом, значком «●» и буквой); неподключённый назначенный - бледно-оранжевый.

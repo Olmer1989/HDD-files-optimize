@@ -1147,7 +1147,7 @@ class CommandsPage(QWidget):
         self.buttons()
         if self.form().task_buttons:
             if QMessageBox.question(self, TITLE, f'Создать задание «{self.form().value("name")}» в «Запускаемые '
-                                    'скрипты»?\n\nЗапускаете его вы — в разделе «Задания на копирование».') != QMessageBox.Yes:
+                                    'скрипты»?\n\nЗапускаете его вы — на вкладке «Копирование».') != QMessageBox.Yes:
                 return
             self.start(args)
             return
@@ -1268,7 +1268,7 @@ class CommandsPage(QWidget):
             self.win.statusBar().showMessage('Записано. Применяю к базе…', 5000)
             self.win.apply_new()
         if code == 0 and self.task_dir is not None and self.task_dir.exists():
-            if QMessageBox.question(self, TITLE, f'Создано задание «{self.task_dir.name}». Перейти в «Задания на копирование»?') == QMessageBox.Yes:
+            if QMessageBox.question(self, TITLE, f'Создано задание «{self.task_dir.name}». Перейти на вкладку «Копирование»?') == QMessageBox.Yes:
                 self.win.open_page(TASKS_PAGE)
 
     def mark_move(self, form):

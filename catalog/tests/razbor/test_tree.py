@@ -137,7 +137,7 @@ class ChoiceTest(PageBase):
         self.p.set_dest('Н2')
         self.p.use_choice()
         self.assertEqual(self.p.dest, 'Н1')
-        self.assertIn('В «Обзоре» отмечено ещё: А2 Работа', self.p.where.text())   # первое по номеру - и сказано
+        self.assertIn('На вкладке «Назначить Архивный диск» отмечено ещё: А2 Работа', self.p.where.text())   # первое по номеру - и сказано
         self.mark(('', 'Н2'))                                                    # сохранённый режим - «всё в Н2»
         dp.save_choice(['Н1'])
         self.p.load_disk(SRC, keep=False)

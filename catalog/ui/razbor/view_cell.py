@@ -190,7 +190,7 @@ class CellView:
             c.title.setText('Копировать на диск')
             c.sub.setText('')
             c.set_blocks([])
-            c.body.setText(f'<span style="color:{ORANGE}">Диска назначения нет: назначьте диск направлению в «Обзоре».'
+            c.body.setText(f'<span style="color:{ORANGE}">Диска назначения нет: назначьте диск направлению на вкладке «Назначить Архивный диск».'
                            '</span>')
             c.paint('#9e9e9e', '#fafafa')
             state = 'none'

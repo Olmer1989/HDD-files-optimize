@@ -53,12 +53,12 @@ def cmd_v3(a, c, jobs):
         meta = _json(paths.TASKS / name / V3_META)
         if meta and meta.get('ключ') == src['key'] and meta.get('носитель') == src['disk'] and \
                 not list((paths.TASKS / name).glob('Журнал перемещения *.tsv')):
-            sys.exit(f'Задание перемещения уже создано и ещё не запускалось: «{name}». Запустите его из «Заданий».')
+            sys.exit(f'Задание перемещения уже создано и ещё не запускалось: «{name}». Запустите его на вкладке «Копирование».')
         name, i = f'{base} {i}', i + 1
     serial = {v: k for k, v in serials.items()}.get(src['disk'], 'НЕТ_СЕРИЙНОГО_НОМЕРА')
     task = _write_task_v3(name, res, serial)
     out(f'Папка задания: {task}')
-    out('Запускает владелец: «Задания» в окне (с проверкой) или «Запустить.cmd» в этой папке.')
+    out('Запускает владелец: вкладка «Копирование» в окне (с проверкой) или «Запустить.cmd» в этой папке.')
 
 
 def cmd_mvlist(a):

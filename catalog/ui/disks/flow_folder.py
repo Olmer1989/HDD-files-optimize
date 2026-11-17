@@ -44,7 +44,7 @@ class FolderFlow:
         dirs = directions_page.chosen()
         targets = list(dict.fromkeys(x for d in dirs for x in d.disks))
         if not targets:
-            QMessageBox.information(self, TITLE, 'В «Обзоре» не отмечено ни одного направления с диском. Отметьте '
+            QMessageBox.information(self, TITLE, 'На вкладке «Назначить Архивный диск» не отмечено ни одного направления с диском. Отметьте '
                                     'направления галочками — их диски и проверятся.')
             return
         self.info.setText('Считаю…')

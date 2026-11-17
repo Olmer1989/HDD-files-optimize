@@ -165,7 +165,7 @@ def _plan_list(kind, disk, num, target, drafts):
         if kind == 'copy':
             write = counts['rep'] + counts['nohash']
             pb = P.part_b.get(target, [0, 0])[0]
-            notes.append(f'В задание войдёт {write} файлов — как в ячейке «Разбора»; повторы того же содержимого '
+            notes.append(f'В задание войдёт {write} файлов — как в ячейке на вкладке «Выбор источников»; повторы того же содержимого '
                          f'(пишутся один раз): {counts["dup"]}; не будут скопированы (заблокированы): {counts["blocked"]}.')
             if write != pb:
                 notes.append(f'ВНИМАНИЕ: список не сходится с частью Б ({pb} файлов) - сообщите о расхождении.')

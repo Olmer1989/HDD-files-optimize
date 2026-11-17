@@ -30,7 +30,7 @@ class TasksPage(TableView, DoneView, OffersView, AskView, RunFlow, QWidget):
         self.start_file = os.startfile                    # тесты подменяют: окно PowerShell не открывается
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
-        self.head = QLabel('Задания на копирование')
+        self.head = QLabel('Копирование')
         f = QFont()
         f.setPointSize(14)
         f.setBold(True)

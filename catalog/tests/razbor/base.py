@@ -78,10 +78,10 @@ class PageBase(V3Base):
         self.w = app.Window()
         self.w.show_error = self.asked.append
         self.assertTrue(wait(lambda: not self.w.updating), 'первая сборка базы в фоне не закончилась')
-        self.p = self.w.page('Разбор носителя')
+        self.p = self.w.page('Выбор источников')
         self.started = []                                  # запуск заданий: окна PowerShell не открываются (18.11)
-        self.w.page('Задания на копирование').start_file = self.started.append
-        self.w.open_page('Разбор носителя')
+        self.w.page('Копирование').start_file = self.started.append
+        self.w.open_page('Выбор источников')
         self.assertTrue(wait(lambda: self.p.disk_rows))
 
     def tearDown(self):
