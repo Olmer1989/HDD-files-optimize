@@ -52,9 +52,12 @@ class ContestedDialog(QDialog):
         self.resize(820, 520)
         lay = QVBoxLayout(self)
         where = f'{disk}\\{self.folder}' if self.folder else f'{disk} (весь носитель)'
-        lay.addWidget(QLabel(f'<b>{esc(where)}</b>: где лежат файлы без хеша и '
-                             'неподтверждённые копии, из-за которых ответ «можно ли удалить» - «НЕТ» или «НЕДОСТАТОЧНО».'
-                             ' Пересканирование посчитает хеш у всех файлов этих папок.'))
+        note = QLabel(f'<b>{esc(where)}</b>: где лежат файлы без хеша и '
+                      'неподтверждённые копии, из-за которых ответ «можно ли удалить» - «НЕТ» или «НЕДОСТАТОЧНО».'
+                      ' Пересканирование посчитает хеш у всех файлов этих папок.')
+        note.setWordWrap(True)                  # иначе окно расползается по ширине текста (замечание владельца 18.11)
+        note.setMaximumWidth(780)
+        lay.addWidget(note)
         self.text = QTextBrowser()
         lay.addWidget(self.text, 1)
         self.buttons = QVBoxLayout()

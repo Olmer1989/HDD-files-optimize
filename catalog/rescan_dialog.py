@@ -37,10 +37,14 @@ class RescanDialog(QDialog):
         self.setWindowTitle(f'Пересканировать папки - {disk}')
         self.resize(860, 560)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f'<b>{disk}</b>: ' + html.escape('; '.join(self.folders))))
+        folder_line = QLabel(f'<b>{disk}</b>: ' + html.escape('; '.join(self.folders)))
+        folder_line.setWordWrap(True)            # длинный список папок не должен задавать ширину окна
+        folder_line.setMaximumWidth(820)
+        lay.addWidget(folder_line)
         self.text = QTextBrowser()
         lay.addWidget(self.text, 1)
-        self.rehash = QCheckBox('Перечитать всё (прежние хеши не брать; дольше - для проверки сохранности)')
+        self.rehash = QCheckBox('Перечитать всё (прежние хеши не брать)')     # длинный текст распирал окно (18.11)
+        self.rehash.setToolTip('Дольше: файлы читаются заново даже с годным прежним хешем — для проверки сохранности.')
         self.rehash.toggled.connect(self.preview)
         lay.addWidget(self.rehash)
         # Типы файлов для хеша (сканер 1.6.0). По умолчанию - все (как раньше: хеш у всех файлов, и у программ, и у
