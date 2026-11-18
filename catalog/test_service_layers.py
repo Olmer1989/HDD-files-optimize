@@ -24,7 +24,7 @@ from tests.sv_patch import bindings, sv_patch, sv_patch_multiple   # noqa: E402
 PKG = CAT / 'service'
 # Ранги подмодулей снизу вверх: подмодуль импортирует из пакета только файлы СТРОГО ниже рангом (from .x import …);
 # __init__ - выше всех (отдаёт все прежние имена). Новый файл без строки - ошибка test_service_layers.
-SV_RANK = {'write': 0, 'directions_v3': 1, 'jobs': 1, 'read_disks': 2, 'read_hash': 3, 'rescan_run': 3, 'marks': 3,
+SV_RANK = {'write': 0, 'directions_v3': 1, 'jobs': 1, 'jobs_cancel': 2, 'read_disks': 2, 'read_hash': 3, 'rescan_run': 3, 'marks': 3,
            'razbor_plan': 3, 'owner': 4, 'filelist': 4, 'razbor_screen': 4, 'direction_edit': 4, 'copy_retry': 4,
            'family': 5}
 LOCK_ONLY = {'append_row', 'append_rows', 'backup'}         # запись таблиц владельца - только внутри «with TableLock()»

@@ -6,7 +6,7 @@ import os
 from ui_common import StepsBar
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QPushButton,
                                QScrollArea, QTableWidget, QToolButton, QVBoxLayout, QWidget)
 
@@ -17,9 +17,11 @@ from .view_done import DoneView
 from .view_offers import OffersView
 from .view_ask import AskView
 from .flow_run import RunFlow
+from .flow_cancel import CancelFlow
+from .texts_cancel import CANCEL_BTN
 
 
-class TasksPage(TableView, DoneView, OffersView, AskView, RunFlow, QWidget):
+class TasksPage(TableView, DoneView, OffersView, AskView, RunFlow, CancelFlow, QWidget):
     HEAD = ['', 'Что и куда', 'Состояние', 'Сделано', 'Ошибки']
     DONE_HEAD = ['Задание', 'Файлов', 'ГБ', 'Ошибок и пропусков', 'Дата']
 
@@ -64,6 +66,10 @@ class TasksPage(TableView, DoneView, OffersView, AskView, RunFlow, QWidget):
         hh.setSectionResizeMode(1, QHeaderView.Interactive)      # ширина - по самой длинной строке «Что и куда»
         hh.setSectionResizeMode(2, QHeaderView.Stretch)
         self.t.setWordWrap(False)
+        pal = self.t.palette()                            # выделение не бледнеет без фокуса: белый текст строки виден
+        for role in (QPalette.Highlight, QPalette.HighlightedText):
+            pal.setColor(QPalette.Inactive, role, pal.color(QPalette.Active, role))
+        self.t.setPalette(pal)
         self.t.itemChanged.connect(self.on_check)
         lay.addWidget(self.t)
         bar = QHBoxLayout()
@@ -77,10 +83,12 @@ class TasksPage(TableView, DoneView, OffersView, AskView, RunFlow, QWidget):
         self.log_btn.clicked.connect(self.open_log)
         self.dir_btn = QPushButton('Открыть папку задания')
         self.dir_btn.clicked.connect(self.open_dir)
+        self.cancel_btn = QPushButton(CANCEL_BTN)
+        self.cancel_btn.clicked.connect(self.cancel_task)
         for b in (self.run_btn, self.all_btn):
             bar.addWidget(b)
         bar.addStretch()
-        for b in (self.log_btn, self.dir_btn):
+        for b in (self.log_btn, self.cancel_btn, self.dir_btn):
             bar.addWidget(b)
         lay.addLayout(bar)
         lay.addWidget(_small(RUN_NOTE, '#37474f'))
@@ -121,5 +129,9 @@ class TasksPage(TableView, DoneView, OffersView, AskView, RunFlow, QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.t.itemSelectionChanged.connect(lambda: self._only_one(self.t, self.done_t))
+        self.t.itemSelectionChanged.connect(self._paint_sel)
+        self.t.itemSelectionChanged.connect(self.update_cancel_btn)
+        self.done_t.itemSelectionChanged.connect(self.update_cancel_btn)
         self.done_t.itemSelectionChanged.connect(lambda: self._only_one(self.done_t, self.t))
         self._done_title(0)
+        self.update_cancel_btn()

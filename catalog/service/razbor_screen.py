@@ -143,7 +143,7 @@ def queued_copy(exclude_disk=None, root=None):
         return {}
     for t in root.iterdir():
         lst = t / 'список.tsv'
-        if not t.is_dir() or not lst.exists() or list(t.glob('Журнал копирования *.tsv')):
+        if not t.is_dir() or t.name.startswith('_') or not lst.exists() or list(t.glob('Журнал копирования *.tsv')):
             continue
         src = ''
         try:

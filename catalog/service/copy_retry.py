@@ -34,7 +34,7 @@ def _copy_group(name):
             raise Refused(f'Нет исходного задания «{t.name}».')
     retries = []
     if hb.TASKS.exists():
-        for d in sorted(p for p in hb.TASKS.iterdir() if p.is_dir()):
+        for d in sorted(p for p in hb.TASKS.iterdir() if p.is_dir() and not p.name.startswith('_')):
             m = _task_meta(d) if (d / 'разбор.json').exists() else None
             if m and m.get('повтор') == t.name:
                 retries.append(d)

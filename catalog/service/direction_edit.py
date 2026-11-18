@@ -30,7 +30,7 @@ def direction_usage(num, dirs=None, root=None):
     root = Path(root or hb.TASKS)
     tasks_ = []
     if root.exists():
-        for t in sorted(p for p in root.iterdir() if p.is_dir()):
+        for t in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith('_')):
             meta = _task_meta(t)
             if not meta or meta.get('направление') != num:
                 continue

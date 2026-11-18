@@ -56,7 +56,8 @@ class TableView:
             it.setData(Qt.UserRole, f'{l1}\n{l2}')
             it.setToolTip(f'Задание: {r["task"]}\n{r.get("disks_long") or r.get("disks", "")}')
             self.t.setItem(i, 1, it)
-            lab = QLabel(f'{html.escape(l1)}<br><span style="color:{GREY}; font-size:9pt">{html.escape(l2)}</span>')
+            lab = QLabel(self._what_html(l1, l2, False))
+            lab.l12 = (l1, l2)
             lab.setTextFormat(Qt.RichText)
             lab.setContentsMargins(4, 2, 4, 2)
             lab.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -73,6 +74,7 @@ class TableView:
             if sel and r['task'] == sel['task']:
                 self.t.selectRow(i)
         self.t.blockSignals(False)
+        self._paint_sel()
         widths = [self.t.cellWidget(i, 1).sizeHint().width() for i in range(len(self.trows))]
         self.t.setColumnWidth(1, min(700, max([260] + widths) + 16))
         # таблица - по числу строк (до 8 видно сразу, дальше прокрутка): место ниже - блоку перемещения и «Готово»
@@ -101,6 +103,21 @@ class TableView:
 
     def update_run_btn(self):
         self.run_btn.setText(f'Запустить отмеченные ({len(self.checked)})')
+        self.update_cancel_btn()
+
+    @staticmethod
+    def _what_html(l1, l2, on):
+        """«Что и куда» в две строки; в выделенной строке (синий фон) - белый и светлый текст."""
+        c1, c2 = ('#ffffff', '#e3f2fd') if on else (None, GREY)
+        head = f'<span style="color:{c1}">{html.escape(l1)}</span>' if c1 else html.escape(l1)
+        return f'{head}<br><span style="color:{c2}; font-size:9pt">{html.escape(l2)}</span>'
+
+    def _paint_sel(self):
+        sel = {ix.row() for ix in self.t.selectionModel().selectedRows()}
+        for i in range(self.t.rowCount()):
+            lab = self.t.cellWidget(i, 1)
+            if lab is not None and hasattr(lab, 'l12'):
+                lab.setText(self._what_html(*lab.l12, i in sel))
 
     def on_check(self, it):
         if it.column() != 0 or not (0 <= it.row() < len(self.trows)):

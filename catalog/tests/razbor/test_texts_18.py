@@ -33,17 +33,32 @@ class TextsUnitTest(unittest.TestCase):
         self.assertEqual(texts_head.archive_where(two, [ROW_ON], carrier='HDD77'),
                          'Архивном диске А1 (H: «Бэкап фото и видео», 16 ТБ)')       # носитель сам не считается
 
-    def test_nohash_line(self):
-        kinds = 'Типы файлов: «фото», «видео», «документы рядом с ними» — согласно настройкам А1'
-        h = texts_cell.nohash_html(NH, 1, 'H:', 70388, where=texts_head.archive_where(DIR1, [ROW_ON]), kinds=kinds)
-        self.assertIn('✖ Из 70 388 файлов, которых нет на Архивном диске А1 (H: «Бэкап фото и видео», 16 ТБ), '
-                      'у 37 945 нет хеша</b> (в 27 папках)', h)
-        self.assertIn('Показать</a>', h)
-        self.assertIn(kinds + '.', h)
-        self.assertIn('Копирование будет возможно только после того, как у них будет просчитан хеш.', h)
-        self.assertIn('только эти папки и только нужные типы файлов', h)
-        self.assertNotIn('появится хеш', h)
-        self.assertIn('Из 1 файла, которого нет на H:', texts_cell.nohash_html(dict(NH, n=1, folders=[]), 1, 'H:', 1))
+    def test_step1(self):
+        """Шаг 1 «Перед копированием» (макет 18.11.2026): красный - есть файлы без хеша; зелёный - у всех есть."""
+        h = texts_cell.step1_html(NH, 1, 'HDD09', 70388)
+        self.assertIn('<b>✖</b></span> <b>1. Посчитать хеш на HDD09 — <span style="color:#c62828">обязательно</span>', h)
+        self.assertIn('У 37 945 из 70 388 файлов для копирования нет хеша. Без него копию нельзя проверить. ', h)
+        self.assertIn('<a href="nh-list:" style="color:#1565c0">Какие файлы</a>', h)
+        self.assertIn('У 1 из 1 файла для копирования', texts_cell.step1_html(dict(NH, n=1), 1, 'HDD09', 1))
+        self.assertIn('✓ 1. Хеш есть у всех файлов для копирования', texts_cell.step1_html(dict(NH, n=0), 1, 'X', 5))
+        self.assertIn('✓ 1. Хеш есть у всех', texts_cell.step1_html(None, 0, 'X', 5))       # быстрый признак: нет
+        self.assertIn('идёт проверка', texts_cell.step1_html(None, 3, 'X', 5))
+        self.assertIn('не посчитано (проба)', texts_cell.step1_html({'error': 'проба'}, 3, 'X', 5))
+
+    def test_step2(self):
+        k = dict(k=39, folders=['a'], root=0, cats=[], sample=['H:\\a\\1.jpg'])
+        h = texts_cell.step2_html(2, 'HDD45', 'H:', k)
+        self.assertIn('2. Посчитать хеш у файлов на H: с тем же именем и размером — '
+                      '<span style="color:#757575">по желанию</span>', h)
+        self.assertIn('На H: лежат 39 файлов с теми же именами и размерами, что у файлов для копирования, но без хеша. '
+                      'Если посчитать их хеш, часть файлов может оказаться «уже есть» и не скопируется второй раз.', h)
+        self.assertIn('href="nh-clist:HDD45"', h)
+        h1 = texts_cell.step2_html(2, 'HDD45', 'H:', dict(k, k=1, sample=[]))
+        self.assertIn('На H: лежит 1 файл', h1)
+        self.assertNotIn('Какие файлы', h1)                                       # списка нет - без ссылки
+        self.assertEqual(texts_cell.kinds_note('А1'),
+                         'Настройка А1 — общая для всех носителей; уже созданные задания не меняются.')
+        self.assertEqual(texts_cell.SKIP_TEXT, 'Не копируются (другой тип)')
 
     def test_contested_note(self):
         self.assertIn('непроверенные копии на архивных дисках.', common.CONTESTED_NOTE)

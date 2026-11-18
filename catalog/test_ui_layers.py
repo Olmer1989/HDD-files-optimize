@@ -19,10 +19,10 @@ from test_modules import imports, top        # noqa: E402
 # (view_*, flow_* - 6). Файл пакета импортирует из пакета только файлы СТРОГО ниже рангом: view_* и flow_* друг друга не
 # импортируют. Новый пакет ui/* без строки здесь - ошибка test_ui_layers.
 UI_RANK = {'razbor': {'texts_cell': 0, 'common': 1, 'texts_tasks': 1, 'texts_start': 1, 'texts_hash': 1, 'texts_head': 2, 'model_marks': 3, 'model_checks': 3,
-                      'model_show': 3, 'model': 4, 'dialogs': 5, 'dialog_start': 5, 'dialog_hash': 5,
+                      'model_show': 3, 'model': 4, 'dialogs': 5, 'dialog_start': 5, 'dialog_hash': 5, 'cell_parts': 5,
                       'page': 7},
            'filelist': {'texts_list': 0, 'common': 1, 'model_rows': 2, 'model_table': 3, 'page': 7},
-           'tasks': {'common': 0, 'texts_words': 1, 'texts_rows': 2, 'model_journal': 3, 'model_rules': 3,
+           'tasks': {'common': 0, 'texts_words': 1, 'texts_rows': 2, 'texts_cancel': 3, 'model_journal': 3, 'model_rules': 3,
                      'model_run': 3, 'model_move': 3, 'model_load': 4, 'widgets': 5, 'page': 7},
            'disks': {'texts_disks': 0, 'texts_tree': 0, 'texts_info': 0, 'common': 1, 'page': 7}}
 SHIMS = {'razbor_page': 60, 'razbor_cell': 60, 'test_razbor_page': 60,          # переходники шага А: прежние имена,

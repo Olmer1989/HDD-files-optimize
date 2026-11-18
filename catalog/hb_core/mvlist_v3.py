@@ -137,7 +137,7 @@ def move_metas(disk=None):
         root = Path(root)
         if root.exists():
             for d in sorted(root.iterdir()):
-                m = _json(d / V3_META) if (d / V3_META).exists() else None
+                m = _json(d / V3_META) if not d.name.startswith('_') and (d / V3_META).exists() else None
                 if m and m.get('версия') == 3 and (disk is None or m.get('носитель') == disk) and _moved_done(d):
                     res.append(m)
     return res

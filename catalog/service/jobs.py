@@ -68,10 +68,11 @@ def task_state(task, running='спросить'):
 
 
 def tasks(root=None):
+    """Задания в «Запускаемые скрипты». Папки, чьё имя начинается с «_» («_Отменённые»), - не задания."""
     root = Path(root or hb.TASKS)
     running = running_scripts()
     res = []
-    for d in sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []:
+    for d in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith('_')) if root.exists() else []:
         st = task_state(d, running)
         if st:
             res.append(st)

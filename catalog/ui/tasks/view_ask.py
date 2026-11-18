@@ -26,5 +26,13 @@ class AskView:
         box.exec()
         return btns.get(box.clickedButton())
 
+    def confirm(self, text, yes, no):
+        """Вопрос с двумя кнопками своими словами («Отменить задание» / «Не отменять») -> True, если «yes»."""
+        box = QMessageBox(QMessageBox.Question, TITLE, text, parent=self)
+        ok = box.addButton(yes, QMessageBox.AcceptRole)
+        box.setDefaultButton(box.addButton(no, QMessageBox.RejectRole))
+        box.exec()
+        return box.clickedButton() is ok
+
     def show_text(self, title, text, ok=None):
         return TextDialog(self, title, text, ok).exec() == QDialog.Accepted

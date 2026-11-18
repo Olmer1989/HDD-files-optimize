@@ -174,14 +174,17 @@ class NohashButtonTest(PageBase):
         self.settle()
         self.assertTrue(wait(lambda: self.p.nohash_result() is not None, 60))
         c = self.p.copy_cell
-        self.assertIn('✖ Из 4 файлов, которых нет на Архивных дисках А1 (HDD45 и HDD77), у 1 нет хеша', c.nohash.text())
+        self.assertIn('У 1 из 4 файлов для копирования нет хеша', c.nohash.text())
         self.assertTrue(c.scan_btn.isVisibleTo(c))
-        self.assertEqual(c.scan_btn.text(), 'Посчитать хеш (1)')
+        self.assertEqual(c.scan_btn.text(), 'Посчитать (1)')
         self.assertFalse(c.btn.isEnabled())
-        self.assertIn('Посчитать хеш', c.btn.toolTip())
+        self.assertIn('Сначала хеш', c.btn.toolTip())
+        self.assertTrue(c.prep.isAncestorOf(c.scan_btn))                       # «Посчитать» - в рамке, у шага 1
+        self.assertTrue(c.wait.isVisibleTo(c))                                 # «станет доступно после шага 1»
+        self.assertEqual(c.wait.text(), 'станет доступно после шага 1')
         lay = [c.layout().itemAt(i) for i in range(c.layout().count())]
         box = next(x.layout() for x in lay if x.layout() is not None and x.layout().indexOf(c.btn) >= 0)
-        self.assertLess(box.indexOf(c.scan_btn), box.indexOf(c.btn))          # «Посчитать хеш» - слева
+        self.assertLess(box.indexOf(c.wait), box.indexOf(c.btn))               # подпись - рядом, слева от кнопки
 
 
 if __name__ == '__main__':

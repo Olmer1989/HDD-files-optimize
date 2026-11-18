@@ -26,12 +26,12 @@ class NohashCellTest(PageBase):
         self.assertEqual((nh['n'], nh['folders'], nh['cats']), (1, ['Поход 2010'], [hb.CAT_DOC]))
         cell = self.p.copy_cell
         text = cell.nohash.text()
-        self.assertIn('✖ Из 4 файлов, которых нет на Архивных дисках А1 (HDD45 и HDD77), у 1 нет хеша</b>', text)
-        self.assertIn('в 1 папке', text)
+        self.assertIn(f'1. Посчитать хеш на {SRC} — ', text)
+        self.assertIn('У 1 из 4 файлов для копирования нет хеша', text)
         self.assertFalse(self.p.tasks_btn.isEnabled())
         self.assertIn('Сначала хеш', self.p.tasks_btn.toolTip())
         self.assertTrue(cell.scan_btn.isVisibleTo(cell) and cell.scan_btn.isEnabled())
-        self.assertEqual(cell.scan_btn.text(), 'Посчитать хеш (1)')
+        self.assertEqual(cell.scan_btn.text(), 'Посчитать (1)')
         made = []
 
         class FakeDlg:
@@ -61,9 +61,52 @@ class NohashCellTest(PageBase):
         self.p.apply(['Друзья'], N1)
         nh = self.ready()
         self.assertEqual(nh['n'], 0)
-        self.assertIn('есть хеш', self.p.copy_cell.nohash.text())
+        self.assertIn('✓ 1. Хеш есть у всех файлов для копирования', self.p.copy_cell.nohash.text())
+        self.assertFalse(self.p.copy_cell.wait.isVisibleTo(self.p.copy_cell))   # подписи «после шага 1» нет
         self.assertFalse(self.p.copy_cell.scan_btn.isVisibleTo(self.p.copy_cell))
         self.assertTrue(self.p.tasks_btn.isEnabled())
+
+    def test_kinds_tags_and_edit(self):
+        """«Что копировать:» плашками (как в карточке) и «Изменить…» - окно карточки (DirectionsSection.edit); после
+        «Сохранить» страница пересчитывается, после «Отмена» - нет."""
+        import directions_section
+        self.open()
+        self.p.apply(['Друзья'], N1)
+        self.ready()
+        k = self.p.copy_cell.kinds
+        self.assertTrue(k.isVisibleTo(self.p.copy_cell))
+        self.assertEqual(k.tags, ['Фото', 'Видео', 'Документы — только рядом с фото и видео'])
+        self.assertEqual(k.note.text(), 'Настройка А1 — общая для всех носителей; уже созданные задания не меняются.')
+        self.assertEqual(k.edit_btn.text(), 'Изменить…')
+        self.assertEqual(rp.SKIP_TEXT, 'Не копируются (другой тип)')
+        for answer, refreshed in ((0, 0), (1, 1)):
+            with mock.patch.object(directions_section.DirectionsSection, 'edit', return_value=answer) as ed, \
+                    mock.patch.object(type(self.p), 'refresh') as rf:
+                k.edit_btn.click()
+            ed.assert_called_once_with(self.p.dest)
+            self.assertEqual(rf.call_count, refreshed)
+
+    def test_step2_shown_only_with_namesakes(self):
+        """Шаг 2 (по желанию) - только когда на диске назначения есть файлы с тем же именем и размером без хеша; кнопка
+        делает то же, что прежняя ссылка «отсканировать на H:»."""
+        self.open()
+        self.p.apply(['Друзья'], N1)
+        self.ready()
+        c = self.p.copy_cell
+        self.assertTrue(c.prep.isVisibleTo(c))
+        self.assertEqual(c.prep.step_texts(), {})                              # таких файлов нет - шага 2 нет
+        res = dict(self.p.nohash_result(), copies={'HDD45': dict(k=3, folders=['F'], root=0, cats=[], sample=['F\\a'])})
+        self.p.got_nohash(self.p.nh['key'], ('ok', res))
+        html_, btn = c.prep.step_texts()['HDD45']
+        self.assertIn('2. Посчитать хеш у файлов на HDD45 с тем же именем и размером', html_)
+        self.assertIn('На HDD45 лежат 3 файла', html_)
+        self.assertEqual(btn, 'Посчитать хеш на HDD45 (3)')
+        with mock.patch.object(type(self.p), 'rescan') as rs:
+            c.prep.steps[0][3].click()
+        rs.assert_called_once_with('HDD45', ['F'], None)
+        dlg = self.p.nohash_link('nh-clist:HDD45')
+        self.assertIn('F\\a', dlg.text.toPlainText())
+        dlg.close()
 
     def test_answer_for_old_state_is_ignored_and_error_shown(self):
         self.open()

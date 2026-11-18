@@ -121,7 +121,7 @@ def razbor_tasks(disk, dry=True, only=None):
             specs = [s for s in specs if s['num'] in only]
             states = [g for g in states if g['num'] in only]
         made = [(t.name, _task_meta(t)) for t in (sorted(hb.TASKS.iterdir()) if hb.TASKS.exists() else ())
-                if t.is_dir() and (t / 'разбор.json').exists()]
+                if t.is_dir() and not t.name.startswith('_') and (t / 'разбор.json').exists()]
         made = [(n_, m) for n_, m in made if m and not m.get('повтор')]
         for s in specs:
             old = next((n_ for n_, m in made if same_task(m, disk, s)), None)

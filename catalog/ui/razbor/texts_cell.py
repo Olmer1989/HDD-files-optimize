@@ -10,7 +10,7 @@ from hb_core import razbor as rz
 ONLY, EVERY, EXCEPT = 'only', 'all', 'except'             # режимы для диска назначения
 GRAY, BLUE, BLUE2, ORANGE, RED, GREEN = '#757575', '#1565c0', '#5c6bc0', '#e65100', '#c62828', '#2e7d32'
 LINK = 'color:#1565c0'
-SKIP_TEXT = 'Файлов другого типа, которые не выбраны в настройках копирования на Диск Назначения'   # правка владельца
+SKIP_TEXT = 'Не копируются (другой тип)'                  # макет владельца 18.11.2026 (прежде длинная строка)
 PLATE = {'red': ('#ffebee', RED), 'green': ('#e8f5e9', GREEN), 'orange': ('#fff3e0', ORANGE)}
 
 
@@ -203,50 +203,58 @@ def stay_numbers(P):
     return n, b
 
 
-def nohash_html(res, fast, label, copy_n, labels=None, where='', kinds=''):
-    """Строки «без хеша» ячейки (17.11.2026, решение владельца: SHA-256 у всех копируемых) - только то, что пойдёт
-    на диск. res - service.nohash_check (None - ещё считается; {'error': текст} - не посчитано); fast - быстрый
-    признак итога (файлов без хеша к записи на диски направления; 0 - точно нет); label - «H:» (или «H: и K:»);
-    copy_n - файлов «копировать»; labels(диск) - короткое имя диска для строки K; where - «Архивном диске А1 (H: …)»,
-    kinds - «Типы файлов: … — согласно настройкам А1» (texts_head.archive_where / kinds_line). -> html ('' - строк нет)."""
-    labels = labels or (lambda x: x)
-    if not copy_n and not (res and res.get('unread')):
-        return ''
-    h = []
+# «Перед копированием» ячейки (макет владельца 18.11.2026): шаг 1 - хеш на носителе (обязательно), шаг 2 - хеш у
+# файлов на диске назначения с тем же именем и размером (по желанию); «Что копировать» - плашки типов и «Изменить…».
+PREP_TITLE = 'Перед копированием'
+WAIT_STEP1 = 'станет доступно после шага 1'
+EDIT_TEXT = 'Изменить…'
+SMALL = f'color:{GRAY}; font-size:8pt'
+
+
+def kinds_note(a):
+    """Мелкая строка под плашками типов: «Настройка А1 — общая для всех носителей; …»."""
+    return f'Настройка {a} — общая для всех носителей; уже созданные задания не меняются.'
+
+
+def step1_html(res, fast, carrier, copy_n):
+    """Шаг 1 (обязательный): хеш у файлов для копирования на носителе. res - service.nohash_check (None - ещё
+    считается; {'error': текст} - не посчитано); fast - быстрый признак итога (0 - без хеша точно нет); carrier - носитель
+    («HDD09»); copy_n - файлов «копировать». -> html."""
     if res is not None and 'error' in res:
-        h.append(f'<span style="color:{ORANGE}">Без хеша: не посчитано ({esc(res["error"])}). Нажмите «Обновить».</span>')
-    elif res is None and fast:
-        h.append(f'<span style="color:{GRAY}">Без хеша: проверяю, у всех ли файлов, которые пойдут на {esc(label)}, '
-                 'есть хеш…</span>')
-    elif (res is None and not fast) or (res is not None and not res['n']):
-        if copy_n:
-            who = (f'всех {num(copy_n)} {plural(copy_n, "файла", "файлов", "файлов")}, которые пойдут' if copy_n > 1
-                   else 'файла, который пойдёт')                      # 17.11.2026: число - по просьбе владельца
-            h.append(f'<span style="color:{GREEN}">✔ У {who} на {esc(label)}, есть хеш.</span>')
-    else:
-        n, m, k = res['n'], len(res['folders']), max(res['n'], copy_n)   # 18.11.2026: вид строки - решение владельца
-        h.append(f'<span style="color:{RED}"><b>✖ Из {num(k)} {plural(k, "файла", "файлов", "файлов")}, '
-                 f'{plural(k, "которого", "которых", "которых")} нет на {esc(where or label)}, у {num(n)} нет хеша</b>'
-                 + (f' (в {num(m)} {plural(m, "папке", "папках", "папках")})' if m else '')
-                 + f'</span>{list_link("nh-list")}'
-                 + (f'<br><span style="color:{GRAY}">{esc(kinds)}.</span>' if kinds else '')
-                 + '<br>Копирование будет возможно только после того, как у них будет просчитан хеш. '
-                 f'<span style="color:{GRAY}; font-size:8pt">«Посчитать хеш» — только эти папки и только нужные типы '
-                 'файлов.</span>')
-        if res.get('root'):
-            h.append(f'<br><span style="color:{GRAY}">Из них {files_word(res["root"])} прямо в корне носителя — '
-                     'пересканирование папок корень не берёт: хеш им даст только полное сканирование носителя.</span>')
-    if res and res.get('unread'):
-        u = len(res['unread'])
-        h.append(f'<br><span style="color:{ORANGE}">Не прочитаны при пересканировании: {files_word(u)} — не '
-                 f'копируются (остальные копируются)</span>{list_link("nh-unread")}')
-    for x, k in sorted(((res or {}).get('copies') or {}).items()):
-        if k['k']:
-            h.append(f'<br><span style="color:{ORANGE}">На {esc(labels(x))} у {num(k["k"])} '
-                     f'{plural(k["k"], "возможной копии", "возможных копий", "возможных копий")} нет хеша (то же имя и '
-                     'размер)</span>'
-                     + (f' — <a href="nh-copies:{esc(x)}" style="{LINK}">отсканировать на {esc(labels(x))}</a>'
-                        if k['folders'] else '')
-                     + (f' <span style="color:{GRAY}">(в корне диска {num(k["root"])} — только полным '
-                        'сканированием)</span>' if k.get('root') else ''))
-    return ''.join(h).removeprefix('<br>')
+        return f'<span style="color:{ORANGE}"><b>1. Хеш: не посчитано ({esc(res["error"])}).</b> Нажмите «Обновить».</span>'
+    if res is None and fast:
+        return f'<span style="color:{GRAY}">○ 1. Хеш: идёт проверка — у всех ли файлов для копирования он есть…</span>'
+    if res is None or not res['n']:
+        return f'<span style="color:{GREEN}"><b>✓ 1. Хеш есть у всех файлов для копирования</b></span>'
+    n, k = res['n'], max(res['n'], copy_n)
+    h = (f'<span style="color:{RED}"><b>✖</b></span> <b>1. Посчитать хеш на {esc(carrier)} — '
+         f'<span style="color:{RED}">обязательно</span></b><br>'
+         f'У {num(n)} из {num(k)} {plural(k, "файла", "файлов", "файлов")} для копирования нет хеша. Без него копию '
+         f'нельзя проверить. <a href="nh-list:" style="{LINK}">Какие файлы</a>')
+    if res.get('root'):
+        h += (f'<br><span style="{SMALL}">Из них {files_word(res["root"])} прямо в корне носителя — пересканирование '
+              'папок корень не берёт: хеш им даст только полное сканирование носителя.</span>')
+    return h
+
+
+def step2_html(no, x, label, k):
+    """Шаг no (по желанию) для диска назначения x («H:» - label): k - nohash_check()['copies'][x]. -> html."""
+    n = k['k']
+    h = (f'<span style="color:{GRAY}">○</span> <b>{no}. Посчитать хеш у файлов на {esc(label)} с тем же именем и '
+         f'размером — <span style="color:{GRAY}">по желанию</span></b><br>'
+         f'На {esc(label)} {plural(n, "лежит", "лежат", "лежат")} {files_word(n)} с теми же именами и размерами, что у '
+         'файлов для копирования, но без хеша. Если посчитать их хеш, часть файлов может оказаться «уже есть» и не '
+         'скопируется второй раз.')
+    if k.get('sample'):
+        h += f' <a href="nh-clist:{esc(x)}" style="{LINK}">Какие файлы</a>'
+    if k.get('root'):
+        h += f'<br><span style="{SMALL}">В корне диска {files_word(k["root"])} — только полным сканированием.</span>'
+    return h
+
+
+def unread_html(res):
+    """Строка «Не прочитаны при пересканировании» (под шагами) или ''."""
+    if not (res and res.get('unread')):
+        return ''
+    return (f'<span style="color:{ORANGE}">Не прочитаны при пересканировании: {files_word(len(res["unread"]))} — не '
+            f'копируются (остальные копируются)</span>{list_link("nh-unread")}')

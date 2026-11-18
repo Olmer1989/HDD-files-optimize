@@ -15,8 +15,10 @@ import service as sv
 
 from .common import (BLOCK_LOOK, BUSY_CSS, C_NAME, DEBOUNCE_MS, DISKS_WORDS, HEAD_BG, MIME, ROLE, SHORT_BG, UNKNOWN_BG,
                      mime_folders)
-from .texts_cell import ORANGE, RED, cell_numbers, dest_cell_html, disk_block_html, esc, files_word, nohash_html
-from .texts_head import archive_where, copies_word, hdds, kinds_line, short_place
+from .cell_parts import KindsRow, PrepBox
+from .texts_cell import (ORANGE, RED, WAIT_STEP1, cell_numbers, dest_cell_html, disk_block_html, esc, files_word,
+                         step1_html, step2_html, unread_html)
+from .texts_head import copies_word, hdds, short_place
 
 START_TEXT = 'Начать копирование…'                # 18.11.2026 (решение владельца; прежде «Подготовить задания…»)
 
@@ -53,6 +55,9 @@ class Cell(QFrame):
         self.sub.setFont(f2)
         self.sub.setWordWrap(True)
         lay.addWidget(self.sub)
+        self.kinds = KindsRow(page.edit_kinds)            # «Что копировать:» плашками и «Изменить…» (18.11.2026)
+        self.kinds.hide()
+        lay.addWidget(self.kinds)
         self.body = QLabel('')
         self.body.setWordWrap(True)
         self.body.setTextFormat(Qt.RichText)
@@ -67,23 +72,21 @@ class Cell(QFrame):
         self.blocks = []                                  # [[диск, QFrame, QLabel, состояние]]
         self.blocks_box.hide()
         lay.addWidget(self.blocks_box)
-        # «Без хеша» (17.11.2026): только то, что пойдёт на диск; кнопка «Посчитать хеш (N)» - слева от «Начать копирование…»
-        self.nohash = QLabel('')
-        self.nohash.setWordWrap(True)
-        self.nohash.setTextFormat(Qt.RichText)
-        self.nohash.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
-        self.nohash.linkActivated.connect(page.nohash_link)
-        self.nohash.hide()
-        lay.addWidget(self.nohash)
+        # «Перед копированием» (макет владельца 18.11.2026): шаг 1 - хеш на носителе (кнопка «Посчитать (N)»), шаги 2… -
+        # хеш у файлов с тем же именем и размером на дисках назначения; nohash - текст шага 1 (прежнее имя)
+        self.prep = PrepBox(page)
+        self.prep.hide()
+        lay.addWidget(self.prep)
+        self.nohash, self.scan_btn = self.prep.step1, self.prep.scan_btn
         lay.addStretch(1)
-        self.btn = self.scan_btn = None
+        self.btn = self.wait = None
         if drop:
             row = QHBoxLayout()
             row.addStretch(1)
-            self.scan_btn = QPushButton('Посчитать хеш')
-            self.scan_btn.clicked.connect(lambda: page.scan_nohash())
-            self.scan_btn.hide()
-            row.addWidget(self.scan_btn)
+            self.wait = QLabel(WAIT_STEP1)                # «станет доступно после шага 1» - мелко серым у кнопки
+            self.wait.setStyleSheet('color:#757575; font-size:8pt')
+            self.wait.hide()
+            row.addWidget(self.wait)
             self.btn = QPushButton(START_TEXT)
             self.btn.clicked.connect(lambda: page.prepare())
             row.addWidget(self.btn)
@@ -190,6 +193,7 @@ class CellView:
             c.title.setText('Копировать на диск')
             c.sub.setText('')
             c.set_blocks([])
+            c.kinds.hide()
             c.body.setText(f'<span style="color:{ORANGE}">Диска назначения нет: назначьте диск направлению на вкладке «Назначить Архивный диск».'
                            '</span>')
             c.paint('#9e9e9e', '#fafafa')
@@ -203,6 +207,9 @@ class CellView:
             else:
                 c.title.setText('Копировать на диск ' + short_place(by.get(d.disks[0]), d.disks[0]))
             c.sub.setText(f'<span style="color:{ORANGE}"><b>{esc(d.name)}</b></span>, {esc(hdds(d))}')
+            c.kinds.show_kind(d.kind, show_num(d.num))
+            c.kinds.edit_btn.setEnabled(not self.writing)
+            c.kinds.show()
             label = lambda x: (by.get(x) or {}).get('letter') or x                 # noqa: E731 - «H:» или «HDD45»
             html_, state = dest_cell_html(d, plan, cap, self.mode(), sel, exc, label, split=many)
             c.body.setText(html_)
@@ -230,11 +237,13 @@ class CellView:
                and any(plan.group_state(g) == rz.G_COPY for g, x in plan.groups.items() if x['num'] == d.num))
         c.btn.setEnabled(can and hash_ok)
         c.btn.setText(START_TEXT)
+        c.wait.setVisible(bool(can and not hash_ok))      # «станет доступно после шага 1»
         if d is None:
             tip = ''
         elif can and not hash_ok:
-            tip = ('Сначала хеш: у ' + files_word(nh['n']) + ', которые пойдут на диск, его нет - нажмите «Посчитать '
-                   'хеш» слева.' if nh and 'n' in nh else 'Проверяю, у всех ли файлов, которые пойдут на диск, есть хеш…')
+            tip = ('Сначала хеш: у ' + files_word(nh['n']) + ', которые пойдут на диск, его нет - шаг 1 «Перед '
+                   'копированием», кнопка «Посчитать».' if nh and 'n' in nh else
+                   'Проверяю, у всех ли файлов, которые пойдут на диск, есть хеш…')
         elif state == 'short':
             tip = 'Не помещается: снимите галочки у части папок.'
         elif not can and plan is not None:
@@ -246,29 +255,39 @@ class CellView:
         self.render_missing()                             # 18.11.2026: «нет на H:» - вместе с ячейкой
 
     def render_nohash(self, d, plan):
-        """Строки «без хеша» и кнопка «Отсканировать эти папки» (17.11.2026). -> (хеш у всех копируемых, ответ).
-        Быстрый признак итога: файлов без хеша к записи на диски направления нет - хеш точно у всех; иначе - по ответу
-        service.nohash_check (для этой ревизии, носителя и направления)."""
+        """Рамка «Перед копированием» (макет владельца 18.11.2026): шаг 1 - хеш у файлов для копирования (кнопка
+        «Посчитать (N)»), шаги 2… - хеш у файлов на дисках назначения с тем же именем и размером (по желанию). Числа - по
+        текущему ответу. -> (хеш у всех копируемых, ответ). Быстрый признак итога: файлов без хеша к записи на диски
+        направления нет - хеш точно у всех; иначе - по ответу service.nohash_check (для этой ревизии и направления)."""
         c = self.copy_cell
         self.run_nohash()                                 # для этой ревизии и направления - один раз (в фоне)
         nh = self.nohash_result()
-        if d is None or plan is None:
-            c.nohash.hide()
+        copy_n = cell_numbers(d, plan)['copy'][0] if d is not None and plan is not None else 0
+        ok = bool(d is not None and plan is not None)
+        fast = sum(plan.unhashed_copy.get(x, (0, 0))[0] for x in d.disks if x != plan.disk) if ok else 0
+        ok = ok and (not fast or bool(nh and 'n' in nh and not nh['n']))
+        if not copy_n:                                    # копировать нечего - рамки нет
+            c.prep.hide()
             c.scan_btn.hide()
-            return False, nh
-        fast = sum(plan.unhashed_copy.get(x, (0, 0))[0] for x in d.disks if x != plan.disk)
-        by = {r['disk']: r for r in self.disk_rows}
-        label = lambda x: (by.get(x) or {}).get('letter') or x                     # noqa: E731
-        html_ = nohash_html(nh, fast, ' и '.join(label(x) for x in d.disks if x != plan.disk) or 'диск',
-                            cell_numbers(d, plan)['copy'][0], label, kinds=kinds_line(d),
-                            where=archive_where(d, self.disk_rows, plan.disk, self.plan[1] if self.plan else None))
-        c.nohash.setText(html_)
-        c.nohash.setVisible(bool(html_))
-        ok = not fast or bool(nh and 'n' in nh and not nh['n'])
+            return ok, nh
+        c.nohash.setText(step1_html(nh, fast, plan.disk, copy_n))
+        steps = []
+        for x, k in sorted(((nh or {}).get('copies') or {}).items()):
+            if k['k'] and 'error' not in nh:
+                lab = self.disk_label(x)
+                steps.append((x, step2_html(len(steps) + 2, x, lab, k), f'Посчитать хеш на {lab} ({k["k"]})',
+                              bool(k['folders']) and not self.writing,
+                              f'Пересканировать с хешем папки на {lab} с файлами того же имени и размера.'
+                              if k['folders'] else 'Эти файлы лежат в корне диска - только полным сканированием.'))
+        c.prep.set_steps(steps)
+        extra = unread_html(nh)
+        c.prep.extra.setText(extra)
+        c.prep.extra.setVisible(bool(extra))
+        c.prep.show()
         show = bool(nh and nh.get('n') and nh.get('folders'))
         c.scan_btn.setVisible(show)
         if show:
-            c.scan_btn.setText(f'Посчитать хеш ({nh["n"]})')
+            c.scan_btn.setText(f'Посчитать ({nh["n"]})')
             c.scan_btn.setToolTip(f'Пересканировать с хешем только папки с файлами без хеша, которые пойдут на диск '
                                   f'({len(nh["folders"])}), и только их типы файлов: ' + ', '.join(nh['cats']) +
                                   '. Сначала окно покажет, сколько прочитать.')

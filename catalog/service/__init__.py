@@ -34,6 +34,7 @@ from .write import (SEP, ACTIONS, VERDICT_RE, DATE_RE, BACKUPS_KEEP, Refused, Ta
 from .directions_v3 import (KIND_WORDS, DEFAULT_DIRECTIONS, _read_snapshot, snapshot, directions, _ensure_directions,
     _norm_kind, direction_preview, add_direction, directions_batch_preview, add_directions_batch)
 from .jobs import running_scripts, task_state, tasks, MOVE_MARK, mark_task_move
+from .jobs_cancel import CANCEL_DIR, CANCEL_LOG, CANCEL_STATES, can_cancel, cancel_tasks
 from .read_disks import (generation, base_info, volumes, disks, EV_COLS, TASK_ATTENTION, direction_disks,
     _unique_from_list, overview, attention, folder_mark, folder_children, folder_missing, rescans_text)
 from .read_hash import (TYPE5, type5, NOHASH_SQL, nohash_info, disk_hash_info, folder_presence, _day, _log_day, _n,

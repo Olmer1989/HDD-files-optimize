@@ -329,10 +329,11 @@ class DirectionsSection(QFrame):
         DirectionDialog(self, self.data, None).exec()
 
     def edit(self, num_):
-        """Только карточка: имя, «что собирается», «что копировать». Диски не показываются и не меняются."""
+        """Только карточка: имя, «что собирается», «что копировать». Диски не показываются и не меняются. -> итог окна
+        (QDialog.Accepted - сохранено; «Изменить…» на «Выбор источников» после него пересчитывает страницу)."""
         if self.data is None or num_ not in self.data['dirs']:
-            return
-        DirectionDialog(self, self.data, self.data['dirs'][num_], mode=CARD).exec()
+            return None
+        return DirectionDialog(self, self.data, self.data['dirs'][num_], mode=CARD).exec()
 
     def assign(self, num_):
         """Первое назначение диска - только направлению без диска (смены диска в окне нет)."""

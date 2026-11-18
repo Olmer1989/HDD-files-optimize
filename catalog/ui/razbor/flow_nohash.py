@@ -16,6 +16,8 @@ from .dialogs import TextDialog
 from .texts_hash import ALREADY
 from .texts_cell import esc, files_word, num
 
+OVERVIEW = 'Назначить Архивный диск'                     # вкладка с карточками архивных дисков (окно «Изменить»)
+
 
 def visible(dlg):
     """Окно ещё открыто (уже удалённое Qt-окно - не открыто)."""
@@ -91,6 +93,21 @@ class NohashFlow:
         dlg.finished.connect(lambda *_: self.refresh())      # новая опись - дерево и итог заново
         dlg.show()
 
+    def edit_kinds(self):
+        """«Изменить…» у плашек «Что копировать» (18.11.2026): то же окно, что «Изменить» в карточке на вкладке
+        «Назначить Архивный диск» (DirectionsSection.edit); после «Сохранить» - страница заново. -> сохранено ли."""
+        ov = self.win.page(OVERVIEW) if hasattr(self.win, 'page') else None
+        sec = getattr(ov, 'dirs', None)
+        if sec is None or self.writing or not self.dest:
+            return False
+        if not sec.data or self.dest not in sec.data['dirs']:
+            self.win.statusBar().showMessage('Настройки архивных дисков ещё читаются — повторите через секунду.', 6000)
+            return False
+        if not sec.edit(self.dest):                       # отменено (QDialog.Rejected = 0)
+            return False
+        self.refresh()                                    # «что копировать» сменилось - итог и ячейка заново
+        return True
+
     def hash_check_args(self):
         """Повторная проверка «без хеша» после подсчёта: (носитель, направление, черновик отметок) или None."""
         if not self.dest:
@@ -114,7 +131,14 @@ class NohashFlow:
             if k and k['folders'] and not self.writing:
                 self.rescan(x, k['folders'], k['cats'] or None)
             return None
-        if kind == 'nh-list':
+        if kind == 'nh-clist':                            # шаг 2: файлы на диске назначения с тем же именем и размером
+            k = (nh.get('copies') or {}).get(x) or {}
+            shown, n = k.get('sample') or [], k.get('k', 0)
+            title = f'То же имя и размер, без хеша - {self.disk_label(x)}'
+            body = (f'<p><b>{files_word(n)}</b> на {esc(self.disk_label(x))} без хеша — с теми же именами и размерами, '
+                    'что у файлов для копирования.' + (f' Показаны первые {num(len(shown))}.' if len(shown) < n else '')
+                    + '</p><ul>' + ''.join(f'<li>{esc(p)}</li>' for p in shown) + '</ul>')
+        elif kind == 'nh-list':
             title, body = f'Без хеша - {self.disk}', self.nohash_list_html(nh)
         elif kind == 'nh-unread':
             title, bad = f'Не прочитаны при пересканировании - {self.disk}', nh['unread']

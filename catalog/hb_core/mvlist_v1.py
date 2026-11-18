@@ -25,7 +25,7 @@ def _task_dirs():
         for d in sorted(root.iterdir()):
             if d.name in OLD_LOGS or d.name in FOLDER_MOVES:
                 continue                     # старые скрипты 11-12.11: журнал другого вида, учтён сборкой как Z
-            if d.is_dir() and (d / 'тома.tsv').exists() and d.resolve() not in seen:
+            if d.is_dir() and not d.name.startswith('_') and (d / 'тома.tsv').exists() and d.resolve() not in seen:
                 seen.add(d.resolve())
                 res.append(d)
     return res
