@@ -3,14 +3,26 @@
 
 Ответ принимается только для той ревизии итога, носителя и направления, для которых считался (правка отметок, смена
 направления, новые данные после пересканирования - новая ревизия или направление - считается заново)."""
+from PySide6.QtWidgets import QMessageBox
+
 from hb_core import razbor as rz
 from hb_core.razbor_scope import SHOW_MAX
 
 import service as sv
 
-from .common import safe
+from . import dialog_hash
+from .common import TITLE, safe
 from .dialogs import TextDialog
+from .texts_hash import ALREADY
 from .texts_cell import esc, files_word, num
+
+
+def visible(dlg):
+    """Окно ещё открыто (уже удалённое Qt-окно - не открыто)."""
+    try:
+        return bool(dlg.isVisible())
+    except (RuntimeError, AttributeError):
+        return False
 
 
 class NohashFlow:
@@ -57,10 +69,38 @@ class NohashFlow:
         return cur['res'] if cur and key and cur['key'] == key else None
 
     def scan_nohash(self):
-        """«Отсканировать эти папки»: окно пересканирования носителя - папки файлов без хеша и только их типы."""
+        """«Посчитать хеш (N)»: своё короткое окно (18.11.2026, dialog_hash) - папки файлов без хеша и только их типы.
+        Уже идёт пересканирование - сообщение; окно уже открыто (в любом состоянии) - поднимается, второе не
+        открывается; окно - в win.rescan, по закрытию - refresh."""
         nh = self.nohash_result()
-        if nh and nh.get('folders') and not self.writing:
-            self.rescan(self.disk, nh['folders'], nh['cats'])
+        if not (nh and nh.get('folders') and not self.writing):
+            return
+        old = getattr(self.win, 'rescan', None)
+        if old is not None and (getattr(old, 'running', False) or visible(old)):
+            if getattr(old, 'running', False):                 # идёт сканирование - прежнее сообщение
+                QMessageBox.information(self, TITLE, ALREADY)
+            old.raise_()                                       # окно уже открыто - поднять его, второе не открывать
+            old.activateWindow()
+            return
+        P = self.plan[0] if self.plan else None
+        d = P.dirs.get(self.dest) if P is not None else None
+        target = ' и '.join(self.disk_label(x) for x in d.disks if x != self.disk) if d is not None else ''
+        dlg = dialog_hash.HashDialog(self.win, self.disk, nh, target or 'диск назначения', self.hash_check_args,
+                                     self.nohash_list_html, self.show_text)
+        self.win.rescan = dlg
+        dlg.finished.connect(lambda *_: self.refresh())      # новая опись - дерево и итог заново
+        dlg.show()
+
+    def hash_check_args(self):
+        """Повторная проверка «без хеша» после подсчёта: (носитель, направление, черновик отметок) или None."""
+        if not self.dest:
+            return None
+        return self.disk, self.dest, list(self.model.draft_rows()) if self.model is not None else []
+
+    def show_text(self, title, body):
+        self._nh_dlg = TextDialog(self, title, body, width=1000, height=600)
+        self._nh_dlg.show()
+        return self._nh_dlg
 
     def nohash_link(self, href):
         """Ссылки строк «без хеша»: nh-list (файлы без хеша), nh-unread (не прочитаны), nh-copies:<диск> (окно
@@ -85,9 +125,7 @@ class NohashFlow:
                     + '</ul>')
         else:
             return None
-        self._nh_dlg = TextDialog(self, title, body, width=1000, height=600)
-        self._nh_dlg.show()
-        return self._nh_dlg
+        return self.show_text(title, body)
 
     def nohash_list_html(self, nh):
         shown = nh['sample']

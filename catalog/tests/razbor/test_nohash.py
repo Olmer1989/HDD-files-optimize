@@ -35,8 +35,9 @@ class NohashCellTest(PageBase):
         made = []
 
         class FakeDlg:
-            def __init__(self, win, disk, folders, cats=None):
-                made.append((disk, list(folders), cats))
+            def __init__(self, win, disk, nh, target, check, list_html, show):
+                made.append((disk, list(nh['folders']), nh['cats']))
+                self.args = check()
                 self.running = False
                 from PySide6.QtCore import QObject, Signal
 
@@ -47,9 +48,10 @@ class NohashCellTest(PageBase):
 
             def show(self):
                 pass
-        with mock.patch('rescan_dialog.RescanDialog', FakeDlg):
+        with mock.patch('ui.razbor.dialog_hash.HashDialog', FakeDlg):          # своё окно (18.11.2026)
             cell.scan_btn.click()
         self.assertEqual(made, [(SRC, ['Поход 2010'], [hb.CAT_DOC])])
+        self.assertEqual(self.p.win.rescan.args[:2], (SRC, self.p.dest))               # повторная проверка - то направление
         dlg = self.p.nohash_link('nh-list:')
         self.assertIn('Поход 2010\\описание.doc', dlg.text.toPlainText())
         dlg.close()

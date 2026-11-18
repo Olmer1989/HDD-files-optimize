@@ -18,8 +18,9 @@ from test_modules import imports, top        # noqa: E402
 # Экраны по блокам (шаг А разбивки 17.11.2026, docs/СТРУКТУРА_ПРОГРАММЫ.md): ранги слоёв каждого пакета ui/<экран>
 # (view_*, flow_* - 6). Файл пакета импортирует из пакета только файлы СТРОГО ниже рангом: view_* и flow_* друг друга не
 # импортируют. Новый пакет ui/* без строки здесь - ошибка test_ui_layers.
-UI_RANK = {'razbor': {'texts_cell': 0, 'common': 1, 'texts_tasks': 1, 'texts_start': 1, 'texts_head': 2, 'model_marks': 3, 'model_checks': 3,
-                      'model_show': 3, 'model': 4, 'dialogs': 5, 'dialog_start': 5, 'page': 7},
+UI_RANK = {'razbor': {'texts_cell': 0, 'common': 1, 'texts_tasks': 1, 'texts_start': 1, 'texts_hash': 1, 'texts_head': 2, 'model_marks': 3, 'model_checks': 3,
+                      'model_show': 3, 'model': 4, 'dialogs': 5, 'dialog_start': 5, 'dialog_hash': 5,
+                      'page': 7},
            'filelist': {'texts_list': 0, 'common': 1, 'model_rows': 2, 'model_table': 3, 'page': 7},
            'tasks': {'common': 0, 'texts_words': 1, 'texts_rows': 2, 'model_journal': 3, 'model_rules': 3,
                      'model_run': 3, 'model_move': 3, 'model_load': 4, 'widgets': 5, 'page': 7},
@@ -196,17 +197,17 @@ SHIM_NAMES = {
         summary sv task_disks time what_where
     ''',
     'disks_page': '''
-        Background CARD_CSS C_NOHASH DEC_COLORS DISK_GROUPS DISK_HEAD DISK_ROLE DISK_TIPS DiskTable
-        DisksPage FolderDelegate GROUP_TIPS HANG_DUMP_S HANG_GAP_S HANG_LOG HEAD_BREAKS HtmlLabel Job
-        MARK_ROLE NEED_DISK OverviewPage Path QAbstractItemView QApplication QColor QFont QFontMetrics
-        QFrame QGridLayout QHBoxLayout QHeaderView QLabel QLineEdit QListWidget QMainWindow QMessageBox
-        QObject QPainter QPushButton QRectF QRunnable QScrollArea QSize QSplitter QStackedWidget QStyle
-        QStyledItemDelegate QTableWidget QTableWidgetItem QTextDocument QThreadPool QTimer QTreeWidget
-        QTreeWidgetItem QVBoxLayout QWidget Qt RED SCAN_RU SIZE_ROLE SLOW_S STEPS STEP_NOW STEP_OTHER
-        STEP_RAZBOR Signal StepPlate StepsBar TITLE TODO_LINE TYPES_ROLE TYPE_COLORS TYPE_NAMES T_CHECK
-        T_DEC T_FILES T_GB T_NAME T_NOHASH T_TYPE0 UNIQUE_NOTE WHY_TEXT Watchdog _Signals attention_html
-        card cell commands_page disk_cell disk_rows disk_table_html disk_ui explorer_page files_word gb_ru
-        gib hang_log hb html_esc log_error n_ru nohash_html os rescan_dialog rescan_tip scan_text
+        Background CARD_CSS C_NOHASH DEC_COLORS DISK_GROUPS DISK_HEAD DISK_ROLE DISK_TIPS DiskTable
+        DisksPage FolderDelegate GROUP_TIPS HANG_DUMP_S HANG_GAP_S HANG_LOG HEAD_BREAKS HtmlLabel Job
+        MARK_ROLE NEED_DISK OverviewPage Path QAbstractItemView QApplication QColor QFont QFontMetrics
+        QFrame QGridLayout QHBoxLayout QHeaderView QLabel QLineEdit QListWidget QMainWindow QMessageBox
+        QObject QPainter QPushButton QRectF QRunnable QScrollArea QSize QSplitter QStackedWidget QStyle
+        QStyledItemDelegate QTableWidget QTableWidgetItem QTextDocument QThreadPool QTimer QTreeWidget
+        QTreeWidgetItem QVBoxLayout QWidget Qt RED SCAN_RU SIZE_ROLE SLOW_S STEPS STEP_NOW STEP_OTHER
+        STEP_RAZBOR Signal StepPlate StepsBar TITLE TODO_LINE TYPES_ROLE TYPE_COLORS TYPE_NAMES T_CHECK
+        T_DEC T_FILES T_GB T_NAME T_NOHASH T_TYPE0 UNIQUE_NOTE WHY_TEXT Watchdog _Signals attention_html
+        card cell commands_page disk_cell disk_rows disk_table_html disk_ui explorer_page files_word gb_ru
+        gib hang_log hb html_esc log_error n_ru nohash_html os rescan_dialog rescan_tip scan_text
         shown_disks sv sys table time timed todo_html todo_items traceback type_text unique_li
     ''',
 }
